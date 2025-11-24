@@ -47,7 +47,7 @@ class JobProcessor(Runnable):
         inputs = [input] if isinstance(input, str) else input
         self.byhand = config['metadata'].get('byhand', False)
         self.force = config['metadata'].get('force', False)
-        
+        self.mode = config['metadata'].get('mode', '5et')
         if self.byhand:
             # 手动模式，串行执行
             self.thread_num = 1
@@ -88,7 +88,7 @@ class JobProcessor(Runnable):
                     logger.error(f'写出 failed_jobs 文件失败: {e}')
 
                 if len(failed) > 0:
-                    print(f"以下 {len(failed)} 个 Job 处理失败，已保存到: {failed_path}")
+                    logger.warning(f"以下 {len(failed)} 个 Job 处理失败，已保存到: {failed_path}")
                     for j in failed:
                         last = j.last_answer if hasattr(j, 'last_answer') else ''
                         last_short = last if not isinstance(last, str) else (last[:200] + '...' if len(last) > 200 else last)
@@ -96,7 +96,7 @@ class JobProcessor(Runnable):
                     print('\n可用下面命令快速重试这些失败的Job (示例)：')
                     print(f"python3 main.py retry-failed --file \"{failed_path}\" --thread_num {self.thread_num} --byhand {self.byhand} --force {self.force}")
                 else:
-                    print('没有记录到被丢弃的失败 Job。')
+                    logger.info('没有记录到被丢弃的失败 Job。')
             yield res
             
     def __init_dictionary(self):
@@ -214,23 +214,24 @@ class JobProcessor(Runnable):
 
         return self.dictionary.get(en, tag=tag)
 
+    def __process_value(self, value, tag=""):
+        """
+        处理单个值，进行前缀、后缀检查和翻译替换
+        """
+    # if just_validate:
+    #     return value
+        if need_translate_str(value):
+            value_without_prefix, prefix = check_prefix(value)
+            value_pure, suffix = check_suffix(value_without_prefix)
+            new_value, ok = self.__get(value_pure,tag)
+            if ok and new_value is not None:
+                return f'{prefix}{new_value}{suffix}', True
+            else:
+                return value, False
+        return value, True
     def __replace_sub_jobs(self, cn_str: str, en_str: str|None = None, tag = ""):
         # print(cn_str)
-        def process_value(value, tag=""):
-            """
-            处理单个值，进行前缀、后缀检查和翻译替换
-            """
-        # if just_validate:
-        #     return value
-            if need_translate_str(value):
-                value_without_prefix, prefix = check_prefix(value)
-                value_pure, suffix = check_suffix(value_without_prefix)
-                new_value, ok = self.__get(value_pure,tag)
-                if ok and new_value is not None:
-                    return f'{prefix}{new_value}{suffix}', True
-                else:
-                    return value, False
-            return value, True
+
         
         
         processed = False
@@ -246,7 +247,7 @@ class JobProcessor(Runnable):
         # 初筛
         if "{@" in cn_str:
             # 初筛，包含@{的，需要继续处理
-            p_v, ok = process_value(en_str)
+            p_v, ok = self.__process_value(en_str)
             if ok:
                 cn_str = p_v
             processed = True
@@ -282,7 +283,7 @@ class JobProcessor(Runnable):
                 if (len(filter_values) > 2):
                     # 正常至少有3个值
                     cv_page = filter_values[1]
-                    cv_name, _ = process_value(filter_values[0], tag=cv_page)
+                    cv_name, _ = self.__process_value(filter_values[0], tag=cv_page)
                     if cv_page == "bestiary":
                         cv_conditions = []
                         for eev in filter_values[2:]:
@@ -293,14 +294,14 @@ class JobProcessor(Runnable):
                                 # 锁定tag
                                 cv_conditions.append(eev)
                             else:
-                                ccv, _ = process_value(eev)
+                                ccv, _ = self.__process_value(eev)
                                 cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
                     elif cv_page in ["items", "spells", "optionalfeatures", "races"]:
                         cv_conditions = []
                         for eev in filter_values[2:]:
-                            ccv, _ = process_value(eev)
+                            ccv, _ = self.__process_value(eev)
                             cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
@@ -315,14 +316,14 @@ class JobProcessor(Runnable):
                 if "{@" in eev and ccv is not None and ccv != eev:
                     res_split.append(ccv)
                 else:
-                    p_v, ok = process_value(eev, tag=tag)
+                    p_v, ok = self.__process_value(eev, tag=tag)
                     if ok or ccv is None:
                         res_split.append(p_v)
                     else:
                         res_split.append(ccv)
             cn_str = '|'.join(res_split)
         elif processed == False:
-            p_v, ok = process_value(en_str, tag = tag)
+            p_v, ok = self.__process_value(en_str, tag = tag)
             if ok:
                 cn_str = p_v
         return cn_str, True
@@ -348,6 +349,13 @@ class JobProcessor(Runnable):
         job_path = json_path + ".jobs"
         if not (os.path.exists(json_path) and os.path.exists(job_path)):
             return False
+        if self.mode == 'homebrew':
+            # 删除原始文件
+            os.remove(json_path)
+            # 替换文件名中的字段
+            eng_name = json_path.split(';')[-1].strip()[:-5]
+            cn_name, _ = self.__process_value(eng_name)
+            json_path = json_path.replace(f'; {eng_name}', f'; {cn_name}')
         try:
             with open(json_path, "w") as file:
                 file.write(json.dumps(new_obj, ensure_ascii=False, indent=2))
@@ -371,7 +379,7 @@ class JobProcessor(Runnable):
         """
         if isinstance(obj, str):
             # 通过uuid替换指定的job
-            pattern = r'\[!@ ([^\]]+)\]'
+            pattern = r'\{!@ ([^\}]+)\}'
             matches = re.findall(pattern, obj)
             if len(matches) > 0:
                 for job_id in matches:
@@ -379,7 +387,7 @@ class JobProcessor(Runnable):
                         if j.uid == job_id:
                             j.cn_str, ok = self.__replace_sub_jobs(
                                 j.cn_str, j.en_str, tag=j.tag)
-                            obj = obj.replace(f'[!@ {job_id}]', j.cn_str)
+                            obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)
                             break
 
                 return obj, True

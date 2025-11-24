@@ -2,11 +2,11 @@ import json
 from config import *
 
 class Job:
-    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, sql_id=None, modified_at=0) -> (None):
+    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, sql_id=None, modified_at=0, source="") -> (None):
         self.uid = str(uid)
-        self.en_str = en_str
-        self.cn_str = cn_str
-        self.rel_path = rel_path
+        self.en_str = en_str # 英文原文
+        self.cn_str = cn_str # 中文译文
+        self.rel_path = rel_path # 所属文件路径
         if tag is None:
             self.tag = ""
         else:

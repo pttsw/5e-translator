@@ -2,7 +2,7 @@ import json
 import uuid
 import os
 from typing import List
-from config import  EN_PATH, PLU_EN_PATH, SKIP_FILES, SKIP_DIRS, logger, SPLITED_5ETOOLS_DATA_DIR
+from config import  EN_PATH, PLU_EN_PATH, SKIP_FILES, SKIP_DIRS, logger, SPLITED_5ETOOLS_EN_PATH, HOMEBREW_EN_PATH
 from app.core.utils import read_file, get_rel_path, FileWorkInfo, Job
 from app.core.database import DBDictionary
 from langchain_core.runnables import Runnable
@@ -20,7 +20,7 @@ class JsonAnalyser(Runnable):
             return
         self.knowledge = None
         self.byhand = False
-        self.splited = False # 是否是处理拆分后的数据
+        self.mode = '5et' # 是否是处理拆分后的数据
 
     def __init_dictionary(self):
         """
@@ -31,10 +31,25 @@ class JsonAnalyser(Runnable):
 
     def invoke(self, input, config=None, **kwargs):
         inputs = [input] if isinstance(input, str) else input
-        self.splited = config['metadata'].get('splited', False)
+        self.mode = config['metadata'].get('mode', '5et')
         
         # print(config)
         for j in inputs:
+            if self.mode == '5et':
+                # 判断j是否在EN_PATH下的文件
+                if not j.startswith(EN_PATH):
+                    logger.error(f"JsonAnalyser: 文件{j}不在{EN_PATH}目录下，跳过处理")
+                    continue
+            elif self.mode == 'splited':
+                # 判断j是否在SPLITED_5ETOOLS_DATA_DIR下的文件
+                if not j.startswith(SPLITED_5ETOOLS_EN_PATH):
+                    logger.error(f"JsonAnalyser: 文件{j}不在{SPLITED_5ETOOLS_EN_PATH}目录下，跳过处理")
+                    continue
+            elif self.mode == 'homebrew':
+                if not j.startswith(HOMEBREW_EN_PATH):
+                    logger.error(f"JsonAnalyser: 文件{j}不在{HOMEBREW_EN_PATH}目录下，跳过处理")
+                    continue
+                
             logger.info(f"开始解析{j}中的Json")
             job_list, obj, ok = self.json_2_job(j)
             if not ok:
@@ -42,12 +57,8 @@ class JsonAnalyser(Runnable):
                 continue
             if job_list is None or len(job_list) == 0 or obj is None:
                 continue
-            # for job in job_list:
-            #     if not job.validate():
-            #         logger.error(f"JsonAnalyser: 分析{j}时出错，Job不合法")
-            #         continue
-            if self.splited:
-                yield FileWorkInfo(job_list, obj, self.rel_path, get_rel_path(j, SPLITED_5ETOOLS_DATA_DIR))
+            if self.mode == 'splited': 
+                yield FileWorkInfo(job_list, obj, self.rel_path, get_rel_path(j, SPLITED_5ETOOLS_EN_PATH))
             else:
                 yield FileWorkInfo(job_list, obj, self.rel_path, self.rel_path)
 
@@ -73,7 +84,7 @@ class JsonAnalyser(Runnable):
         # 获取相对路径，这个路径会根据是否是PLU的源数据来做不同的处理
         if is_plu:
             self.rel_path = get_rel_path(json_file, PLU_EN_PATH)
-        elif self.splited:
+        elif self.mode == 'splited':
             en_json_obj, ok = self.txt_2_json(read_file(json_file))
             if not ok:
                 return None, None, False
@@ -82,6 +93,8 @@ class JsonAnalyser(Runnable):
             if "_meta" not in en_json_obj or "origin_file" not in en_json_obj["_meta"]:
                 return None, None, True
             self.rel_path = en_json_obj["_meta"]["origin_file"]
+        elif self.mode == 'homebrew':
+            self.rel_path = get_rel_path(json_file, HOMEBREW_EN_PATH)
         else:
             self.rel_path = get_rel_path(json_file)
 
@@ -119,8 +132,11 @@ class JsonAnalyser(Runnable):
             if is_plu:
                 self.rel_path = os.path.join('plu/', self.rel_path)
             # 只处理dict格式的文件
-            obj, self.job_list = BaseAnalyser(
-                self.dictionary, self.rel_path).process(en_json_obj, self.byhand)
+            analyser = BaseAnalyser(self.dictionary, self.rel_path)
+            if self.mode == 'homebrew':
+                en_name = json_file[json_file.rfind(';')+1:json_file.rfind('.json')].strip()
+                analyser.set_job('{!@ #HOME_BREW}', en_name, None)
+            obj, self.job_list = analyser.process(en_json_obj, self.byhand)
 
 
         return self.job_list, obj, True

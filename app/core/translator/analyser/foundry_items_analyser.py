@@ -22,7 +22,7 @@ class FoundryItemsAnalyser(BaseAnalyser):
                 uid = j.uid
             else :
                 self.set_job(uid, en_dict["uuid"], en_dict["uuid"], current_names=current_names)
-            en_dict["uuid"] = f'[!@ {uid}]'
+            en_dict["uuid"] = f'{{!@ {uid}}}'
             
             for m, t in zip(match_v, match_k):
                 if need_translate_str(m):

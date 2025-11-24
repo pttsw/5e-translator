@@ -1,13 +1,13 @@
 import os
 import json
 from logger_config import logger
-from config import ORIGIN_5ETOOLS_DATA_DIR, SPLITED_5ETOOLS_DATA_DIR, COMBINE_INFO_DATA_DIR, COMBINED_5ETOOLS_DATA_DIR
+from config import ORIGIN_5ETOOLS_DATA_DIR, SPLITED_5ETOOLS_EN_PATH, COMBINE_INFO_DATA_DIR, COMBINED_5ETOOLS_DATA_DIR
 
 from .funcs import SPLIT_FUNCS
 # 根据来源（Source）放入不同的目录，并生成不同的文件
 def split_origin_files(
         origin_5etoos_data_dir: str = ORIGIN_5ETOOLS_DATA_DIR,
-        splited_data_dir: str = SPLITED_5ETOOLS_DATA_DIR,
+        splited_data_dir: str = SPLITED_5ETOOLS_EN_PATH,
         combine_info_dir: str = COMBINE_INFO_DATA_DIR,
     ) -> (list):
     # 检查目录是否存在
@@ -74,7 +74,7 @@ def split_origin_files(
                 
 
 def combine_splited_files(
-        splited_data_dir: str = SPLITED_5ETOOLS_DATA_DIR,
+        splited_data_dir: str = SPLITED_5ETOOLS_EN_PATH,
         combine_info_dir: str = COMBINE_INFO_DATA_DIR,
         combined_data_dir: str = COMBINED_5ETOOLS_DATA_DIR,
     ) -> (list):

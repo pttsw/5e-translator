@@ -85,7 +85,7 @@ def load_files_into_chroma_db(adventure_dir):
     """
     
     documents = load_adventure_files(adventure_dir)
-    knowledge_db:ChromaAdapter = ChromaAdapter()
+    knowledge_db:ChromaAdapter = ChromaAdapter("dnd")
     # for d  in list(filter(lambda d: len(d.page_content) > 512, documents)):
     #     print(d.page_content)
     # documents = list(filter(lambda d: len(d.page_content) < 512, documents))
@@ -98,7 +98,7 @@ def load_chm_files_into_chroma_db(chm_dir):
     加载CHM文件到Chroma数据库
     """
     documents = load_html_to_documents(chm_dir)
-    knowledge_db:ChromaAdapter = ChromaAdapter()
+    knowledge_db:ChromaAdapter = ChromaAdapter("dnd")
     knowledge_db.reset()
     knowledge_db.add(documents)
     

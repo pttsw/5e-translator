@@ -41,6 +41,8 @@ def combine_temp_terms_to_csv():
     print(len(mysql_terms))
     with open("temp_terms.csv", 'w') as f:
         for term in mysql_terms:
+            if ',' in term.en or ',' in term.cn:
+                continue
             f.write(f"{term.en},{term.cn},{term.category}\n")
 
 def load_term_from_text(file_path: str):

@@ -67,9 +67,20 @@ SKIP_KEY_PATH=[
   ]
 SKIP_ITEMS = [{'key':'action','value':'remove'}, {'key':'action','value':'insert'}]
 # SKIP_FILES = ['book/book-phb.json', 'bestiary/bestiary-mm.json']
-SKIP_DIRS = ['generated']
+SKIP_DIRS = [
+  'generated',
+  # HOMEBREW DIRS
+  '_generated',
+  '_doc',
+  '_font',
+  '_img',
+  '_node',
+  '_test',
+  '.github',
+  'node_modules'
+  ]
 # SKIP_FILES = []
-SKIP_FILES = ['book/book-phb.json']
+SKIP_FILES = ['book/book-phb.json', 'package-lock.json', 'package.json']
 RETRY_TIMES=2
 DEBUG_MODE = False
 
@@ -233,10 +244,14 @@ BESTIARY_FILE_MAP = {
 }
 
 
-# ===== 外部Core相关配置 ======
-OUTPUT_DATA_DIR = "/data/pttsw-core/output"
+# ===== 外部PTTSW-Core相关配置 ======
+CORE_OUTPUT_DATA_DIR = "/data/pttsw-core/output"
 
-SPLITED_5ETOOLS_DATA_DIR = EN_PATH
-SPLITED_5ETOOLS_DATA_DIR = OUTPUT_DATA_DIR + "/split-data"
-COMBINE_INFO_DATA_DIR = OUTPUT_DATA_DIR + "/combine-info"
-COMBINED_5ETOOLS_DATA_DIR = OUTPUT_DATA_DIR + "/combined-data"
+# SPLITED_5ETOOLS_DATA_DIR = EN_PATH
+SPLITED_5ETOOLS_EN_PATH = CORE_OUTPUT_DATA_DIR + "/split-data"
+COMBINE_INFO_DATA_DIR = CORE_OUTPUT_DATA_DIR + "/combine-info"
+COMBINED_5ETOOLS_DATA_DIR = CORE_OUTPUT_DATA_DIR + "/combined-data"
+
+
+# ===== HOMEBREW ======
+HOMEBREW_EN_PATH = "/data/homebrew-en"

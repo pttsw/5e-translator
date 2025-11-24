@@ -4,7 +4,7 @@ from app.core.database import ChromaAdapter
 from ..utils.file_work_info import FileWorkInfo
 from langchain_core.documents import Document
 from app.core.transform.pdf_transformer import transform_pdf
-from config import logger, BESTIARY_FILE_MAP,CHM_ROOT_DIR,SPLITED_5ETOOLS_DATA_DIR, SPLITED_DIR_MAP, SPLITED_SOURCE_MAP
+from config import logger, BESTIARY_FILE_MAP,CHM_ROOT_DIR,SPLITED_5ETOOLS_EN_PATH, SPLITED_DIR_MAP, SPLITED_SOURCE_MAP
 import os
 
 KNOWLEDGE_SOURCE_DICT = {
@@ -12,8 +12,11 @@ KNOWLEDGE_SOURCE_DICT = {
 }
 class KnowledgeSetter(Runnable):
     def __init__(self):
-        self.knowledge_db:ChromaAdapter = ChromaAdapter()
+        self.current_collection = "dnd"
+        self.knowledge_db:ChromaAdapter = ChromaAdapter(self.current_collection)
         self.knowledge_source_dirs = []
+        self.mode = '5et'
+        
     def invoke(self, file_infos, config = None, **kwargs):
         """知识库设置器
         从知识库中查询相关知识，添加到job的knowledge字段中

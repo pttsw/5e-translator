@@ -3,6 +3,9 @@ from config import logger,KEY_MATCHED_TAG
 from typing import List
 from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path
 from app.core.database import DBDictionary
+# 添加jsonpath_ng的导入
+from jsonpath_ng import parse
+from jsonpath_ng.ext import parse as ext_parse
 
 
 class BaseAnalyser:
@@ -12,6 +15,7 @@ class BaseAnalyser:
         self.dictionary = dictionary
         self.rel_path = rel_path
         self.name_tag = get_tag_from_rel_path(self.rel_path)
+        self.byhand = False
 
     def process(self,  en_dict: dict, byhand: bool = False):
         self.byhand = byhand
@@ -20,7 +24,7 @@ class BaseAnalyser:
             raise RuntimeError(f'process error:{en_dict}')
         return res_dict, self.job_list
 
-    def str_2_job(self, en_str: str, current_names: list = [], tag = ""):
+    def str_2_job(self, en_str: str, current_names: list = [], tag = "", key_path = ""):
         """根据字符串生成JOB对象
 
         Args:
@@ -34,9 +38,18 @@ class BaseAnalyser:
         match_k, match_v, is_valid = parse_custom_format(en_str)
         if len(match_v) == 0:
             # 没找到tag则直接整句按|拆分即可
-            return self.__split_and_append_job(en_str, current_names=current_names)
+            return self.__split_and_append_job(en_str, current_names=current_names, tag=tag, key_path=key_path)
         else:
-            uid = uuid.uuid1()
+            # 使用jsonpath作为唯一标识
+            # 如果有key_path，使用它生成jsonpath表达式
+            if key_path:
+                # 转换key_path格式为标准jsonpath
+                jsonpath_expr = f'$' + key_path.replace('/', '.')
+                uid = jsonpath_expr
+            else:
+                # 如果没有key_path，使用字符串内容生成一个唯一标识
+                uid = f'$._dynamic.{hash(en_str)}'
+            
             cn_str = None
             if only_has_format(en_str):
                 cn_str = en_str
@@ -46,11 +59,13 @@ class BaseAnalyser:
             else:
                 # 将本身添加到Job列表
                 self.set_job(uid, en_str, cn_str, current_names=current_names, tag=tag)
-            en_str = f'[!@ {uid}]'
+            en_str = f'{{!@ {uid}}}'
 
             # 处理tag的value内容
             for m, t in zip(match_v, match_k):
-                self.__split_and_append_job(m, t, current_names=current_names)
+                # 为tag的value内容生成子路径
+                sub_key_path = f"{key_path}.{t}" if key_path else f".{t}"
+                self.__split_and_append_job(m, t, current_names=current_names, key_path=sub_key_path)
             return en_str
 
     def set_job(self, uid: str, en: str, cn: (str | None) = None, tag=None, current_names: list = []):
@@ -141,7 +156,9 @@ class BaseAnalyser:
                         else:
                             names_in_job.append((name, ""))
                     names_in_job.append((en_dict["name"], cn_bean['cn'] if cn_bean['proofread'] else ""))
-                    self.job_list.append(Job(uuid.uuid1(), en_dict["name"], cn_bean['cn'], self.rel_path, self.name_tag, [
+                    # 使用jsonpath作为唯一标识
+                    name_jsonpath = f'$' + (key_path + '/name').replace('/', '.')
+                    self.job_list.append(Job(name_jsonpath, en_dict["name"], cn_bean['cn'], self.rel_path, self.name_tag, [
                     ], names_in_job, cn_bean['proofread'], cn_bean['sql_id'], modified_at=cn_bean['modified_at']))
                     skip_name = True
             else:
@@ -186,7 +203,8 @@ class BaseAnalyser:
             # 整型、浮点型、布尔型不翻译
             return en_item, True
         elif isinstance(en_item, str):
-            tmp_str = self.str_2_job(en_item, current_names, tag)
+            # 传递key_path给str_2_job，用于生成jsonpath
+            tmp_str = self.str_2_job(en_item, current_names, tag, key_path)
             return tmp_str, True
         elif isinstance(en_item, dict):
             return self.process_dict(en_item, key_path, current_names)
@@ -196,15 +214,17 @@ class BaseAnalyser:
 
     def __process_list(self, en_list, key_path, current_names: list = []):
         res_list = []
-        for v in en_list:
-            tmp_list, ok = self.process_base_item(v, key_path, current_names)
+        for index, v in enumerate(en_list):
+            # 对于列表项，我们需要在key_path后添加索引以确保唯一性
+            list_item_key_path = f"{key_path}[{index}]"
+            tmp_list, ok = self.process_base_item(v, list_item_key_path, current_names)
             if not ok:
                 logger.error(f"{self.rel_path}解析{v}时出错")
             res_list.append(tmp_list)
 
         return res_list, True
 
-    def __split_and_append_job(self, s, tag=None, current_names: list = []):
+    def __split_and_append_job(self, s, tag=None, current_names: list = [], key_path=""):
         """
         对输入的字符串进行分割检查和处理，生成带有Job UUID替换标识的字符串。
 
@@ -220,9 +240,20 @@ class BaseAnalyser:
         sub_str_list = split_string(res_str)
         str_list = [res_str] if len(sub_str_list) == 1 else sub_str_list
 
-        def _process_value(v, tag=None):
+        def _process_value(v, tag=None, value_index=0):
             if need_translate_str(v):
-                uid = uuid.uuid1()
+                # 使用jsonpath_ng风格的路径作为唯一标识
+                if key_path:
+                    # 转换为标准jsonpath格式，并添加值索引以确保唯一性
+                    jsonpath_expr = f'$' + key_path.replace('/', '.')
+                    if '/' in key_path:
+                        # 如果是复杂路径，添加值索引作为额外标识
+                        jsonpath_expr = f"{jsonpath_expr}.{value_index}"
+                    uid = jsonpath_expr
+                else:
+                    # 如果没有key_path，使用动态路径+哈希值
+                    uid = f'$._dynamic.{hash(v)}'
+                
                 # 去除前缀后缀
                 sk_without_prefix, prefix = check_prefix(v)
                 sk_pure, suffix = check_suffix(sk_without_prefix)
@@ -235,7 +266,7 @@ class BaseAnalyser:
                     self.set_job(uid, sk_pure, None, tag=tag,
                                    current_names=current_names)
 
-                return f'{prefix}[!@ {uid}]{suffix}'
+                return f'{prefix}{{!@ {uid}}}{suffix}'
             else:
                 return v
         # if len(sub_ks) > 1:
@@ -243,10 +274,10 @@ class BaseAnalyser:
             if (len(str_list) > 2):
                 # 正常至少有3个值
                 cv_page = str_list[1]
-                cv_name = _process_value(str_list[0], tag=cv_page)
+                cv_name = _process_value(str_list[0], tag=cv_page, value_index=0)
                 if cv_page == "bestiary":
                     cv_conditions = []
-                    for eev in str_list[2:]:
+                    for idx, eev in enumerate(str_list[2:], 2):
                         if eev.startswith('type='):
                             # 锁定type
                             cv_conditions.append(eev)
@@ -254,21 +285,21 @@ class BaseAnalyser:
                             # 锁定tag
                             cv_conditions.append(eev)
                         else:
-                            ccv = _process_value(eev)
+                            ccv = _process_value(eev, value_index=idx)
                             cv_conditions.append(ccv)
                     res_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                     return res_str
                 elif cv_page in ["items", "spells", "optionalfeatures", "races"]:
                     cv_conditions = []
-                    for eev in str_list[2:]:
-                        ccv = _process_value(eev)
+                    for idx, eev in enumerate(str_list[2:], 2):
+                        ccv = _process_value(eev, value_index=idx)
                         cv_conditions.append(ccv)
                     res_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                     return res_str
                 
         replaced_keys = []  # 替换为Job UUID后的文本
-        for sk in str_list:
-            replaced_keys.append(_process_value(sk, tag=tag))
+        for idx, sk in enumerate(str_list):
+            replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
         res_str = '|'.join(replaced_keys)
         return res_str
 
@@ -287,4 +318,3 @@ class BaseAnalyser:
             for j in self.job_list:
                 if j.en_str == en and j.tag is None:
                     return j
-

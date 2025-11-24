@@ -1,6 +1,6 @@
 from app.core.database import ChromaAdapter
 def search_knowledge():
-    knowledge_db:ChromaAdapter = ChromaAdapter()
+    knowledge_db:ChromaAdapter = ChromaAdapter("dnd")
     query = ""
     while query != "exit" or query != "q":
         query = input("请输入查询内容: ")

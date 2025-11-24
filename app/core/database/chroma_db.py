@@ -7,9 +7,10 @@ from typing import List, Optional
 
 
 class ChromaAdapter:
-    def __init__(self):
+    def __init__(self, collection_name: str):
         self.embeddings = SiliconAIEmbeddings()
         self.collection: Chroma = Chroma(
+            collection_name=collection_name,
             embedding_function=self.embeddings,
             persist_directory=CHROMA_PERSIST_DIR  # 允许我们将persist_directory目录保存到磁盘上
         )

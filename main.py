@@ -2,7 +2,7 @@ import argparse
 from app.core.utils import find_json_files, write_translate_cache, Job, FileWorkInfo
 from app.core.translator import JsonAnalyser, JobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler
 from app.cli import transform_proofread, search_knowledge, compare_term, add_mysql_terms_to_redis, combine_temp_terms_to_csv,load_files_into_chroma_db, load_chm_files_into_chroma_db, load_term_from_text, transform_html_2_txt
-from config import EN_PATH
+from config import EN_PATH, logger
 from app.core.database import DBDictionary
 import os
 def main():
@@ -14,7 +14,7 @@ def main():
     
     # 为 translate 命令创建子解析器
     translate_parser = subparsers.add_parser('translate')
-    translate_parser.add_argument('--en', default=EN_PATH,
+    translate_parser.add_argument('--en', default='',
                                   help='Path to the English data, default to the value in config')
     translate_parser.add_argument('--thread_num', default=10, type=int,
                                   help='Number of threads to use, default to 10')
@@ -25,8 +25,8 @@ def main():
                                   help='Whether to force translate, update unproofreaded words, default to False')
     translate_parser.add_argument('--force-title', action='store_true', default=False,
                                   help='Whether to force translate, update unproofreaded titles, default to False')
-    translate_parser.add_argument('--splited',  action='store_true', default=False,
-                                  help='Whether to process splited data, default to False')
+    translate_parser.add_argument('--mode', default='5et', type=str,
+                                  help='Mode to use, default to 5et, can be 5et, splited or homebrew')
     
     search_parser = subparsers.add_parser('search')
     search_parser.add_argument('--query', default='', type=str,
@@ -68,7 +68,17 @@ def main():
         transform_proofread()
     # 数据解析流程
     elif args.function == 'translate':
-        res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'splited': args.splited})
+        if args.en == '':
+            if args.mode == '5et':
+                args.en = EN_PATH
+            elif args.mode == 'splited':
+                from config import SPLITED_5ETOOLS_EN_PATH
+                args.en = SPLITED_5ETOOLS_EN_PATH
+            elif args.mode == 'homebrew':
+                from config import HOMEBREW_EN_PATH
+                args.en = HOMEBREW_EN_PATH
+        
+        res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'splited': args.splited})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title})
@@ -155,7 +165,7 @@ def main():
         file_info = FileWorkInfo(jobs, {}, failed_file, os.path.join('retry', out_base))
         processor = JobProcessor(args.thread_num, update=True)
         # 注意：JobProcessor.invoke 内部通过 config['metadata'] 获取参数
-        cfg = {'metadata': {'byhand': args.byhand, 'force': False, 'force_title': False, 'splited': True}}
+        cfg = {'metadata': {'byhand': args.byhand, 'force': False, 'force_title': False, 'mode': 'splited'}}
         res = processor.invoke([file_info], config=cfg)
         for r in res:
             print(len(r.job_list), getattr(r, 'json_path', ''))
