@@ -1,4 +1,12 @@
+import os
 from uuid import uuid4
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
+os.environ["CHROMA_TELEMETRY_DISABLED"] = "true"
+os.environ["ANONYMIZED_TELEMETRY"] = "false"
+
 from langchain_chroma import Chroma
 from app.core.embedding.silicon_embeddings import SiliconAIEmbeddings
 from config import CHROMA_PERSIST_DIR

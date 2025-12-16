@@ -1,14 +1,16 @@
 import json
 import uuid
 import os
-from typing import List
-from config import  EN_PATH, PLU_EN_PATH, SKIP_FILES, SKIP_DIRS, logger, SPLITED_5ETOOLS_EN_PATH, HOMEBREW_EN_PATH
+from typing import List, Tuple
+from config import  EN_PATH, PLU_EN_PATH, SKIP_FILES, SKIP_DIRS, logger, SPLITED_5ETOOLS_EN_PATH, HOMEBREW_EN_PATH, UA_EN_PATH, PLU_SCENES_PATH, PLU_DBD_PATH
 from app.core.utils import read_file, get_rel_path, FileWorkInfo, Job
 from app.core.database import DBDictionary
 from langchain_core.runnables import Runnable
 from .base_analyser import BaseAnalyser
 from .spell_source_analyser import SpellSourceAnalyser
 from .foundry_items_analyser import FoundryItemsAnalyser
+from .books_analyser import BooksAnalyser
+from .adventures_analyser import AdventuresAnalyser
 
 
 class JsonAnalyser(Runnable):
@@ -49,19 +51,47 @@ class JsonAnalyser(Runnable):
                 if not j.startswith(HOMEBREW_EN_PATH):
                     logger.error(f"JsonAnalyser: 文件{j}不在{HOMEBREW_EN_PATH}目录下，跳过处理")
                     continue
+            elif self.mode == 'ua':
+                if not j.startswith(UA_EN_PATH):
+                    logger.error(f"JsonAnalyser: 文件{j}不在{UA_EN_PATH}目录下，跳过处理")
+                    continue
+            elif self.mode == 'plu':
+                if not j.startswith(PLU_EN_PATH):
+                    logger.error(f"JsonAnalyser: 文件{j}不在{PLU_EN_PATH}目录下，跳过处理")
+                    continue
+            elif self.mode == 'scenes':
+                if not j.startswith(PLU_SCENES_PATH):
+                    logger.error(f"JsonAnalyser: 文件{j}不在{PLU_SCENES_PATH}目录下，跳过处理")
+                    continue
                 
-            logger.info(f"开始解析{j}中的Json")
+            logger.info(f"开始解析 {j} 中的Json")
             job_list, obj, ok = self.json_2_job(j)
             if not ok:
-                logger.error(f"JsonAnalyser: 分析{j}时出错")
+                logger.error(f"JsonAnalyser: 分析 {j} 时出错")
                 continue
-            if job_list is None or len(job_list) == 0 or obj is None:
+            if job_list is None or obj is None:
+                logger.warning(f"JsonAnalyser: 文件 {j} 中的Json为空，跳过处理")
                 continue
-            if self.mode == 'splited': 
+            if self.mode == 'splited':
+                self.__update_file_table(get_rel_path(j, SPLITED_5ETOOLS_EN_PATH), self.rel_path, job_list)
                 yield FileWorkInfo(job_list, obj, self.rel_path, get_rel_path(j, SPLITED_5ETOOLS_EN_PATH))
+            elif self.mode == 'plu':
+                yield FileWorkInfo(job_list, obj, self.rel_path, self.rel_path.replace('plu/', ''))
             else:
                 yield FileWorkInfo(job_list, obj, self.rel_path, self.rel_path)
 
+    def __update_file_table(self, file_path: str, source_file: str, job_list: List[Job]):
+        """
+        更新文件表
+
+        :param file_path: 文件路径
+        :return: None
+        """
+        total = len(job_list)
+        proofread = sum([1 for j in job_list if j.is_proofread])
+        translate = 0
+        self.dictionary.update_file_table(file_path, source_file, total, translate, proofread)
+        
     def txt_2_json(self, json_txt):
         """
         json转txt
@@ -71,7 +101,7 @@ class JsonAnalyser(Runnable):
         """
         return json.loads(json_txt), True
 
-    def json_2_job(self, json_file: str, is_plu=False) -> (tuple[List[Job], object, bool]):
+    def json_2_job(self, json_file: str) -> (Tuple[List[Job], object, bool]):
         """
         json_2_job:分析JSON文件组中需要翻译的任务
 
@@ -82,8 +112,12 @@ class JsonAnalyser(Runnable):
 
         en_json_obj = None
         # 获取相对路径，这个路径会根据是否是PLU的源数据来做不同的处理
-        if is_plu:
+        if self.mode == 'plu':
             self.rel_path = get_rel_path(json_file, PLU_EN_PATH)
+        elif self.mode == 'dbd':
+            self.rel_path = os.path.join("dbd", get_rel_path(json_file, PLU_DBD_PATH))
+        elif self.mode == 'scenes':
+            self.rel_path = get_rel_path(json_file, PLU_SCENES_PATH)
         elif self.mode == 'splited':
             en_json_obj, ok = self.txt_2_json(read_file(json_file))
             if not ok:
@@ -95,13 +129,18 @@ class JsonAnalyser(Runnable):
             self.rel_path = en_json_obj["_meta"]["origin_file"]
         elif self.mode == 'homebrew':
             self.rel_path = get_rel_path(json_file, HOMEBREW_EN_PATH)
+        elif self.mode == 'ua':
+            self.rel_path = get_rel_path(json_file, UA_EN_PATH)
         else:
             self.rel_path = get_rel_path(json_file)
 
         # 清空字典缓存，防止上一个文件的字典污染这次查询
         self.dictionary.clear()
         # 从数据库导出当前文件的相关翻译条目，为后续直接匹配正确的翻译做准备
-        self.dictionary.dump(self.rel_path)
+        if self.mode == 'plu':
+            self.dictionary.dump([self.rel_path, os.path.join('plu/', self.rel_path)])
+        else:
+            self.dictionary.dump([self.rel_path])
         # 清空name_list，防止上一个文件的name污染这次查询
         self.name_list = []
         # 跳过文件夹
@@ -115,10 +154,8 @@ class JsonAnalyser(Runnable):
             en_json_obj, ok = self.txt_2_json(read_file(json_file))
             if not ok:
                 return None, None, False
-            if not isinstance(en_json_obj, dict):
-                return None, None, True
         obj = {}  # 替换了Job uuid 标识符的json对象
-        if self.rel_path == "spells/sources.json":
+        if self.rel_path in ["spells/sources.json", "icon-class.json", "icon-spell.json", "icon-feat.json", "icon-subclass.json", "bestiary/foundry-integration-token-subjects.json"]:
             # 针对法术source文件进行特殊处理
             obj, self.job_list = SpellSourceAnalyser(
                 self.dictionary, self.rel_path).process(en_json_obj)
@@ -128,14 +165,23 @@ class JsonAnalyser(Runnable):
             or self.rel_path == "spells/foundry.json":
             obj, self.job_list = FoundryItemsAnalyser(
                 self.dictionary, self.rel_path).process(en_json_obj)
+        elif self.rel_path == "books.json" and self.mode == '5et':
+            obj, self.job_list = BooksAnalyser(
+                self.dictionary, self.rel_path).process(en_json_obj)
+        elif self.rel_path == "adventures.json" and self.mode == '5et':
+            obj, self.job_list = AdventuresAnalyser(
+                self.dictionary, self.rel_path).process(en_json_obj)
         else:  # 正常处理文本逻辑
-            if is_plu:
+            if self.mode == 'plu':
                 self.rel_path = os.path.join('plu/', self.rel_path)
             # 只处理dict格式的文件
             analyser = BaseAnalyser(self.dictionary, self.rel_path)
             if self.mode == 'homebrew':
                 en_name = json_file[json_file.rfind(';')+1:json_file.rfind('.json')].strip()
                 analyser.set_job('{!@ #HOME_BREW}', en_name, None)
+            elif self.mode == 'ua':
+                en_name = json_file[json_file.rfind('-')+1:json_file.rfind('.json')].strip()
+                analyser.set_job('{!@ #UA}', en_name, None)
             obj, self.job_list = analyser.process(en_json_obj, self.byhand)
 
 

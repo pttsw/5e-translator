@@ -28,7 +28,8 @@ class KnowledgeSetter(Runnable):
         Yields:
             FileWorkInfo: 添加了知识库信息的包含文件信息和任务列表的对象
         """
-        if (config['metadata'].get('splited', False)):
+        self.mode = config['metadata'].get('mode', '5et')
+        if (self.mode == 'splited'):
             for res in file_infos:
                 is_loaded_documents = False
                 for job in res.job_list:

@@ -1,18 +1,18 @@
 import os
 import re
 import json
-import concurrent.futures
+import csv
+import threading
 
 from langchain_core.runnables import Runnable
-from config import logger, DS_KEY, SIMPLE_PROMOT, PROMOT_KNOWLEDGE, OUT_PATH
+from config import logger, DS_KEY, OUT_PATH
 from app.core.utils import Job, TranslatorStatus
 from app.core.database import DatabaseAdapter
 from .siliconflow_adapter import SiliconFlowAdapter
 from .llm_factory import LLMFactory
 from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, reset_tags_index, format_llm_msg, parse_foundry_items_uuid_format
-from typing import List
-from app.core.utils import get_rel_path
-from itertools import zip_longest
+from typing import List, Tuple, Optional
+from app.core.bean.term import Term, to_terms
 
 
 class JobProcessor(Runnable):
@@ -42,12 +42,19 @@ class JobProcessor(Runnable):
 
         self.byhand = False
         self.force = False
+        # 临时术语相关变量
+        self.temple_terms = set()
+        self.cache = True
+        self.cache_lock = threading.Lock()
+        self.terms_file_path = '/tmp/terms.csv'
+
         
     def invoke(self, input, config=None, **kwargs):
         inputs = [input] if isinstance(input, str) else input
         self.byhand = config['metadata'].get('byhand', False)
         self.force = config['metadata'].get('force', False)
         self.mode = config['metadata'].get('mode', '5et')
+        self.cache = config['metadata'].get('cache', True)
         if self.byhand:
             # 手动模式，串行执行
             self.thread_num = 1
@@ -63,9 +70,14 @@ class JobProcessor(Runnable):
             # self.obj = res['obj']
             self.done_jobs: List[Job] = []
             self.factory.reset()
-            # self.factory.set_finish(False)
+            if self.cache:
+                # 贪心，按照job的en_str长度从短到长排序。
+                # 这样短文本中的术语先处理。加速
+                res.job_list.sort(key=lambda x: len(x.en_str))
             self.factory.add_jobs(res.job_list)
             self.factory.set_finish(True)
+            # 加载临时术语
+            self.__load_temple_terms(res.job_list, res.out_path)
             self.factory.start_work()
             if self.factory.isAllDone():
                 self.write_2_json(res.out_path, res.json_obj)
@@ -98,7 +110,43 @@ class JobProcessor(Runnable):
                 else:
                     logger.info('没有记录到被丢弃的失败 Job。')
             yield res
-            
+
+    def __load_temple_terms(self, job_list, out_path):
+        self.temple_terms.clear()
+        self.terms_file_path = os.path.join(OUT_PATH, out_path+".terms.csv")
+        if os.path.exists(self.terms_file_path):
+            with open(self.terms_file_path, "r") as terms_file:
+                loaded_term_list = csv.reader(terms_file)
+                for term in loaded_term_list:
+                    # 添加行数据验证，确保至少有3个元素
+                    if len(term) >= 3 and term[0] and term[1]:  # 同时确保英文和中文术语不为空
+                        try:
+                            self.temple_terms.add(Term(en=term[0], cn=term[1], category=term[2]))
+                        except Exception as e:
+                            logger.warning(f"解析术语行失败: {term}, 错误: {str(e)}")
+                    elif term:  # 非空行但格式不正确
+                        logger.warning(f"跳过格式不正确的术语行: {term}")
+        for job in job_list:
+            self.temple_terms.update(to_terms(job.en_str, job.cn_str, job.tag))
+    def __dump_temple_terms(self):
+        with open(self.terms_file_path, "w") as terms_file:
+            term_list = [f"{term.en},{term.cn},{term.category}" for term in self.temple_terms]
+            terms_file.write("\n".join(term_list))
+    
+    def __add_temple_terms(self, en, cn):
+        self.cache_lock.acquire()
+        en = en.lower()
+        term = Term(en=en, cn=cn, category=None)
+        if term not in self.temple_terms:
+            self.temple_terms.add(term)
+            with open(self.terms_file_path, "a") as terms_file:
+                terms_file.write(f"\n{en},{cn},{term.category}")
+            logger.info(f"添加术语到缓存:{en} -> {cn}")
+        self.cache_lock.release()
+    
+    def __search_temple_terms(self, en_str: str):
+        return [term for term in self.temple_terms if term.en.lower() in en_str.lower()]
+    
     def __init_dictionary(self):
         """
         初始化字典
@@ -118,6 +166,9 @@ class JobProcessor(Runnable):
             if self.force and job.sql_id == None:
                 # force模式下，只更新有的
                 return job, TranslatorStatus.SUCCESS
+            # 添加缓存中的术语
+            if self.cache and self.temple_terms:
+                job.terms.extend(self.__search_temple_terms(job.en_str))
             # 发送给大模型进行翻译
             request, promot = job.to_llm_question()
             if job.cn_str and job.cn_str != "" and self.byhand:
@@ -138,12 +189,8 @@ class JobProcessor(Runnable):
                 return None, status
 
             # 对回调信息进行解析
-            kimi_data, ok = format_llm_msg(msg)
-            if (
-                (not ok)
-                or "trans_str" not in kimi_data.keys()
-                or not isinstance(kimi_data["trans_str"], str)
-            ):
+            kimi_data = self.__response_msg_to_data(msg)
+            if (kimi_data == None):
                 logger.warning(f'解析结果错误:{msg}')
                 return None, TranslatorStatus.FAILURE
 
@@ -182,6 +229,16 @@ class JobProcessor(Runnable):
                     return None, TranslatorStatus.FAILURE
                 job.cn_str = cn_str
                 # job.cn_str = replaced_cn
+            # 3. 检查是否有新的术语需要添加到字典
+            if self.cache:
+                job_terms = to_terms(job.en_str, job.cn_str, job.tag)
+                if job_terms:
+                    for t in job_terms:
+                        self.__add_temple_terms(t.en, t.cn)
+                    if 'add_terms' in kimi_data.keys() and isinstance(kimi_data['add_terms'], dict):
+                        for term, cn in kimi_data['add_terms'].items():
+                            self.__add_temple_terms(term, cn)
+            
             return job, TranslatorStatus.SUCCESS
 
         def put_done_job(job: Job):
@@ -206,8 +263,23 @@ class JobProcessor(Runnable):
             done_func=put_done_job,
         )
         return True
-
-    def __get(self, en: str, tag="") -> (tuple[str, bool]):
+    def __response_msg_to_data(self, msg):
+        # 对回调信息进行解析
+        kimi_data, ok = format_llm_msg(msg)
+        if (
+            (not ok)
+            or "trans_str" not in kimi_data.keys()
+        ):
+            return None
+        if isinstance(kimi_data["trans_str"], str):
+            return kimi_data
+        if isinstance(kimi_data["trans_str"], list) and len(kimi_data["trans_str"]) == 1:
+            if isinstance(kimi_data["trans_str"][0], str):
+                kimi_data['trans_str'] = kimi_data['trans_str'][0]
+                return kimi_data
+        return None
+    
+    def __get(self, en: str, tag="") -> (Tuple[str, bool]):
         for j in self.done_jobs:
             if j.en_str == en and j.tag == tag:
                 return j.cn_str, True
@@ -218,22 +290,22 @@ class JobProcessor(Runnable):
         """
         处理单个值，进行前缀、后缀检查和翻译替换
         """
-    # if just_validate:
-    #     return value
         if need_translate_str(value):
             value_without_prefix, prefix = check_prefix(value)
             value_pure, suffix = check_suffix(value_without_prefix)
             new_value, ok = self.__get(value_pure,tag)
             if ok and new_value is not None:
-                return f'{prefix}{new_value}{suffix}', True
+                new_value = f'{prefix}{new_value}{suffix}'
+                # TODO 临时增加一次校验逻辑，后续删除。校验value和new_value中的@数量是否相同
+                if value.count('@') != new_value.count('@'):
+                    logger.warning(f"翻译文本替换错误:value={value},new_value={new_value}")
+                    return value, False
+                return new_value, True
             else:
                 return value, False
         return value, True
-    def __replace_sub_jobs(self, cn_str: str, en_str: str|None = None, tag = ""):
+    def __replace_sub_jobs(self, cn_str: str, en_str: Optional[str] = None, tag = ""):
         # print(cn_str)
-
-        
-        
         processed = False
         if en_str is None:
             # 若没有传入en_str，需要从done_jobs中查找
@@ -305,6 +377,19 @@ class JobProcessor(Runnable):
                             cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
+            if tag == "adventure":
+               filter_values = en_str.split("|")
+               if (len(filter_values) > 2):
+                    # 正常至少有3个值
+                    cv_source = filter_values[1]
+                    cv_name, _ = self.__process_value(filter_values[0], tag="adventure")
+                    cv_conditions = []
+                    for eev in filter_values[2:]:
+                        ccv, _ = self.__process_value(eev)
+                        cv_conditions.append(ccv)
+                    cn_str = f"{cv_name}|{cv_source}|{'|'.join(cv_conditions)}"
+                    return cn_str, True
+           
             en_split = en_str.split('|')
             cn_split = cn_str.split('|')
             res_split = []
@@ -356,6 +441,13 @@ class JobProcessor(Runnable):
             eng_name = json_path.split(';')[-1].strip()[:-5]
             cn_name, _ = self.__process_value(eng_name)
             json_path = json_path.replace(f'; {eng_name}', f'; {cn_name}')
+        elif self.mode == 'ua':
+            # 删除原始文件
+            os.remove(json_path)
+            # 替换文件名中的字段
+            eng_name = json_path.split('-')[-1].strip()[:-5]
+            cn_name, _ = self.__process_value(eng_name)
+            json_path = json_path.replace(f'- {eng_name}', f'- {cn_name}')
         try:
             with open(json_path, "w") as file:
                 file.write(json.dumps(new_obj, ensure_ascii=False, indent=2))

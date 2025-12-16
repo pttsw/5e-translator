@@ -32,15 +32,35 @@ EN_PATH=os.getenv("5ETOOLS_EN_PATH")
 OUT_PATH=os.getenv("OUTPUT_PATH")
 DIC_PATH=OUT_PATH+"/dictionary.json"
 
-PLU_EN_PATH="/root/workspace/src/plutonium/data-bak"
+PLU_EN_PATH="/data/plutonium-parser/plutonium_origin/data"
+PLU_DBD_PATH="/data/plutonium-parser/plutonium_origin/ddb-importer"
+PLU_SCENES_PATH="/data/plutonium-scenes/"
 
 FORCE_TRANSLATE_STR=["ox"]
 
+# JSON分析器所用的标签匹配配置，用于将JSON中的标签转换为数据库中对应的标签
+KEY_MATCHED_TAG={'gear':'item', 'baseItem':'item'}
+
+# 检测字符串中标签所用的正则表达式
+# 检测字符串中是否包含标签，匹配标签的值
+SUBJOB_PATTERN = r"{@[^ \}]+ ([^\}\{@}]+)\}"
+# 检测字符串中是否只有一个标签
+ONLY_SUBJOB_PATTERN = r"^{@[^ \}]+ ([^\}\{@}]+)\}$"
+# 检测字符串中是否包含标签，匹配标签的键
+TAG_PATTERN = r"{@([^ \}]+) [^\}\{@}]+\}"
+
+#region 字符串跳过配置
+# 跳过字符串的正则，满足的不翻译
 SKIP_PATTERN=[r'^Math\.',r'\.json$',r'\.mp3$',r'\.pdf$',r'\.svg$',r'^system\.',r'^[+*\-\dd]+$',r'\.webp$',r'\.glb$',r'^col-', r'^\{@dice [0-9d+\-×*/; ]+\}$', r'^[0-9d+\-–×*/%％;\[\]& ]*$',r'^https://.+',r'^http://.+', r'^www\..+',r'^Challenge Rating=.+',r'^@abilities\..*',r'^@classes\..*']
+# 跳过的前缀，此类字符串的前缀不翻译，只翻译前缀后面的内容
 SKIP_PREFIX=['source=','level=','class=','subclass=','challenge rating=','speed type=','type=','miscellaneous=','category=','school=','components & miscellaneous=', 'Components & Miscellaneous=','spell attack=','tag=','search=','Type=','damage type=','Feature Type=','Base Species=', 'environment=','strength=','property=']
+# 完全跳过的前缀，有此类前缀的字符串，整个字符串都不翻译
 TOTAL_SKIP_PREFIX=['rarity=']
+# 跳过的后缀，此类字符串的后缀不翻译，只翻译后缀前面的内容
 SKIP_SUFFIX=['#2','#c','#x']
-SKIP_KEYS=['source', 'fonts', 'type', 'path', 'id', 'href','mode','_meta','group','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId']
+# 完全跳过的键，有此类键的字符串，整个字符串都不翻译
+SKIP_KEYS=['source', 'fonts', 'type', 'path', 'id', 'href','mode','_meta','group','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId','identifier', 'walls']
+# 完全跳过的路径，有此类路径的字符串，整个字符串都不翻译
 SKIP_KEY_PATH=[
   'ability/choose/from', 
   'toolProficiencies/choose/from',
@@ -65,9 +85,14 @@ SKIP_KEY_PATH=[
   'activities/profiles/count'
   'facility/prerequisite/spellcastingFocus'
   ]
+# 跳过的项，有此类项的字符串，整个字符串都不翻译
 SKIP_ITEMS = [{'key':'action','value':'remove'}, {'key':'action','value':'insert'}]
 # SKIP_FILES = ['book/book-phb.json', 'bestiary/bestiary-mm.json']
+#endregion
+#region 完全跳过的目录配置
+# 完全跳过的目录，路径中包含以下内容的文件，都不翻译
 SKIP_DIRS = [
+  # General dirs
   'generated',
   # HOMEBREW DIRS
   '_generated',
@@ -79,12 +104,15 @@ SKIP_DIRS = [
   '.github',
   'node_modules'
   ]
-# SKIP_FILES = []
-SKIP_FILES = ['book/book-phb.json', 'package-lock.json', 'package.json']
-RETRY_TIMES=2
-DEBUG_MODE = False
+# 完全跳过的文件，以下文件不翻译
+SKIP_FILES = [ 'package-lock.json', 'package.json','package-lock.json', 'changelog.json']
+#endregion
 
-KEY_MATCHED_TAG={'gear':'item', 'baseItem':'item'}
+# region LLM配置
+
+# llm失败后的重试次数，超过则会记录到文件
+RETRY_TIMES=2
+
 
 PROMOT = """
 - Role: Dungeons & Dragons (D&D) 5th Edition (5e) 专家和JSON数据处理专家
@@ -118,12 +146,13 @@ SIMPLE_PROMOT = """
 明确术语与描述的中文译法。
 用工具翻译并维护数据。
 保留{@aaa bbb}格式的文本，并且翻译后的文本需要**保证所有{@aaa bbb}的顺序与英文一致**。
+提取trans_str中在reference字段中未出现的人名、地名、法术名等专有名词，输出到add_terms字典中（常用词不属于专有名词，不要提取）。
 校对测试确保正常使用。
 - Examples:
-  英文原文：{"trans_str":["It expands on what's written about the {@book Astral Plane|DMG|2} {@b} in the {@book Dungeon Master's Guide|DMG}"]}
-  中文翻译：{"trans_str":["它扩展了关于{@book 星界|DMG|2}{@b}（选自{@book 城主指南|DMG}）的描述"]}
-  英文原文：{"trans_str":["druid"]}
-  中文翻译：{"trans_str":["德鲁伊"]}
+  输入{"trans_str":["It expands on what's written about the {@book Astral Plane|DMG|2} {@b} in the {@book Dungeon Master's Guide|DMG}"]}
+  输出{"trans_str":["它扩展了关于{@book 星界|DMG|2}{@b}（选自{@book 城主指南|DMG}）的描述"], "add_terms":{"Astral Plane": "星界"}}
+  输入{"trans_str":["druid"]}
+  输出{"trans_str":["德鲁伊"], "add_terms":{"druid": "德鲁伊"}}
 """
 
 PROMOT_KNOWLEDGE = """
@@ -139,20 +168,21 @@ PROMOT_KNOWLEDGE = """
 4.基于reference字段的术语、相似度较高的中文和parents字段的上下文，用工具翻译并维护数据。若reference中有与英文相似度较高的中文，则直接在该中文的基础上替换所有{@aaa bbb}
 6.保留{@aaa bbb}格式的文本，并且翻译后的文本需要**保证所有{@aaa bbb}的顺序与英文一致**。
 7.检查是否符合Json格式、{@aaa bbb}的**数量**、**内容**和**顺序**是否一致
-8.输出翻译后的Json数据
+8.提取trans_str中在reference字段中未出现的人名、地名、法术名等专有名词，输出到add_terms字典中（常用词不属于专有名词，不要提取）
+8.输出译文及术语的Json
 - Examples:
   输入：{
     "parents":[("creature":"生物","Sul Khatesh","苏·卡特什")],
-    "refrence":["苏·卡特什向一个她60尺内能看见的生物低声说出一个魔法秘密。目标必须成功通过DC 26的感知豁免否则消耗自身一个3环或更低的法术位对自己30尺内每个生物造成26（4d12）力场伤害。","Sul Khatesh:['苏·卡特什'],"Wisdom:['感知']","Force:['力场']","Stunned:['震慑']"],
+    "refrence":["苏·卡特什向一个她60尺内能看见的生物低声说出一个魔法秘密。目标必须成功通过DC 26的感知豁免否则消耗自身一个3环或更低的法术位对自己30尺内每个生物造成26（4d12）力场伤害。","Sul Khatesh:['苏·卡特什'],"Wisdom:['感知']","Force:['力场']"],
     "trans_str":"Sul Khatesh whispers an arcane secret into the mind of a creature she can see within 60 feet of her. The target must succeed on a {@dc 26} Wisdom saving throw or expend one of its spell slots of 3rd level or lower and deal 26 ({@damage 4d12}) force damage to each creature within 30 feet of it. "
     }
-  输出：{"trans_str":"苏·卡特什向一个她60尺内能看见的生物低声说出一个魔法秘密。目标必须成功通过{@dc 26}的感知豁免否则消耗自身一个3环或更低的法术位对自己30尺内每个生物造成26（{@damage 4d12}）力场伤害。"}
+  输出：{"trans_str":"苏·卡特什向一个她60尺内能看见的生物低声说出一个魔法秘密。目标必须成功通过{@dc 26}的感知豁免否则消耗自身一个3环或更低的法术位对自己30尺内每个生物造成26（{@damage 4d12}）力场伤害。","add_terms":{"arcane secret": "魔法秘密"}}
   输入：{
     "parents":[("creature":"生物"),("Sul Khatesh","苏·卡特什")],
     "refrence":["Maddening Secret": "疯狂诡秘"],
     "trans_str":"Maddening Secrets (Costs 3 Actions)"
     }
-  输出：{"trans_str":"疯狂诡秘（消耗3个动作）"}
+  输出：{"trans_str":"疯狂诡秘（消耗3个动作）","add_terms":{}}
 """
 
 PROMOT_SPELL_XPHB = """
@@ -226,14 +256,11 @@ PROMOT_CORRECT_TAG = """
   输入：{"en_str":"The {@item Eye of Vecna} and the {@item Hand of Vecna} each have the following random properties:","cn_str":"维克那法眼和维克那魔掌具有下列已知的随机属性："}
   输出：{"trans_str":"{@item Eye of Vecna}和{@item Hand of Vecna}具有下列已知的随机属性："}
 """
-
-REPLACE_PREFIX='need-translate-'
-SUBJOB_PATTERN = r"{@[^ \}]+ ([^\}\{@}]+)\}"
-ONLY_SUBJOB_PATTERN = r"^{@[^ \}]+ ([^\}\{@}]+)\}$"
-TAG_PATTERN = r"{@([^ \}]+) [^\}\{@}]+\}"
+#endregion
 
 
-# ===== 不全书相关配置 ======
+
+# region 不全书相关配置
 CHM_ROOT_DIR = os.getenv("CHM_ROOT_DIR")
 CHM_TXT_DIR = os.path.join(CHM_ROOT_DIR, "Generator/Generated/txt/")
 # 怪物图鉴翻译文件对照字典
@@ -242,16 +269,26 @@ BESTIARY_FILE_MAP = {
     'bestiary/bestiary-idrotf.json': '模组/冰风谷/生物',
     'bestiary/bestiary-skt.json': '模组/风暴君王之雷霆/图鉴'
 }
+#endregion
 
-
-# ===== 外部PTTSW-Core相关配置 ======
+# region 外部PTTSW-Core
 CORE_OUTPUT_DATA_DIR = "/data/pttsw-core/output"
 
 # SPLITED_5ETOOLS_DATA_DIR = EN_PATH
 SPLITED_5ETOOLS_EN_PATH = CORE_OUTPUT_DATA_DIR + "/split-data"
 COMBINE_INFO_DATA_DIR = CORE_OUTPUT_DATA_DIR + "/combine-info"
 COMBINED_5ETOOLS_DATA_DIR = CORE_OUTPUT_DATA_DIR + "/combined-data"
+#endregion
 
-
-# ===== HOMEBREW ======
+# region HOMEBREW
 HOMEBREW_EN_PATH = "/data/homebrew-en"
+
+#endregion
+
+# region PRELEASE
+UA_EN_PATH = "/data/unearthed-arcana-en"
+#endregion
+
+# region app config
+APP_TEMP_PATH = "/data/5e-translator/temp"
+

@@ -2,7 +2,6 @@ from app.core.transform.bean.bestiary import Bestiary, Attr, is_camp, is_group, 
 import re
 import os
 import sys
-import fitz  # PyMuPDF库，用于更精确地提取文本和字体信息
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 

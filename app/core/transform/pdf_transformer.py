@@ -3,7 +3,6 @@ import fitz  # PyMuPDF库，用于更精确地提取文本和字体信息
 import re
 import numpy as np
 # from sentence_transformers import SentenceTransformer, util
-import jieba
 from typing import List, Tuple, Dict
 def transform_pdf(pdf_file: str):
     """将PDF文件按段落分段，根据字体大小识别标题

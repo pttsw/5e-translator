@@ -89,7 +89,6 @@ def load_files_into_chroma_db(adventure_dir):
     # for d  in list(filter(lambda d: len(d.page_content) > 512, documents)):
     #     print(d.page_content)
     # documents = list(filter(lambda d: len(d.page_content) < 512, documents))
-    
     knowledge_db.reset()
     knowledge_db.add(documents)
 

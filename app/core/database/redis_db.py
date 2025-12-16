@@ -1,4 +1,5 @@
 import redis   # 导入redis 模块
+from typing import List
 
 redis_pool = redis.ConnectionPool(
     host='localhost', port=6379, decode_responses=True)
@@ -15,7 +16,7 @@ class RedisDB:
             tag_v = tag + tag_v
         return self.r.sadd(key, tag_v)
 
-    def get(self, key: str, tag="") -> (list[str]):
+    def get(self, key: str, tag="") -> (List[str]):
         value = self.r.sinter(key)
         if value == None or len(value) == 0:
             return []

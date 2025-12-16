@@ -131,17 +131,50 @@ class PdfParser:
     def get_documents(self) -> (List[Document]):
         documents = []
         for p in self.paragraphs:
-            titles = self.__split_sentences(p['title'].replace('  ',' '))
-            for t in titles:
-                documents.append(Document(
-                    page_content=t, 
-                    # metadata={'title': p['title']}
-                ))
-            p['content'] = self.__split_sentences(' '.join(p['content']).replace('  ',' '))
-            for c in p['content']:
-                documents.append(Document(
+            documents.append(Document(
+                page_content=p['title'].replace('  ',' '), 
+                metadata={'type': 'title'}
+            ))
+            documents.append(Document(
+                page_content=''.join(p['content']).replace('  ',' '), 
+                metadata={'type': 'content'}
+            ))
+        final_documents = []
+        current_content = ""
+        for d in documents:
+            if d.metadata['type'] == 'title':
+                if current_content:
+                    print(current_content, d.page_content)
+                    contents = self.__split_sentences(current_content)
+                    for c in contents:
+                        final_documents.append(Document(
+                            page_content=c, 
+                            metadata={'type': 'content'}
+                        ))
+                    current_content = ""
+                contents = self.__split_sentences(d.page_content)
+                for c in contents:
+                    final_documents.append(Document(
+                        page_content=c, 
+                        metadata={'type': 'title'}
+                    ))
+                final_documents.append(d)
+            else:
+                current_content += d.page_content
+                if current_content.endswith('。！？'):
+                    contents = self.__split_sentences(current_content)
+                    for c in contents:
+                        final_documents.append(Document(
+                            page_content=c, 
+                            metadata={'type': 'content'}
+                        ))
+                    current_content = ""
+        if current_content:
+            contents = self.__split_sentences(current_content)
+            for c in contents:
+                final_documents.append(Document(
                     page_content=c, 
-                    # metadata={'title': p['title']}
+                    metadata={'type': 'content'}
                 ))
-        return documents
+        return final_documents
     

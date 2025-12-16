@@ -18,8 +18,9 @@ class SiliconFlowAdapter:
             temperature=0,
             base_url = "https://api.siliconflow.cn/v1",
             openai_api_key = self.api_key,
-            # model="deepseek-ai/DeepSeek-V3"
-            model="deepseek-ai/DeepSeek-V3.2-Exp",
+            max_tokens=8182,
+            model="deepseek-ai/DeepSeek-V3",
+            # model="tencent/Hunyuan-MT-7B",
             response_format={"type": "json_object"},
         )
 

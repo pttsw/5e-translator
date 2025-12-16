@@ -3,41 +3,123 @@ import json
 import os
 from flask_restful import Resource, Api, request
 from .restful_utils import *
-from app.model import WordsModel
-from config import EN_PATH
+from app.model import FileModule
+from config import SPLITED_5ETOOLS_EN_PATH, logger, APP_TEMP_PATH
+from app.core.translator import JsonAnalyser
 from .base import BaseApi
 api = Api()
 
 def find_json_files(root_folder:str):
     json_files = []
-    for root, dirs, files in os.walk(root_folder):
-        for file in files:
-            if file.endswith('.json'):
-                json_files.append(os.path.relpath(os.path.join(root, file),root_folder))
-                # json_files.append(file)
+    file_list = FileModule.query.all()
+    # 直接获取当前文件夹下的文件，不递归
+    for file in os.listdir(root_folder):
+        file_path = os.path.join(root_folder, file)
+        # 确保是文件且以.json结尾
+        rel_path = os.path.relpath(file_path, SPLITED_5ETOOLS_EN_PATH)
+        if os.path.isfile(file_path) and file.endswith('.json'):
+            in_db = False
+            for db_file in file_list:
+                if db_file.file == rel_path:
+                    json_files.append({
+                        'file': rel_path,
+                        'source_file': db_file.source_file,
+                        'total': db_file.total,
+                        'translate': db_file.translate,
+                        'proofread': db_file.proofread,
+                    })
+                    in_db = True
+                    break
+            if not in_db:
+                logger.warning(f"文件{rel_path}不在数据库中")
+        elif os.path.isdir(file_path):
+            # 查询file_list中以此文件夹为前缀的文件
+            dir_file = {
+                'file': rel_path,
+                'source_file': '',
+                'total': 0,
+                'translate': 0,
+                'proofread': 0,
+            }
+            for db_file in file_list:
+                if db_file.file.startswith(rel_path+'/'):
+                    dir_file['total'] += db_file.total
+                    dir_file['translate'] += db_file.translate
+                    dir_file['proofread'] += db_file.proofread
+            json_files.append(dir_file)
+            
     return json_files
 
 @api.resource('/json')
 class JsonApi(Resource):
     def get(self):
-        file_name = request.args.get('file', None, str)
+        file_name = request.args.get('file', '', str)
         source = request.args.get('source', None, str)
-        
-        if file_name:
-            file_path = os.path.join(EN_PATH, file_name)
+        file_name = file_name.strip('/')
+        if file_name and file_name != '':
+            file_path = os.path.join(SPLITED_5ETOOLS_EN_PATH, file_name)
             if not os.path.exists(file_path):
                 return error(f"{file_name}不存在")
-            with open(file_path, 'r') as file:
-                content = file.read()
-                json_content = json.loads(content)
-                if source and isinstance(json_content,dict):
-                    json_content = self.__check_source(json_content, source)
-                return success(data={'file':json_content})
+            if os.path.isdir(file_path):
+                # 递归获取子文件夹下的json文件
+                files = find_json_files(file_path)
+                return success(data=files)
+            elif os.path.isfile(file_path):
+                with open(file_path, 'r') as file:
+                    job_list = self.__get_job_list_by_file(file_path)
+                    
+                    content = file.read()
+                    json_content = json.loads(content)
+                    if source and isinstance(json_content,dict):
+                        json_content = self.__check_source(json_content, source)
+                    return success(data=[{
+                        'file': file_name,
+                        'source_file': '', # 这里应该用不上吧
+                        'total': len(job_list),
+                        'translate': 0,
+                        'proofread': len([j for j in job_list if j['is_proofread'] == 0]),
+                        'job_list': job_list,
+                        'json_content': json_content,
+                    }])
         else:
-            if not os.path.exists(EN_PATH):
+            # 获取文件列表
+            if not os.path.exists(SPLITED_5ETOOLS_EN_PATH):
                 return error("数据目录不存在，请通知管理员检查")
-            files = find_json_files(EN_PATH)
+            files = find_json_files(SPLITED_5ETOOLS_EN_PATH)
             return success(data=files)
+        return error("参数错误")
+    
+    def __get_job_list_by_file(self, file_path):
+        if SPLITED_5ETOOLS_EN_PATH not in file_path:
+            return []
+        job_list = []
+        rel_path = os.path.relpath(file_path, SPLITED_5ETOOLS_EN_PATH)
+        job_file_path = os.path.join(APP_TEMP_PATH, rel_path.replace('.json', '.job.json'))
+        if os.path.exists(job_file_path):
+            with open(job_file_path, 'r') as job_file:
+                job_list = json.load(job_file)
+        else:
+            json_analyser = JsonAnalyser()
+            file_work_infos = json_analyser.invoke([file_path],{'metadata':{'mode':'splited'}})
+            os.makedirs(os.path.dirname(job_file_path), exist_ok=True)
+            for file_work_info in file_work_infos:
+                # 只留下need_translate为True的
+                file_work_info.job_list = [j.__dict__ for j in file_work_info.job_list if j.sql_id]
+            with open(job_file_path, 'w') as job_file:
+                job_file.write('[\n')
+                first_flag = True
+                for j in file_work_info.job_list:
+                    if first_flag:
+                        first_flag = False
+                    else:
+                        job_file.write(',\n')
+                    job_file.write(json.dumps(
+                        j, default=lambda o: o.__dict__ if hasattr(o, '__dict__') else str(o), ensure_ascii=False, indent=2))
+                job_file.write('\n]')
+            with open(job_file_path, 'r') as job_file:
+                job_list = json.load(job_file)
+        return job_list
+        
     def __check_source(self, json_dict, source):
         return_dict = {}
         if not isinstance(json_dict, dict):

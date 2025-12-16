@@ -3,6 +3,7 @@ from ..utils.file_work_info import FileWorkInfo
 from config import logger
 from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, reset_tags_index, format_llm_msg, parse_foundry_items_uuid_format
 from datetime import datetime
+from typing import Optional
 
 
 class JobNeedTranslateSetter(Runnable):
@@ -44,17 +45,18 @@ class JobNeedTranslateSetter(Runnable):
             # 如果modified_at比2025-11-13晚，说明刚翻译过，不需要翻译
             try:
                 # 创建参考日期
-                reference_date = datetime(2025, 11, 13)
+                # reference_date = datetime(2025, 11, 13)
+                reference_date = datetime(2025, 12, 15)
                 
                 # 确保job.modified_at是datetime对象
                 if isinstance(job.modified_at, datetime):
-                    if job.modified_at > reference_date:
+                    if job.modified_at < reference_date:
                         return False
                 elif isinstance(job.modified_at, str):
                     # 尝试将字符串转换为datetime对象
                     try:
                         modified_date = datetime.fromisoformat(job.modified_at.replace('Z', '+00:00'))
-                        if modified_date > reference_date:
+                        if modified_date < reference_date:
                             return False
                     except ValueError:
                         # 如果日期格式无法解析，继续后续检查
@@ -72,7 +74,7 @@ class JobNeedTranslateSetter(Runnable):
         # print(job.en_str)
         return True
     
-    def __replace_sub_jobs(self, cn_str: str, en_str: str|None = None):
+    def __replace_sub_jobs(self, cn_str: str, en_str: Optional[str] = None):
         """
         处理@{creature owlbear|phb}类似的情况
         将@{creature owlbear|phb}替换为中文

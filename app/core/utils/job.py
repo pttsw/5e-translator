@@ -1,5 +1,6 @@
 import json
 from config import *
+from typing import Tuple
 
 class Job:
     def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, sql_id=None, modified_at=0, source="") -> (None):
@@ -31,7 +32,7 @@ class Job:
         else:
             return self == __value
         
-    def to_llm_question(self) -> (tuple[str, str]):
+    def to_llm_question(self) -> (Tuple[str, str]):
         """
         转换为LLM问题
         """

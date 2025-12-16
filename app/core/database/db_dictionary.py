@@ -4,7 +4,7 @@ import datetime
 from .mysql_db import MySQLDatabase
 from config import DB_CONFIG, logger
 from app.core.utils import find_reference
-from app.core.bean import Term
+from app.core.bean.term import Term, to_terms
 
 
 class DBDictionary:
@@ -305,30 +305,7 @@ class DBDictionary:
         for r in term_res:
             res.add(Term(r['en'], r['category'], r['cn']))
         for r in words_res:
-            if "{@recharge" in r['en']:
-                en = r['en'][:r['en'].index('{')].strip()
-                cn = r['cn'][:r['cn'].index('{')].strip()
-                res.add(Term(en, r['category'], cn))
-            elif "(Costs" in r['en']:
-                # 部分生物技能中包含了 skill_name (Costs x Action)，所以去掉后面的cost部分作为术语
-                en = r['en'][:r['en'].index('(')].strip()
-                if "(" in cn:
-                    cn = r['cn'][:r['cn'].index('(')].strip()
-                elif "（" in cn:
-                    cn = r['cn'][:r['cn'].index('（')].strip()
-                res.add(Term(en, r['category'], cn))
-            elif "·" in r['cn']:
-                # 处理人名，如果包含·，则将其拆分成多个Term
-                ens = r['en'].split(' ')
-                cns = r['cn'].split('·')
-                if len(ens) == len(cns):
-                    for i in range(len(ens)):
-                        res.add(Term(ens[i].strip(), r['category'], cns[i].strip()))
-            elif "{@" in r['en'] or "{=amount1/v}" in r['en']:
-                # 包含链接的不要，包含食谱数量的不要
-                continue
-            else:
-                res.add(Term(r['en'], r['category'], r['cn']))
+            res.update(to_terms(r['en'], r['cn'], r['category']))
         self.__release_db(db_index)
         return res
         
@@ -451,17 +428,19 @@ class DBDictionary:
             return self.lower_dictionary[en][0]
         return None
     
-    def dump(self, file_name=None):
+    def dump(self, file_names=[]):
         """
         file_name: 按照文件名提取，为空时则提取全部
         """
         self.lock.acquire()
-        if file_name == None:
+        if len(file_names) == 0:
             records = self.db_list[0].select(
                 'words', columns=['cn', 'en', 'version', 'proofread', 'category', 'modified_at'])
         else:
-            records = self.db_list[0].execute_query(
-                'select id, cn, en, version, proofread, category, modified_at from words where id in (select word_id from source where file=%s)', (file_name))
+            placeholders = ','.join(['%s'] * len(file_names))
+            sql = f"select id, cn, en, version, proofread, category, modified_at from words where id in (select word_id from source where file in ({placeholders}))"
+            params = tuple(file_names)
+            records = self.db_list[0].execute_query(sql, params)
         self.lock.release()
 
         version_dict = {}
@@ -480,6 +459,20 @@ class DBDictionary:
     def is_proofread(self, k: str):
         return k in self.proofread_set
 
+    def get_credits(self, file_name: str):
+        self.lock.acquire()
+        credits = self.db_list[0].select(
+            'credits', columns=['job_type', 'names'],
+            condition={'file': file_name})
+        self.lock.release()
+        return credits
+    
+    def update_file_table(self, file_path: str, source_file: str, total: int, translate: int, proofread: int):
+        self.lock.acquire()
+        self.db_list[0].execute_non_query(
+            "INSERT INTO file (file, source_file, total, translate, proofread) VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE total = VALUES(total), translate = VALUES(translate), proofread = VALUES(proofread)",
+            (file_path, source_file, total, translate, proofread))
+        self.lock.release()
 
 if __name__ == "__main__":
     d = DBDictionary()

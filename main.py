@@ -2,6 +2,7 @@ import argparse
 from app.core.utils import find_json_files, write_translate_cache, Job, FileWorkInfo
 from app.core.translator import JsonAnalyser, JobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler
 from app.cli import transform_proofread, search_knowledge, compare_term, add_mysql_terms_to_redis, combine_temp_terms_to_csv,load_files_into_chroma_db, load_chm_files_into_chroma_db, load_term_from_text, transform_html_2_txt
+from app.core.para import ParaUpdater, set_terms_to_para
 from config import EN_PATH, logger
 from app.core.database import DBDictionary
 import os
@@ -26,7 +27,9 @@ def main():
     translate_parser.add_argument('--force-title', action='store_true', default=False,
                                   help='Whether to force translate, update unproofreaded titles, default to False')
     translate_parser.add_argument('--mode', default='5et', type=str,
-                                  help='Mode to use, default to 5et, can be 5et, splited or homebrew')
+                                  help='Mode to use, default to 5et, can be 5et, splited, homebrew, plu or ua')
+    translate_parser.add_argument('--cache', action='store_false', default=True,
+                                  help='Whether to use cache terms, default to True')
     
     search_parser = subparsers.add_parser('search')
     search_parser.add_argument('--query', default='', type=str,
@@ -41,7 +44,7 @@ def main():
     term_parser.add_argument('--en', default=EN_PATH, type=str,
                                   help='Search term')
     term_parser.add_argument('--mode', default='add', type=str,
-                                  help='Mode to use, default to add, can be add, dump or analyze')
+                                  help='Mode to use, default to add, can be add, dump, analyze or para')
     
     embed_parser = subparsers.add_parser('embed')
     embed_parser.add_argument('--dir', default='/data/DND5e_chm/艾伯伦：从终末战争中崛起', type=str,
@@ -77,8 +80,15 @@ def main():
             elif args.mode == 'homebrew':
                 from config import HOMEBREW_EN_PATH
                 args.en = HOMEBREW_EN_PATH
+            elif args.mode == 'plu':
+                from config import PLU_EN_PATH
+                args.en = PLU_EN_PATH
+            elif args.mode == 'ua':
+                from config import UA_EN_PATH
+                args.en = UA_EN_PATH
         
-        res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode})
+        res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
+        # res = (find_json_files|JsonAnalyser()).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'splited': args.splited})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title})
@@ -98,7 +108,7 @@ def main():
         elif args.mode == 'dump':
             combine_temp_terms_to_csv()
         elif args.mode == 'analyze':
-            for root, dirs, files in os.walk('/data/5e-translator/data'):
+            for root, dirs, files in os.walk('/data/DND5e_chm/Generator/Generated/txt/'):
                 for file in files:
                     if not file.endswith('.txt'):
                         continue
@@ -125,13 +135,15 @@ def main():
                                 new_cn = input('New cn: ')
                             db.update(db_bean['sql_id'], new_cn, proofread=True)
                                 # print(f'{en} cn not match, db: {db_bean["cn"]}, text: {cn}')
+        elif args.mode == 'para':
+            set_terms_to_para()
         else:
             print('Unknown mode')
         # 输出术语
         # combine_temp_terms_to_csv()
     elif args.function == 'embed':
-        load_files_into_chroma_db(args.dir)
-        # load_chm_files_into_chroma_db('/data/DND5e_chm/艾伯伦：从终末战争中崛起')
+        # load_files_into_chroma_db(args.dir)
+        load_files_into_chroma_db('/data/DND5e_chm/Generator/Generated/txt/小独与追寻失落之角')
     elif args.function == 'retry-failed':
         # 从失败文件中读取 jobs 并重试
         import json

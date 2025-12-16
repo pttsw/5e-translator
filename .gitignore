@@ -6,6 +6,7 @@ venv/
 output/
 output-tmp/
 output-plu/
+output-para/
 *.log
 data/
 .venv/

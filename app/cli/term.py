@@ -33,7 +33,8 @@ def add_mysql_terms_to_redis():
     redis_db.clean()
     for term in mysql_terms:
         redis_db.put(term.en, term.cn, term.category)
-        print(f"{term.en} -> {term.cn}")
+        # print(f"{term.en} -> {term.cn}")
+    print(f"Added {len(mysql_terms)} terms to Redis")
         
 def combine_temp_terms_to_csv():
     mysql_db = DBDictionary()
@@ -97,7 +98,7 @@ def load_term_from_text(file_path: str):
             for pattern in patterns:
                 match = pattern.search(line)
                 if match:
-                    chinese_part = match.group('chinese').strip().rstrip('：:？?(（')
+                    chinese_part = match.group('chinese').strip().rstrip('：:？?(（｜')
                     english_part = match.group('english').strip().replace('  ',' ')
                     
                     # 英文做key，中文做value存入字典

@@ -62,8 +62,9 @@ class TermSetter(Runnable):
         matched_terms = []
         for en in matched_keys:
             term_cn = self.term_db.get(en, job.tag)
-            if term_cn is not None:
-                matched_terms.append(Term(en, job.tag, term_cn))
+            for cn in term_cn:
+                if cn is not None and cn.strip() != "":
+                    matched_terms.append(Term(en, job.tag, cn))
         job.terms = matched_terms  # 假设job对象有terms属性
         return job
 

@@ -1,6 +1,7 @@
 import re
 from config import SKIP_PATTERN, SKIP_PREFIX, SKIP_SUFFIX, TOTAL_SKIP_PREFIX, SKIP_KEYS, SKIP_KEY_PATH, SKIP_ITEMS, FORCE_TRANSLATE_STR, logger
 import json
+from typing import Tuple, List
 
 
 def check_skip_key(key: str, value: str, prefix_key_path: str):
@@ -16,6 +17,8 @@ def check_skip_key(key: str, value: str, prefix_key_path: str):
     if key in SKIP_KEYS:
         return True
     key_with_prefix = prefix_key_path+'/'+key
+    # 去掉key_with_prefix中的[0]、[1]等
+    key_with_prefix = re.sub(r'\[\d+\]', '', key_with_prefix)
     return any(hk in key_with_prefix for hk in SKIP_KEY_PATH) or \
         any(si['key'] == key and si['value'] == value for si in SKIP_ITEMS)
 
@@ -71,7 +74,7 @@ def need_translate_str(input_str: str):
         return False
     return True
 
-def parse_foundry_items_uuid_format(text: str) -> (tuple[list[str], list[str], bool]):
+def parse_foundry_items_uuid_format(text: str) -> (Tuple[List[str], List[str], bool]):
     """处理foundry-items.json中uuid的格式一般是@tag[xxx|yyy]
 
     Args:
@@ -98,7 +101,7 @@ def parse_foundry_items_uuid_format(text: str) -> (tuple[list[str], list[str], b
         
     return tag_list, value_list, is_valid
 
-def parse_custom_format(text: str, get_sub_format=True) -> (tuple[list[str], list[str], bool]):
+def parse_custom_format(text: str, get_sub_format=True) -> (Tuple[List[str], List[str], bool]):
     """处理{@tag value}或{@tag}自定义格式的字符串
     将其转化为 taglist 和 valuelist
 
@@ -378,7 +381,7 @@ def replace_cn_pattern(cn_str: str, en_str: str) -> (str):
     return cn_str
 
 
-def format_llm_msg(msg: str) -> (tuple[object, bool]):
+def format_llm_msg(msg: str) -> (Tuple[object, bool]):
     """格式化llm返回的消息
 
     Args:

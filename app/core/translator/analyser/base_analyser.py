@@ -1,6 +1,6 @@
 import uuid
 from config import logger,KEY_MATCHED_TAG
-from typing import List
+from typing import List, Optional
 from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path
 from app.core.database import DBDictionary
 # 添加jsonpath_ng的导入
@@ -16,12 +16,46 @@ class BaseAnalyser:
         self.rel_path = rel_path
         self.name_tag = get_tag_from_rel_path(self.rel_path)
         self.byhand = False
+        self.load_from_sql = True
+        self.name_should_proofread = False
 
-    def process(self,  en_dict: dict, byhand: bool = False):
+    def process(self,  en_obj: dict, byhand: bool = False):
         self.byhand = byhand
-        res_dict, ok = self.process_dict(en_dict, "")
-        if not ok:
-            raise RuntimeError(f'process error:{en_dict}')
+        if (isinstance(en_obj, dict)):
+            if "_meta" in en_obj.keys() and "sources" in en_obj["_meta"]:
+                for index, source in enumerate(en_obj["_meta"]["sources"]):
+                    if "full" in source.keys():
+                        source["full"] = self.str_2_job(source["full"], current_names=[], tag="adventure", key_path=f"._meta.sources[{index}].full")
+            res_dict, ok = self.process_dict(en_obj, "")
+            if not ok:
+                raise RuntimeError(f'process error:{en_obj}')
+            
+            # 设置作者信息
+            if "data" in res_dict.keys() and isinstance(res_dict["data"], list):
+                credit_section = res_dict["data"][-1]
+                if credit_section["type"] == "section" and "ENG_name" in credit_section.keys() and "credit" in credit_section["ENG_name"].lower():
+                    credits = self.dictionary.get_credits(self.rel_path)
+
+                    if credits:
+                        current_credits = {							
+                            "ENG_name": "5et-cn translator",
+                            "name": "5et汉化",
+                            "type": "list",
+                            "style": "list-hang-notitle",
+                            "items":[]
+                        }
+                        for credit in credits:
+                            current_credits["items"].append({
+                                "name": credit["job_type"],
+                                "type": "item",
+                                "entry": credit["names"]
+                            })
+                        credit_section["entries"].append(current_credits)
+        elif (isinstance(en_obj, list)):
+            res_dict, ok = self.__process_list(en_obj, "")
+            if not ok:
+                raise RuntimeError(f'process error:{en_obj}')
+        
         return res_dict, self.job_list
 
     def str_2_job(self, en_str: str, current_names: list = [], tag = "", key_path = ""):
@@ -68,7 +102,7 @@ class BaseAnalyser:
                 self.__split_and_append_job(m, t, current_names=current_names, key_path=sub_key_path)
             return en_str
 
-    def set_job(self, uid: str, en: str, cn: (str | None) = None, tag=None, current_names: list = []):
+    def set_job(self, uid: str, en: str, cn: Optional[str] = None, tag=None, current_names: List = []):
         """向Job列表中添加Job
 
         Args:
@@ -89,7 +123,7 @@ class BaseAnalyser:
                 # 先从内存中读取
                 cn_bean = self.dictionary.get(
                     en, load_from_sql=False, ignore_case=True, tag=tag)
-                if cn_bean == None:
+                if cn_bean == None and self.load_from_sql:
                     # 从数据库中读取
                     cn_bean = self.dictionary.get(
                         en, rel_f=self.rel_path, load_from_sql=True, ignore_case=True, tag=tag)
@@ -111,7 +145,7 @@ class BaseAnalyser:
             name_job = self.get_job(name,tag=self.name_tag)
             if name_job is None:
                 continue
-            if name_job.is_proofread:
+            if (not self.name_should_proofread) or name_job.is_proofread:
                 names_in_job.append((name,name_job.cn_str))
             else:
                 names_in_job.append((name, ""))
@@ -151,7 +185,7 @@ class BaseAnalyser:
                         name_job = self.get_job(name,tag=self.name_tag)
                         if name_job is None:
                             continue
-                        if name_job.is_proofread:
+                        if (not self.name_should_proofread) or name_job.is_proofread:
                             names_in_job.append((name,name_job.cn_str))
                         else:
                             names_in_job.append((name, ""))
@@ -289,7 +323,7 @@ class BaseAnalyser:
                             cv_conditions.append(ccv)
                     res_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                     return res_str
-                elif cv_page in ["items", "spells", "optionalfeatures", "races"]:
+                elif cv_page in ["items", "spells", "optionalfeatures", "races", "rewards"]:
                     cv_conditions = []
                     for idx, eev in enumerate(str_list[2:], 2):
                         ccv = _process_value(eev, value_index=idx)

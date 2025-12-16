@@ -6,6 +6,7 @@ from langchain_core.documents import Document
 from app.core.transform.pdf_transformer import transform_pdf
 from app.core.utils import Job
 from app.core.database import DBDictionary
+from typing import List
 
 from config import logger
 import os
@@ -16,7 +17,7 @@ class ByHandHandler(Runnable):
         self.byhand = False
         self.dictionary = DBDictionary()
         
-    def invoke(self, input: list[FileWorkInfo], config = None, **kwargs):
+    def invoke(self, input: List[FileWorkInfo], config = None, **kwargs):
         """手动处理器
         主要处理name字段关键字和小于4个单词的词组
 

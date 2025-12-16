@@ -4,6 +4,8 @@ from app.core.translator.job_processor import JobProcessor  # 假设实际类名
 import unittest
 from unittest.mock import patch, MagicMock
 from app.core.utils.job import Job
+from app.core.utils.file_work_info import FileWorkInfo
+from config import OUT_PATH
 import sys
 class MockDataBase:
     def get(self, en: str,tag:str) -> (tuple[str, bool]):
@@ -279,5 +281,32 @@ class TestReplaceSubJobs(unittest.TestCase):
             self.assertTrue(success)
 
 
+
+class JobProcessorTest(unittest.TestCase):
+    def setUp(self):
+        self.processor = JobProcessor(thread_num=1)
+    def test_process_job(self):
+        """测试处理作业"""
+        job = Job(
+            uid="123",
+            en_str="translate",
+            cn_str="翻译",
+            is_proofread=True,
+        )
+        file_work_info = FileWorkInfo(
+            job_list=[job],
+            json_obj={
+                "creature": {
+                    "AC": "{!@ 123}"
+                }
+            },
+            json_path="test.json",
+            out_path="test_out.json",
+        )
+        
+        res = self.processor.invoke([file_work_info], config={"metadata":{}})
+        for r in res:
+            print(r)
+        self.assertEqual(len(self.processor.temple_terms), 1)
 if __name__ == '__main__':
     unittest.main()

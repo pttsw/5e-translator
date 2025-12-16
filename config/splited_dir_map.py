@@ -22,7 +22,13 @@ SPLITED_SOURCE_MAP = {
     "scc": "斯翠海文：混沌研习",
     "vgm": "瓦罗怪物指南",
     "bmt": "万象无常书",
-    "aag": "星界冒险者指南"
+    "aag": "星界冒险者指南",
+    "tftyp": "模组/哈欠门",
+    "ditlcot": "模组/坠入塔莎洞",
+    
+    "uthftlh": "小独与追寻失落之角",
+    # homebrew
+    "avantris; crooked moon": "第三方/歪曲之月"
 }
 
 SPLITED_DIR_MAP = {
@@ -41,4 +47,7 @@ SPLITED_DIR_MAP = {
     "tce/hazard": ["塔莎的万事坩埚/城主工具/环境灾害"],
     "tce/item": ["塔莎的万事坩埚/魔法物品"],
     "tce/monster": ["塔莎的万事坩埚/魔法物品","塔莎的万事坩埚/玩家选项/职业"],
+    
+    "avantris; crooked moon/monster": ["第三方/歪曲之月/附录A"],    
+    "avantris; crooked moon/adventure": ["第三方/歪曲之月/模组"],    
 }

@@ -3,8 +3,8 @@ from config import LINE_TAGS
 from enum import Enum, auto
 
 class NodeType(Enum):
-    CONTENT = auto(0)
-    LINE = auto(1)
+    CONTENT = 0
+    LINE = auto()
     BR = auto()
     TABLE = auto()
     TITLE_SECONDARY = auto()
