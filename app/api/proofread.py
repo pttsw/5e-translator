@@ -52,7 +52,7 @@ class ProofreadApi(Resource, BaseApi):
             word = WordsModel.query.get(item.word_id)
             if word.update(commit=True, is_key = True) is None:
                 return error("新增失败：数据库变更失败")
-            return success(message=f"Item has been created successfully.", data = item.to_dict())
+            return success(message=f"新增成功", data = item.to_dict())
         else:
             return error("The request payload is not in JSON format")
     def _create(self, words):

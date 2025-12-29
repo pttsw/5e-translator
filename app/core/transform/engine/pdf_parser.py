@@ -17,7 +17,7 @@ class PdfParser:
     def __init__(self, file_path):
         self.file_path = file_path
         self.chinese_punctuation = r"。！？；…"
-        self.chinese_sentence_pattern = re.compile(f'([^{self.chinese_punctuation}]*[{self.chinese_punctuation}])')
+        self.chinese_sentence_pattern = re.compile(f'([{self.chinese_punctuation}]$)')
     
         
     def parse(self):
@@ -69,38 +69,43 @@ class PdfParser:
             # print(title_font_threshold)
             # 第二次遍历：根据字体大小识别标题和正文
             pre_title = ""
-            for block in all_blocks:
-                if "lines" in block:
-                    for line in block["lines"]:
-                        for span in line["spans"]:
-                            text = span.get("text", "").strip()
-                            if not text or text.isspace():
-                                continue
-                            
-                            # 获取字体大小
-                            font_size = span.get("size", 0)
-                            
-                            # 判断是否为标题（字体较大）
-                            if font_size >= title_font_threshold:
-                                if len(current_paragraph['content']) == 0:
-                                    current_paragraph['title'] += text
+            with open('output_temp.txt', 'w', encoding='utf-8') as f:
+                for block in all_blocks:
+                    f.write('\n')
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            for span in line["spans"]:
+                                text = span.get("text", "").strip()
+                                f.write(text)
+                                if self.chinese_sentence_pattern.match(text):
+                                    f.write('\n')
+                                if not text or text.isspace():
                                     continue
-                                # 如果当前已有正在处理的段落且内容不为空，保存当前段落
-                                if current_paragraph['title'] or len(current_paragraph['content']) > 0:
-                                    if not current_paragraph['title']:
-                                        current_paragraph['title'] = pre_title
-                                        
-                                    # current_paragraph['content'] = 
-                                    self.paragraphs.append(current_paragraph)
-                                pre_title = text
-                                # 开始新的段落，设置标题
-                                current_paragraph = {
-                                    'title': text,
-                                    'content': []
-                                }
-                            elif text != '':
-                                # 正文内容，添加到当前段落
-                                current_paragraph['content'].append(text)
+                                
+                                # 获取字体大小
+                                font_size = span.get("size", 0)
+                                
+                                # 判断是否为标题（字体较大）
+                                if font_size >= title_font_threshold:
+                                    if len(current_paragraph['content']) == 0:
+                                        current_paragraph['title'] += text
+                                        continue
+                                    # 如果当前已有正在处理的段落且内容不为空，保存当前段落
+                                    if current_paragraph['title'] or len(current_paragraph['content']) > 0:
+                                        if not current_paragraph['title']:
+                                            current_paragraph['title'] = pre_title
+                                            
+                                        # current_paragraph['content'] = 
+                                        self.paragraphs.append(current_paragraph)
+                                    pre_title = text
+                                    # 开始新的段落，设置标题
+                                    current_paragraph = {
+                                        'title': text,
+                                        'content': []
+                                    }
+                                elif text != '':
+                                    # 正文内容，添加到当前段落
+                                    current_paragraph['content'].append(text)
             
             # 添加最后一个段落（如果有）
             if current_paragraph['title'] or current_paragraph['content']:

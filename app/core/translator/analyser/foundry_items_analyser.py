@@ -9,7 +9,7 @@ class FoundryItemsAnalyser(BaseAnalyser):
         super().__init__(dictionary, rel_path)
         
         
-    def process_dict(self, en_dict, key_path, current_names = [], skip_keys = ["uuid"]):
+    def process_dict(self, en_dict, key_path, current_names = [], skip_keys = ["uuid"], tag:str = ""):
 
         if "uuid" in en_dict:
             match_k, match_v, _ = parse_foundry_items_uuid_format(en_dict["uuid"])
@@ -30,4 +30,4 @@ class FoundryItemsAnalyser(BaseAnalyser):
                     if j is None:
                         uid = uuid.uuid1()
                         self.set_job(uid, m, None, t, current_names=current_names)
-        return super().process_dict(en_dict, key_path, current_names, skip_keys)
+        return super().process_dict(en_dict, key_path, current_names, skip_keys, tag)

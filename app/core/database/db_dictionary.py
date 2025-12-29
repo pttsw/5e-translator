@@ -127,7 +127,7 @@ class DBDictionary:
             db.update('words', {'cn': input_str, 'proofread': 1,'modified_at': datetime.datetime.now()}, {'id': selected_id})
         self.__release_db(db_index)
     
-    def get(self, k: str, rel_f="", load_from_sql=False, ignore_case=False, tag=""):
+    def get(self, k: str, rel_f="", load_from_sql=False, ignore_case=False, tag="", correct_tag_from_db=False):
         """从数据库读取翻译
 
         Args:
@@ -143,7 +143,7 @@ class DBDictionary:
         """
         start_time = time.time()
         v_bean = None # 翻译结果   
-        redis_bean = self.__get_redis(k, tag, ignore_case)
+        redis_bean = self.__get_redis(k, tag, ignore_case, correct_tag_from_db)
         if redis_bean != None:
             v_bean = redis_bean
         # elif ignore_case:
@@ -161,7 +161,7 @@ class DBDictionary:
             logger.debug(f"从数据库中读取{k}")
             db_index = self.__get_db_index()
             db = self.db_list[db_index]
-            res = db.select('words', columns=['id', 'en', 'cn', 'json_file', 'proofread','category','modified_at'], condition={
+            res = db.select('words', columns=['id', 'en', 'cn', 'json_file', 'proofread','category','modified_at','is_key'], condition={
                             'en': k}, order_by='version desc')
             self.__release_db(db_index)
             if res == None:
@@ -181,22 +181,30 @@ class DBDictionary:
                         'cn': best_match['cn'],
                         'category': best_match['category'],
                         'proofread': best_match['proofread'],
+                        'is_key': best_match['is_key'], # 是否有校对
                         'sql_id': best_match['id'],
                         'modified_at': best_match['modified_at'],
                     }
                     if rel_f != "":
-                        # 尝试插入source表
-                        self.__put_source_by_word_id(best_match['id'], rel_f)
-                        logger.info(f"插入source表成功，word_id: {best_match['id']}, en: {best_match['en']}, cn: {best_match['cn']}")
+                        if correct_tag_from_db:
+                            redis_bean = self.__get_redis(k, tag, ignore_case, False)
+                            if redis_bean == None or redis_bean['category'] != best_match['category']:
+                                self.__put_source_by_word_id(best_match['id'], rel_f)
+                                logger.info(f"插入source表成功，word_id: {best_match['id']}, en: {best_match['en']}, cn: {best_match['cn']}")
+                        else:
+                            # 尝试插入source表
+                            self.__put_source_by_word_id(best_match['id'], rel_f)
+                            logger.info(f"插入source表成功，word_id: {best_match['id']}, en: {best_match['en']}, cn: {best_match['cn']}")
                 if v_bean == None:
                     v_bean = {
                         'cn': res[0]['cn'],
                         'category': res[0]['category'],
                         'proofread': res[0]['proofread'],
+                        'is_key': res[0]['is_key'],
                         'sql_id': res[0]['id'],
                         'modified_at': best_match['modified_at'],
                     }
-                self.__put_redis(k, v_bean['cn'], v_bean['category'], v_bean['proofread'], v_bean['sql_id'], v_bean['modified_at'])
+                self.__put_redis(k, v_bean['cn'], v_bean['category'], v_bean['proofread'], v_bean['is_key'], v_bean['sql_id'], v_bean['modified_at'])
         # self.__release_db(db_index)
         logger.debug(f"get函数执行时间：{time.time() - start_time} 秒")
         return v_bean
@@ -370,20 +378,21 @@ class DBDictionary:
         self.lower_dictionary = {}
         self.proofread_set = set()
 
-    def __put_redis(self, en, cn, category = None, proofread = 0, sql_id = None, modified_at = 0):
+    def __put_redis(self, en, cn, category = None, proofread = 0, is_key = False, sql_id = None, modified_at = 0):
         
         bean = {
             'cn': cn,
             'category': category,
             'proofread': proofread,
+            'is_key': is_key,
             'sql_id': sql_id,
             'modified_at': modified_at
         }
         if en in self.dictionary:
             if any(c['cn'] == cn and c['category'] == category for c in self.dictionary[en]):
-                raise ValueError(f"重复插入{en}->{cn}")
-                # print(f"重复插入{en}->{cn}")
-                # return
+                # raise ValueError(f"重复插入{en}->{cn}")
+                print(f"重复插入{en}->{cn}")
+                return
             self.dictionary[en].append(bean)
         else:
             self.dictionary[en] = [bean]
@@ -394,7 +403,7 @@ class DBDictionary:
         else:
             self.lower_dictionary[en] = [bean]
         
-    def __get_redis(self, en, tag = None, ignore_case = False):
+    def __get_redis(self, en, tag = None, ignore_case = False, correct_tag_from_db=False):
         if en in self.dictionary:
             cn_bean = None
             target_category = tag if tag else None
@@ -405,10 +414,11 @@ class DBDictionary:
                 cn_bean = c
             if cn_bean != None:
                 return cn_bean
-            for c in self.dictionary[en]:
-                if c['proofread'] == 1:
-                    return c
-            return self.dictionary[en][0]
+            if not correct_tag_from_db:
+                for c in self.dictionary[en]:
+                    if c['proofread'] == 1:
+                        return c
+                return self.dictionary[en][0]
         
         # 忽略大小写
         en = en.lower()
@@ -422,6 +432,8 @@ class DBDictionary:
                         cn_bean = c
             if cn_bean != None:
                 return cn_bean
+            if correct_tag_from_db:
+                return None
             for c in self.lower_dictionary[en]:
                 if c['proofread'] == 1:
                     return c
@@ -435,10 +447,10 @@ class DBDictionary:
         self.lock.acquire()
         if len(file_names) == 0:
             records = self.db_list[0].select(
-                'words', columns=['cn', 'en', 'version', 'proofread', 'category', 'modified_at'])
+                'words', columns=['cn', 'en', 'version', 'proofread', 'category', 'modified_at', 'is_key'])
         else:
             placeholders = ','.join(['%s'] * len(file_names))
-            sql = f"select id, cn, en, version, proofread, category, modified_at from words where id in (select word_id from source where file in ({placeholders}))"
+            sql = f"select id, cn, en, version, proofread, category, modified_at, is_key from words where id in (select word_id from source where file in ({placeholders}))"
             params = tuple(file_names)
             records = self.db_list[0].execute_query(sql, params)
         self.lock.release()
@@ -449,7 +461,7 @@ class DBDictionary:
             en = s['en']
             cn = s['cn']
             # db_k = en
-            self.__put_redis(en, cn, s['category'], s['proofread'], s['id'], s['modified_at'])
+            self.__put_redis(en, cn, s['category'], s['proofread'], s['is_key'], s['id'], s['modified_at'])
                 
             v = version_dict.get(en)
 
@@ -469,10 +481,11 @@ class DBDictionary:
     
     def update_file_table(self, file_path: str, source_file: str, total: int, translate: int, proofread: int):
         self.lock.acquire()
-        self.db_list[0].execute_non_query(
+        ok = self.db_list[0].execute_non_query(
             "INSERT INTO file (file, source_file, total, translate, proofread) VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE total = VALUES(total), translate = VALUES(translate), proofread = VALUES(proofread)",
             (file_path, source_file, total, translate, proofread))
         self.lock.release()
+        return ok
 
 if __name__ == "__main__":
     d = DBDictionary()

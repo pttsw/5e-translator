@@ -319,7 +319,7 @@ class JobProcessor(Runnable):
         # 初筛
         if "{@" in cn_str:
             # 初筛，包含@{的，需要继续处理
-            p_v, ok = self.__process_value(en_str)
+            p_v, ok = self.__process_value(en_str, tag=tag)
             if ok:
                 cn_str = p_v
             processed = True
@@ -366,14 +366,14 @@ class JobProcessor(Runnable):
                                 # 锁定tag
                                 cv_conditions.append(eev)
                             else:
-                                ccv, _ = self.__process_value(eev)
+                                ccv, _ = self.__process_value(eev, tag=cv_page)
                                 cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
                     elif cv_page in ["items", "spells", "optionalfeatures", "races"]:
                         cv_conditions = []
                         for eev in filter_values[2:]:
-                            ccv, _ = self.__process_value(eev)
+                            ccv, _ = self.__process_value(eev, tag=cv_page)
                             cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
@@ -385,7 +385,7 @@ class JobProcessor(Runnable):
                     cv_name, _ = self.__process_value(filter_values[0], tag="adventure")
                     cv_conditions = []
                     for eev in filter_values[2:]:
-                        ccv, _ = self.__process_value(eev)
+                        ccv, _ = self.__process_value(eev, tag="adventure")
                         cv_conditions.append(ccv)
                     cn_str = f"{cv_name}|{cv_source}|{'|'.join(cv_conditions)}"
                     return cn_str, True

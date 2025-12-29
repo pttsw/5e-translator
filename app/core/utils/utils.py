@@ -1,5 +1,5 @@
 import re
-from config import SKIP_PATTERN, SKIP_PREFIX, SKIP_SUFFIX, TOTAL_SKIP_PREFIX, SKIP_KEYS, SKIP_KEY_PATH, SKIP_ITEMS, FORCE_TRANSLATE_STR, logger
+from config import SKIP_PATTERN,SKIP_ONLY_PURE_STR_KEYS, SKIP_PREFIX, SKIP_SUFFIX, TOTAL_SKIP_PREFIX, SKIP_KEYS, SKIP_KEY_PATH, SKIP_ITEMS, FORCE_TRANSLATE_STR, logger
 import json
 from typing import Tuple, List
 
@@ -15,6 +15,8 @@ def check_skip_key(key: str, value: str, prefix_key_path: str):
         _type_: _description_
     """
     if key in SKIP_KEYS:
+        return True
+    if key in SKIP_ONLY_PURE_STR_KEYS and isinstance(value, str) and '@{' not in value:
         return True
     key_with_prefix = prefix_key_path+'/'+key
     # 去掉key_with_prefix中的[0]、[1]等

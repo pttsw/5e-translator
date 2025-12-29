@@ -39,7 +39,7 @@ PLU_SCENES_PATH="/data/plutonium-scenes/"
 FORCE_TRANSLATE_STR=["ox"]
 
 # JSON分析器所用的标签匹配配置，用于将JSON中的标签转换为数据库中对应的标签
-KEY_MATCHED_TAG={'gear':'item', 'baseItem':'item'}
+KEY_MATCHED_TAG={'gear':'item', 'baseItem':'item', 'attachedSpells':'spell', 'startingEquipment':'item'}
 
 # 检测字符串中标签所用的正则表达式
 # 检测字符串中是否包含标签，匹配标签的值
@@ -59,7 +59,7 @@ TOTAL_SKIP_PREFIX=['rarity=']
 # 跳过的后缀，此类字符串的后缀不翻译，只翻译后缀前面的内容
 SKIP_SUFFIX=['#2','#c','#x']
 # 完全跳过的键，有此类键的字符串，整个字符串都不翻译
-SKIP_KEYS=['source', 'fonts', 'type', 'path', 'id', 'href','mode','_meta','group','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId','identifier', 'walls']
+SKIP_KEYS=['source', 'fonts', 'type', 'path', 'id', 'href','mode','_meta','group','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId','identifier', 'walls', 'tag', 'mapRegions','preparedSpellsChange', 'casterProgression', 'scfType']
 # 完全跳过的路径，有此类路径的字符串，整个字符串都不翻译
 SKIP_KEY_PATH=[
   'ability/choose/from', 
@@ -83,8 +83,14 @@ SKIP_KEY_PATH=[
   'target/affects/count',
   # spells/foundry.json
   'activities/profiles/count'
-  'facility/prerequisite/spellcastingFocus'
-  ]
+  'facility/prerequisite/spellcastingFocus',
+
+  #class
+  'startingProficiencies/skills',
+  'multiclassing/proficienciesGained/skills'
+]
+# 仅当键对应的值为纯字符串时，才跳过该键,如果包含“{@aaa bbb}”的tag，则不跳过
+SKIP_ONLY_PURE_STR_KEYS=['weapons']
 # 跳过的项，有此类项的字符串，整个字符串都不翻译
 SKIP_ITEMS = [{'key':'action','value':'remove'}, {'key':'action','value':'insert'}]
 # SKIP_FILES = ['book/book-phb.json', 'bestiary/bestiary-mm.json']
@@ -183,6 +189,44 @@ PROMOT_KNOWLEDGE = """
     "trans_str":"Maddening Secrets (Costs 3 Actions)"
     }
   输出：{"trans_str":"疯狂诡秘（消耗3个动作）","add_terms":{}}
+"""
+
+# 禁止翻译的搬运Prompt
+PROMOT_KNOWLEDGE_FORCE = """
+- Role:D&D 5e 与 JSON 数据处理专家
+- Background: 用户需把 D&D 5e 英文Json数据转为特定格式的简体中文用于本地化。
+- Goals: 根据参考资料高效准确翻译并保留原格式。
+- Constrains:保证数据准确完整，JSON 文件可用；不允许自动翻译，必须严格使用参考资料中的中文原文；若在reference中没有找到对应的中文，则输出英文文本。
+- OutputFormat: 维持原 JSON 格式，只输出转换后数据，json 用英文引号。
+- Workflow:
+1.读取reference字段（相关术语及相似度较高的中文，部分术语可能不符合当前语境，需结合语境来进行转换）
+2.读取parents字段（当前trans_str转换文本的父层级，用于上下文理解）
+3.分析文件结构和数据类型。
+4.基于reference字段的术语、相似度较高的中文和parents字段的上下文，严格使用参考资料中的中文原文进行转换并维护数据。
+5.必须保留英文中的{@aaa bbb}格式的文本，并且转换后的文本需要**保证所有{@aaa bbb}的顺序与英文一致**。
+6.如果在reference字段中没有找到trans_str对应内容的中文译文，则直接输出英文文本。
+7.检查是否符合Json格式、{@aaa bbb}的**数量**、**内容**和**顺序**是否一致
+8.提取trans_str中在reference字段中未出现的人名、地名、法术名等专有名词，输出到add_terms字典中（常用词不属于专有名词，不要提取）
+9.输出译文及术语的Json
+- Examples:
+  输入：{
+    "parents":[("creature":"生物","Sul Khatesh","苏·卡特什")],
+    "refrence":["苏·卡特什向一个她60尺内能看见的生物低声说出一个魔法秘密。目标必须成功通过DC 26的感知豁免否则消耗自身一个3环或更低的法术位对自己30尺内每个生物造成26（4d12）力场伤害。","Sul Khatesh:['苏·卡特什'],"Wisdom:['感知']","Force:['力场']"],
+    "trans_str":"Sul Khatesh whispers an arcane secret into the mind of a creature she can see within 60 feet of her. The target must succeed on a {@dc 26} Wisdom saving throw or expend one of its spell slots of 3rd level or lower and deal 26 ({@damage 4d12}) force damage to each creature within 30 feet of it. "
+    }
+  输出：{"trans_str":"苏·卡特什向一个她60尺内能看见的生物低声说出一个魔法秘密。目标必须成功通过{@dc 26}的感知豁免否则消耗自身一个3环或更低的法术位对自己30尺内每个生物造成26（{@damage 4d12}）力场伤害。","add_terms":{"arcane secret": "魔法秘密"}}
+  输入：{
+    "parents":[("creature":"生物"),("Sul Khatesh","苏·卡特什")],
+    "refrence":["Maddening Secret": "疯狂诡秘"],
+    "trans_str":"Maddening Secrets (Costs 3 Actions)"
+    }
+  输出：{"trans_str":"疯狂诡秘（消耗3个动作）","add_terms":{}}
+  输入：{
+    "parents":[("creature":"生物")],
+    "refrence":["creature":"生物"],
+    "trans_str":"The creature has darkvision."
+    }
+  输出：{"trans_str":"The creature has darkvision.","add_terms":{}}
 """
 
 PROMOT_SPELL_XPHB = """

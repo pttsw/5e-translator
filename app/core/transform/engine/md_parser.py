@@ -14,8 +14,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # 导入markdown库用于解析markdown文件
 try:
     import markdown
+    from bs4 import BeautifulSoup
 except ImportError:
-    print("请安装markdown库以支持markdown文件解析: pip install markdown")
+    print("请安装markdown和beautifulsoup4库以支持markdown文件解析: pip install markdown beautifulsoup4")
     sys.exit(1)
 
 class MdParser:
@@ -47,8 +48,10 @@ class MdParser:
             with open(self.file_path, 'r', encoding='utf-8', errors='replace') as f:
                 md_content = f.read()
             
-            # 将Markdown转换为纯文本
-            plain_text = markdown.markdown(md_content, output_format='plain')
+            # 将Markdown转换为HTML，然后提取纯文本
+            html_content = markdown.markdown(md_content, output_format='html')
+            soup = BeautifulSoup(html_content, 'html.parser')
+            plain_text = soup.get_text()
             
             # 按段落分割文本
             paragraphs = plain_text.split('\n\n')

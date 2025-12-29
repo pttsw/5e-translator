@@ -20,7 +20,6 @@ class SourceApi(Resource, BaseApi):
     @login_required
     def put(self):
         params = request.get_json()
-        print(params)
         if params['file'] is None or params['word_id'] is None or params['new_word_id'] is None:
             return error("更新失败：file、word_id、new_word_id不能为空")
         try:

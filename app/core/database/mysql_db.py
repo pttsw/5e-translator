@@ -56,6 +56,8 @@ class MySQLDatabase:
         except pymysql.MySQLError as e:
             print(f"语句执行失败，错误原因: {e},{query},{params}")
             self.connection.rollback()
+            return False
+        return True
 
     def insert(self, table, data):
         """插入数据"""

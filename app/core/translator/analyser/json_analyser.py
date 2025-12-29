@@ -87,11 +87,17 @@ class JsonAnalyser(Runnable):
         :param file_path: 文件路径
         :return: None
         """
-        total = len(job_list)
-        proofread = sum([1 for j in job_list if j.is_proofread])
-        translate = 0
-        self.dictionary.update_file_table(file_path, source_file, total, translate, proofread)
+        sql_job_list = [j for j in job_list if j.sql_id is not None]
+        total = len(sql_job_list)
+        proofread = sum([1 for j in sql_job_list if j.is_proofread])
+        translate = sum([1 for j in sql_job_list if j.is_proofread or j.is_key])
         
+        ok = self.dictionary.update_file_table(file_path, source_file, total, translate, proofread)
+        if not ok:
+            logger.error(f"JsonAnalyser: 更新文件表 {file_path} 时出错")
+            return
+        else:
+            logger.info(f"JsonAnalyser: 更新文件表 {file_path} 成功, total={total}, translate={translate}, proofread={proofread}")
     def txt_2_json(self, json_txt):
         """
         json转txt

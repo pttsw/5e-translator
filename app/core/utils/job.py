@@ -3,7 +3,7 @@ from config import *
 from typing import Tuple
 
 class Job:
-    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, sql_id=None, modified_at=0, source="") -> (None):
+    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, is_key=False, sql_id=None, modified_at=0, source="") -> (None):
         self.uid = str(uid)
         self.en_str = en_str # 英文原文
         self.cn_str = cn_str # 中文译文
@@ -19,6 +19,7 @@ class Job:
         self.reference = ""
         self.err_time = 0
         self.need_translate = False
+        self.is_key = is_key
         self.sql_id = sql_id
         self.last_answer = ""
         self.modified_at = modified_at

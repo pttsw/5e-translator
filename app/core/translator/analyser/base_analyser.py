@@ -17,7 +17,8 @@ class BaseAnalyser:
         self.name_tag = get_tag_from_rel_path(self.rel_path)
         self.byhand = False
         self.load_from_sql = True
-        self.name_should_proofread = False
+        self.name_should_proofread = False # 对于Job的Parent是否只添加校对过得
+        self.correct_tag_from_db = False # 是否根据标签从数据库中准确抽取？(影响性能)
 
     def process(self,  en_obj: dict, byhand: bool = False):
         self.byhand = byhand
@@ -26,7 +27,7 @@ class BaseAnalyser:
                 for index, source in enumerate(en_obj["_meta"]["sources"]):
                     if "full" in source.keys():
                         source["full"] = self.str_2_job(source["full"], current_names=[], tag="adventure", key_path=f"._meta.sources[{index}].full")
-            res_dict, ok = self.process_dict(en_obj, "")
+            res_dict, ok = self.process_dict(en_obj, "", tag=self.name_tag)
             if not ok:
                 raise RuntimeError(f'process error:{en_obj}')
             
@@ -52,7 +53,7 @@ class BaseAnalyser:
                             })
                         credit_section["entries"].append(current_credits)
         elif (isinstance(en_obj, list)):
-            res_dict, ok = self.__process_list(en_obj, "")
+            res_dict, ok = self.__process_list(en_obj, "", tag=self.name_tag)
             if not ok:
                 raise RuntimeError(f'process error:{en_obj}')
         
@@ -96,10 +97,12 @@ class BaseAnalyser:
             en_str = f'{{!@ {uid}}}'
 
             # 处理tag的value内容
+            index=0
             for m, t in zip(match_v, match_k):
                 # 为tag的value内容生成子路径
-                sub_key_path = f"{key_path}.{t}" if key_path else f".{t}"
+                sub_key_path = f"{key_path}/{t}/{index}" if key_path else f"/{t}/{index}"
                 self.__split_and_append_job(m, t, current_names=current_names, key_path=sub_key_path)
+                index+=1
             return en_str
 
     def set_job(self, uid: str, en: str, cn: Optional[str] = None, tag=None, current_names: List = []):
@@ -114,6 +117,7 @@ class BaseAnalyser:
         """
         is_proofread = False
         sql_id = None
+        is_key = False
         modified_at = 0
         if cn is None:
             # 如果只有{@tag xxx}的文本，则无需翻译，直接原样放置即可
@@ -123,13 +127,16 @@ class BaseAnalyser:
                 # 先从内存中读取
                 cn_bean = self.dictionary.get(
                     en, load_from_sql=False, ignore_case=True, tag=tag)
+                if cn_bean != None and self.correct_tag_from_db and tag != "" and cn_bean['category'] != tag:
+                    cn_bean = None
                 if cn_bean == None and self.load_from_sql:
                     # 从数据库中读取
                     cn_bean = self.dictionary.get(
-                        en, rel_f=self.rel_path, load_from_sql=True, ignore_case=True, tag=tag)
+                        en, rel_f=self.rel_path, load_from_sql=True, ignore_case=True, tag=tag, correct_tag_from_db=self.correct_tag_from_db)
                 if cn_bean != None:
                     cn = cn_bean['cn']
                     is_proofread = cn_bean['proofread']
+                    is_key = cn_bean['is_key']
                     sql_id = cn_bean['sql_id']
                     modified_at = cn_bean['modified_at']
         
@@ -149,10 +156,10 @@ class BaseAnalyser:
                 names_in_job.append((name,name_job.cn_str))
             else:
                 names_in_job.append((name, ""))
-        self.job_list.append(Job(uid, en, cn, self.rel_path, tag, [
-        ], names_in_job, is_proofread, sql_id, modified_at=modified_at))
+        self.job_list.append(Job(uid, en, cn, rel_path=self.rel_path, tag=tag, knowledge=[
+        ], current_names=names_in_job, is_proofread=is_proofread, is_key=is_key, sql_id=sql_id, modified_at=modified_at))
 
-    def process_dict(self, en_dict: dict, key_path: str, current_names: list = [], skip_keys: list = []):
+    def process_dict(self, en_dict: dict, key_path: str, current_names: list = [], skip_keys: list = [], tag: str = ""):
         """检查dict类型，输出处理完的dict
 
         Args:
@@ -172,17 +179,16 @@ class BaseAnalyser:
             __current_names.append(en_dict["name"])
             self.name_list.append(en_dict["name"])
             res_dict['ENG_name'] = en_dict["name"]
-            name_job = self.get_job(en_dict["name"],tag=self.name_tag)
+            name_job = self.get_job(en_dict["name"],tag=tag)
             if name_job is None:
                 cn_bean = self.dictionary.get(
-                    en_dict["name"], load_from_sql=False, ignore_case=True, tag=self.name_tag)
+                    en_dict["name"], load_from_sql=False, ignore_case=True, tag=tag)
                 if cn_bean != None:
                     res_dict['name'] = cn_bean['cn']
-                    # print(self.name_tag)
                             # 将当前元素的名称列表转换为(name,cn_str)的元组列表
                     names_in_job = []
                     for name in current_names:
-                        name_job = self.get_job(name,tag=self.name_tag)
+                        name_job = self.get_job(name,tag=tag)
                         if name_job is None:
                             continue
                         if (not self.name_should_proofread) or name_job.is_proofread:
@@ -192,8 +198,8 @@ class BaseAnalyser:
                     names_in_job.append((en_dict["name"], cn_bean['cn'] if cn_bean['proofread'] else ""))
                     # 使用jsonpath作为唯一标识
                     name_jsonpath = f'$' + (key_path + '/name').replace('/', '.')
-                    self.job_list.append(Job(name_jsonpath, en_dict["name"], cn_bean['cn'], self.rel_path, self.name_tag, [
-                    ], names_in_job, cn_bean['proofread'], cn_bean['sql_id'], modified_at=cn_bean['modified_at']))
+                    self.job_list.append(Job(name_jsonpath, en_dict["name"], cn_bean['cn'], rel_path=self.rel_path, tag=tag, knowledge=[
+                    ], current_names=names_in_job, is_proofread=cn_bean['proofread'], is_key=cn_bean['is_key'], sql_id=cn_bean['sql_id'], modified_at=cn_bean['modified_at']))
                     skip_name = True
             else:
                 res_dict['name'] = name_job.cn_str
@@ -207,7 +213,6 @@ class BaseAnalyser:
             if check_skip_key(k, v, key_path) or k in skip_keys:
                 res_dict[k] = v
             else:
-                tag = ""
                 if k in KEY_MATCHED_TAG.keys():
                     tag = KEY_MATCHED_TAG[k]
                 tmp_dict, ok = self.process_base_item(
@@ -241,17 +246,17 @@ class BaseAnalyser:
             tmp_str = self.str_2_job(en_item, current_names, tag, key_path)
             return tmp_str, True
         elif isinstance(en_item, dict):
-            return self.process_dict(en_item, key_path, current_names)
+            return self.process_dict(en_item, key_path, current_names, tag=tag)
         elif isinstance(en_item, list):
-            return self.__process_list(en_item, key_path, current_names)
+            return self.__process_list(en_item, key_path, current_names, tag=tag)
         return None, False
 
-    def __process_list(self, en_list, key_path, current_names: list = []):
+    def __process_list(self, en_list, key_path, current_names: list = [], tag: str = ""):
         res_list = []
         for index, v in enumerate(en_list):
             # 对于列表项，我们需要在key_path后添加索引以确保唯一性
             list_item_key_path = f"{key_path}[{index}]"
-            tmp_list, ok = self.process_base_item(v, list_item_key_path, current_names)
+            tmp_list, ok = self.process_base_item(v, list_item_key_path, current_names, tag=tag)
             if not ok:
                 logger.error(f"{self.rel_path}解析{v}时出错")
             res_list.append(tmp_list)

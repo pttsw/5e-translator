@@ -7,6 +7,8 @@ from app.model import FileModule
 from config import SPLITED_5ETOOLS_EN_PATH, logger, APP_TEMP_PATH
 from app.core.translator import JsonAnalyser
 from .base import BaseApi
+from app.core.utils.parser import get_source_json_to_full
+
 api = Api()
 
 def find_json_files(root_folder:str):
@@ -23,6 +25,7 @@ def find_json_files(root_folder:str):
                 if db_file.file == rel_path:
                     json_files.append({
                         'file': rel_path,
+                        'display_name': rel_path.split('/')[-1],
                         'source_file': db_file.source_file,
                         'total': db_file.total,
                         'translate': db_file.translate,
@@ -36,6 +39,7 @@ def find_json_files(root_folder:str):
             # 查询file_list中以此文件夹为前缀的文件
             dir_file = {
                 'file': rel_path,
+                'display_name': get_source_json_to_full(rel_path.split('/')[-1]),
                 'source_file': '',
                 'total': 0,
                 'translate': 0,
