@@ -1,4 +1,5 @@
 from .analyser.json_analyser import JsonAnalyser
+from .json_generator import JsonGenerator
 from .job_processor import JobProcessor
 from .knowledge_setter import KnowledgeSetter
 from .term_setter import TermSetter

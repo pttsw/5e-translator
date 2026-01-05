@@ -4,7 +4,7 @@ import json
 PTTSW_ID_PREIX = "@Key@"
 class DocumentBean:
     
-    def __init__(self, data: dict, type: str = "", source: str = "", _meta: dict = {}):
+    def __init__(self, data: dict, type: str = "", source: str = "", _meta: dict = {}, origin_file: str = ""):
         """每个最小的文件单元
 
         Args:
@@ -45,6 +45,7 @@ class DocumentBean:
         # 设置path
         
         self._meta["pttsw_id"] = f"{self.source}/{self.type}/{self.id}"
+        self._meta["origin_file"] = origin_file
         self.path = self._meta["pttsw_id"] + ".json"
         self.data = data
     def __dict__(self):

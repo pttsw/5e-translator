@@ -41,9 +41,8 @@ class ProofreadApi(Resource, BaseApi):
             data = request.get_json()
             data['modified_by'] = user_id
             data['accepted'] = 0
-            print(data)
-            if ProofreadModel.query.filter_by(word_id = data['word_id']).filter_by(cn = data['cn']).first():
-                return error("请勿重复提交已存在的翻译！")
+            # if ProofreadModel.query.filter_by(word_id = data['word_id']).filter_by(cn = data['cn']).first():
+            #     return error("请勿重复提交已存在的翻译！")
             
             item = self.model.create(commit=True, **data, createFunc=self._create)
             if item is None:

@@ -1,7 +1,7 @@
 import uuid
 from config import logger,KEY_MATCHED_TAG
 from typing import List, Optional
-from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path
+from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path
 from app.core.database import DBDictionary
 # 添加jsonpath_ng的导入
 from jsonpath_ng import parse
@@ -15,19 +15,24 @@ class BaseAnalyser:
         self.dictionary = dictionary
         self.rel_path = rel_path
         self.name_tag = get_tag_from_rel_path(self.rel_path)
+        self.source = get_source_from_rel_path(self.rel_path)
         self.byhand = False
         self.load_from_sql = True
         self.name_should_proofread = False # 对于Job的Parent是否只添加校对过得
         self.correct_tag_from_db = False # 是否根据标签从数据库中准确抽取？(影响性能)
+        self.locked_entries = {} # 已锁定的条目
 
     def process(self,  en_obj: dict, byhand: bool = False):
         self.byhand = byhand
+        
+        self.locked_entries = self.dictionary.dumpLockedEntries([self.rel_path])
         if (isinstance(en_obj, dict)):
             if "_meta" in en_obj.keys() and "sources" in en_obj["_meta"]:
                 for index, source in enumerate(en_obj["_meta"]["sources"]):
                     if "full" in source.keys():
                         source["full"] = self.str_2_job(source["full"], current_names=[], tag="adventure", key_path=f"._meta.sources[{index}].full")
-            res_dict, ok = self.process_dict(en_obj, "", tag=self.name_tag)
+            res_dict, ok = self.process_first_level(en_obj, self.source)
+            # res_dict, ok = self.process_dict(en_obj, "", tag=self.name_tag)
             if not ok:
                 raise RuntimeError(f'process error:{en_obj}')
             
@@ -56,7 +61,6 @@ class BaseAnalyser:
             res_dict, ok = self.__process_list(en_obj, "", tag=self.name_tag)
             if not ok:
                 raise RuntimeError(f'process error:{en_obj}')
-        
         return res_dict, self.job_list
 
     def str_2_job(self, en_str: str, current_names: list = [], tag = "", key_path = ""):
@@ -158,6 +162,70 @@ class BaseAnalyser:
                 names_in_job.append((name, ""))
         self.job_list.append(Job(uid, en, cn, rel_path=self.rel_path, tag=tag, knowledge=[
         ], current_names=names_in_job, is_proofread=is_proofread, is_key=is_key, sql_id=sql_id, modified_at=modified_at))
+
+    def process_first_level(self, obj: dict, source = None):
+        """处理dict的第一级，将其中的每个元素添加到Job列表中
+
+        Args:
+            obj (dict): 英文dict
+        """
+        res_dict = {}
+        for k, v in obj.items():
+            if k == '_meta':
+                res_dict[k] = v
+                continue
+            if isinstance(v, dict):
+                cn_json, is_ok = self.process_locked_entry(v, k, source)
+                if not is_ok:
+                    tmp_dict, ok = self.process_base_item(v, f"/{k}", current_names=[], tag=self.name_tag)
+                    if not ok:
+                        raise Exception(f"处理dict {k} 失败")
+                    res_dict[k] = tmp_dict
+                else:
+                    res_dict[k] = cn_json
+            elif isinstance(v, list):
+                res_dict[k] = []
+                for index, entry in enumerate(v):
+                    if isinstance(entry, dict):
+                        cn_json, is_ok = self.process_locked_entry(entry, k, source)
+                        if is_ok:
+                            res_dict[k].append(cn_json)
+                            continue
+                    list_item_key_path = f"/{k}[{index}]"
+                    tmp_dict, ok = self.process_base_item(entry,  list_item_key_path, current_names=[], tag=self.name_tag)
+                    if not ok:
+                        raise Exception(f"处理list {k} 失败")
+                    res_dict[k].append(tmp_dict)
+        return res_dict, True
+
+
+
+    def process_locked_entry(self, obj: dict, key:str, source = None):
+        """处理已锁定的条目
+
+        Args:
+            obj (dict): 已锁定的条目
+        """
+        if len(self.locked_entries) == 0:
+            return None, False
+        if not isinstance(obj, dict):
+            return None, False
+        if 'source' in obj.keys():
+            source = obj['source'].lower()
+        if source is None or source == "": 
+            return None,False
+        if 'name' not in obj.keys():
+            return None, False
+        entry_id = f'{obj["name"].replace(" ","-").lower()}'
+        if 'id' in obj.keys():
+            entry_id = f'{obj["id"]}'
+        file_name = f'{source}/{key}/{entry_id}.json'
+        if self.locked_entries.get(file_name) is None:
+            return None, False
+        cn_json = self.locked_entries[file_name].get('cn_json')
+        if cn_json is None:
+            return None, False
+        return self.locked_entries[file_name].get('cn_json'), True
 
     def process_dict(self, en_dict: dict, key_path: str, current_names: list = [], skip_keys: list = [], tag: str = ""):
         """检查dict类型，输出处理完的dict

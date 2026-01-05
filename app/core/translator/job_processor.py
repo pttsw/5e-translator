@@ -377,7 +377,7 @@ class JobProcessor(Runnable):
                             cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
-            if tag == "adventure":
+            if tag == "adventure" or tag == "area":
                filter_values = en_str.split("|")
                if (len(filter_values) > 2):
                     # 正常至少有3个值
@@ -432,7 +432,7 @@ class JobProcessor(Runnable):
         # 若替换成功，调用 __write_json 方法将替换后的内容写入JSON文件
         json_path = os.path.join(OUT_PATH, json_path)
         job_path = json_path + ".jobs"
-        if not (os.path.exists(json_path) and os.path.exists(job_path)):
+        if not (os.path.exists(job_path)):
             return False
         if self.mode == 'homebrew':
             # 删除原始文件
@@ -459,6 +459,10 @@ class JobProcessor(Runnable):
             logger.debug(e)
             return False
         return True
+    
+    # def __replace_first_level_job(self, obj) {
+    #     if
+    # }
 
     def __replace_jobs(self, obj):
         """_summary_
@@ -511,25 +515,6 @@ class JobProcessor(Runnable):
                         obj[k] = new_v
                 except Exception as exc:
                     logger.error(f'{k} generated an exception: {exc}')
-            # with concurrent.futures.ThreadPoolExecutor() as executor:
-            #     futures = {executor.submit(
-            #         self.__replace_jobs, v): k for k, v in obj.items()}
-            #     for future in concurrent.futures.as_completed(futures):
-            #         k = futures[future]
-            #         try:
-            #             new_v, ok = future.result()
-            #             if ok:
-            #                 # 临时在这里特殊处理foundry-items.json和foundry-optinalfeatures.json中的uuid特殊格式
-            #                 if (k == "uuid"):
-            #                     match_k, match_v,_ = parse_foundry_items_uuid_format(new_v)
-            #                     if (len(match_k) > 0):
-            #                         for v in match_v:
-            #                             cn_v,_ = self.__get(v)
-            #                             new_v = new_v.replace(v, cn_v)
-                            
-            #                 obj[k] = new_v
-            #         except Exception as exc:
-            #             logger.error(f'{k} generated an exception: {exc}')
             return obj, True
         elif isinstance(obj, list):
             for i, o in enumerate(obj):

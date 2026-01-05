@@ -1,6 +1,6 @@
 import argparse
 from app.core.utils import find_json_files, write_translate_cache, Job, FileWorkInfo
-from app.core.translator import JsonAnalyser, JobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler
+from app.core.translator import JsonAnalyser, JobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler, JsonGenerator
 from app.cli import transform_proofread, search_knowledge, compare_term, add_mysql_terms_to_redis, combine_temp_terms_to_csv,load_files_into_chroma_db, load_chm_files_into_chroma_db, load_term_from_text, transform_html_2_txt
 from app.core.para import ParaUpdater, set_terms_to_para
 from config import EN_PATH, logger
@@ -88,7 +88,8 @@ def main():
                 args.en = UA_EN_PATH
         
         res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
-        # res = (find_json_files|JsonAnalyser()).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
+        # res = (find_json_files|JsonAnalyser()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
+        # res = (find_json_files|JsonAnalyser()|JsonGenerator(args.thread_num)|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'splited': args.splited})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title})

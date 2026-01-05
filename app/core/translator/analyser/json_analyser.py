@@ -2,8 +2,8 @@ import json
 import uuid
 import os
 from typing import List, Tuple
-from config import  EN_PATH, PLU_EN_PATH, SKIP_FILES, SKIP_DIRS, logger, SPLITED_5ETOOLS_EN_PATH, HOMEBREW_EN_PATH, UA_EN_PATH, PLU_SCENES_PATH, PLU_DBD_PATH
-from app.core.utils import read_file, get_rel_path, FileWorkInfo, Job
+from config import  EN_PATH, PLU_EN_PATH, SKIP_FILES, SKIP_DIRS, logger, SPLITED_5ETOOLS_EN_PATH, HOMEBREW_EN_PATH, UA_EN_PATH, PLU_SCENES_PATH, PLU_DBD_PATH, ADD_TRANSLATOR_KEY
+from app.core.utils import read_file, get_rel_path, FileWorkInfo, Job, get_file_name_from_obj
 from app.core.database import DBDictionary
 from langchain_core.runnables import Runnable
 from .base_analyser import BaseAnalyser
@@ -23,6 +23,8 @@ class JsonAnalyser(Runnable):
         self.knowledge = None
         self.byhand = False
         self.mode = '5et' # 是否是处理拆分后的数据
+        self.en_obj = None # 英文json对象
+        self.entries = None # 存放所有的entry
 
     def __init_dictionary(self):
         """
@@ -37,6 +39,7 @@ class JsonAnalyser(Runnable):
         
         # print(config)
         for j in inputs:
+            self.en_obj = None
             if self.mode == '5et':
                 # 判断j是否在EN_PATH下的文件
                 if not j.startswith(EN_PATH):
@@ -72,15 +75,34 @@ class JsonAnalyser(Runnable):
             if job_list is None or obj is None:
                 logger.warning(f"JsonAnalyser: 文件 {j} 中的Json为空，跳过处理")
                 continue
+            if self.mode == '5et':
+                for k in obj.keys():
+                    if k in ADD_TRANSLATOR_KEY:
+                        for s in obj[k]:
+                            if not isinstance(s, dict): continue
+                            obj_file_name=get_file_name_from_obj(s, k)
+                            if obj_file_name == '': continue
+                            info = self.dictionary.get_file_info(obj_file_name)
+                            if info is None: continue
+                            if info['translate'] != info['total']: continue
+                            
+                            s['translator'] = '不全书'
+            #     # 设置翻译tag
+            #     for k in obj.keys():
+            #         if k == 'spell':
+            #             for s in obj[k]:
+            #                 s['translator'] = '不全书'
+
+            #     yield FileWorkInfo(job_list, obj, self.rel_path, self.rel_path)
             if self.mode == 'splited':
-                self.__update_file_table(get_rel_path(j, SPLITED_5ETOOLS_EN_PATH), self.rel_path, job_list)
+                self.__update_file_table(self.en_obj, get_rel_path(j, SPLITED_5ETOOLS_EN_PATH), self.rel_path, job_list)
                 yield FileWorkInfo(job_list, obj, self.rel_path, get_rel_path(j, SPLITED_5ETOOLS_EN_PATH))
             elif self.mode == 'plu':
                 yield FileWorkInfo(job_list, obj, self.rel_path, self.rel_path.replace('plu/', ''))
             else:
                 yield FileWorkInfo(job_list, obj, self.rel_path, self.rel_path)
 
-    def __update_file_table(self, file_path: str, source_file: str, job_list: List[Job]):
+    def __update_file_table(self, en_obj:dict, file_path: str, source_file: str, job_list: List[Job]):
         """
         更新文件表
 
@@ -91,8 +113,14 @@ class JsonAnalyser(Runnable):
         total = len(sql_job_list)
         proofread = sum([1 for j in sql_job_list if j.is_proofread])
         translate = sum([1 for j in sql_job_list if j.is_proofread or j.is_key])
+        # 获取en_obj除了_meta以外的key
+        en_obj_key = [k for k in self.en_obj.keys() if k != '_meta']
+        if len(en_obj_key) != 1:
+            logger.error(f"JsonAnalyser: 文件 {file_path} 中的Json格式错误，跳过处理")
+            return
+        pure_en = json.dumps(self.en_obj[en_obj_key[0]])
         
-        ok = self.dictionary.update_file_table(file_path, source_file, total, translate, proofread)
+        ok = self.dictionary.update_file_table(file_path, source_file, total, translate, proofread, pure_en)
         if not ok:
             logger.error(f"JsonAnalyser: 更新文件表 {file_path} 时出错")
             return
@@ -160,6 +188,8 @@ class JsonAnalyser(Runnable):
             en_json_obj, ok = self.txt_2_json(read_file(json_file))
             if not ok:
                 return None, None, False
+        self.en_obj = en_json_obj
+
         obj = {}  # 替换了Job uuid 标识符的json对象
         if self.rel_path in ["spells/sources.json", "icon-class.json", "icon-spell.json", "icon-feat.json", "icon-subclass.json", "bestiary/foundry-integration-token-subjects.json"]:
             # 针对法术source文件进行特殊处理
@@ -189,7 +219,6 @@ class JsonAnalyser(Runnable):
                 en_name = json_file[json_file.rfind('-')+1:json_file.rfind('.json')].strip()
                 analyser.set_job('{!@ #UA}', en_name, None)
             obj, self.job_list = analyser.process(en_json_obj, self.byhand)
-
 
         return self.job_list, obj, True
 

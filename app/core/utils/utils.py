@@ -506,3 +506,35 @@ def get_tag_from_rel_path(rel_path: str):
             return 'variantrule'
         
     return ''
+
+def get_source_from_rel_path(rel_path: str):
+    if '/' in rel_path:
+        file_name = rel_path.split('/')[-1].replace('fluff-', '').replace('foundry-', '').replace('.json', '')
+        if file_name.startswith('book-'):
+            return file_name.replace('book-', '')
+        elif file_name.startswith('bestiary-'):
+            return file_name.replace('bestiary-', '')
+        elif file_name.startswith('spells-'):
+            return file_name.replace('spells-', '')
+        elif file_name.startswith('adventure-'):
+            return file_name.replace('adventure-', '')
+    else:
+        return rel_path.replace('.json', '').replace('fluff-', '').replace('foundry-', '')
+
+def get_file_name_from_obj(obj: dict, tag: str) -> str:
+    """从json对象中获取分割后的文件名
+
+    Args:
+        obj (dict): json对象
+
+    Returns:
+        str: 文件名
+    """
+    if not isinstance(obj, dict): return ''
+    if 'source' not in obj.keys(): return ''
+    if 'ENG_name' not in obj.keys(): return ''
+    paths = []
+    paths.append(obj['source'].replace(' ', '-').lower())
+    paths.append(tag)
+    paths.append(obj['ENG_name'].replace(' ', '-').lower())
+    return '/'.join(paths)

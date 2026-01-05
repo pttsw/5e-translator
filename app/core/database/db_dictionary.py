@@ -1,6 +1,7 @@
 import threading
 import time
 import datetime
+import json
 from .mysql_db import MySQLDatabase
 from config import DB_CONFIG, logger
 from app.core.utils import find_reference
@@ -467,6 +468,29 @@ class DBDictionary:
 
             if v != None and v >= s['version']:
                 continue
+    def dumpLockedEntries(self, entry_names=[]):
+        """
+        提取已锁定的文件
+        """
+        self.lock.acquire()
+        if len(entry_names) == 0:
+            self.lock.release()
+            return {}
+        else:
+            placeholders = ','.join(['%s'] * len(entry_names))
+            sql = f"select file, en_json, cn_json from file where source_file in ({placeholders}) and locked = 1"
+            params = tuple(entry_names)
+            files = self.db_list[0].execute_query(sql, params)
+        self.lock.release()
+        res = {}
+        for f in files:
+            en_json = json.loads(f['en_json'])
+            cn_json = json.loads(f['cn_json'])
+            res[f['file']] = {
+                'en_json': en_json,
+                'cn_json': cn_json
+            }
+        return res
 
     def is_proofread(self, k: str):
         return k in self.proofread_set
@@ -479,13 +503,23 @@ class DBDictionary:
         self.lock.release()
         return credits
     
-    def update_file_table(self, file_path: str, source_file: str, total: int, translate: int, proofread: int):
+    def update_file_table(self, file_path: str, source_file: str, total: int, translate: int, proofread: int, en_json: str = None):
         self.lock.acquire()
         ok = self.db_list[0].execute_non_query(
-            "INSERT INTO file (file, source_file, total, translate, proofread) VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE total = VALUES(total), translate = VALUES(translate), proofread = VALUES(proofread)",
-            (file_path, source_file, total, translate, proofread))
+            "INSERT INTO file (file, source_file, total, translate, proofread, en_json) VALUES (%s, %s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE total = VALUES(total), translate = VALUES(translate), proofread = VALUES(proofread), en_json = VALUES(en_json)",
+            (file_path, source_file, total, translate, proofread, en_json))
         self.lock.release()
         return ok
+    
+    def get_file_info(self, file_path: str):
+        if not file_path.endswith('.json'):
+            file_path += '.json'
+        self.lock.acquire()
+        info = self.db_list[0].select(
+            'file', columns=['total', 'translate', 'proofread'],
+            condition={'file': file_path})
+        self.lock.release()
+        return info[0] if info else None
 
 if __name__ == "__main__":
     d = DBDictionary()

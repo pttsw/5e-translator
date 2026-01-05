@@ -5,10 +5,10 @@ from flask_restful import Resource, Api, request
 from .restful_utils import *
 from app.model import FileModule
 from config import SPLITED_5ETOOLS_EN_PATH, logger, APP_TEMP_PATH
-from app.core.translator import JsonAnalyser
+from app.core.translator import JsonAnalyser, JsonGenerator
 from .base import BaseApi
 from app.core.utils.parser import get_source_json_to_full
-
+from app.core.utils.loader import write_file_work_infos
 api = Api()
 
 def find_json_files(root_folder:str):
@@ -30,6 +30,7 @@ def find_json_files(root_folder:str):
                         'total': db_file.total,
                         'translate': db_file.translate,
                         'proofread': db_file.proofread,
+                        'locked': db_file.locked,
                     })
                     in_db = True
                     break
@@ -70,7 +71,17 @@ class JsonApi(Resource):
                 return success(data=files)
             elif os.path.isfile(file_path):
                 with open(file_path, 'r') as file:
-                    job_list = self.__get_job_list_by_file(file_path)
+                    db_file = FileModule.query.filter_by(file=file_name).first()
+                    if db_file is None:
+                        return error(f"{file_name}不在数据库中")
+                    if db_file.locked:
+                        return success(data={
+                            'file': file_name,
+                            'locked': True,
+                            'cn_content': db_file.cn_json,
+                            'json_content': db_file.en_json,
+                        })
+                    job_list, cn_obj = self.__get_job_list_by_file(file_path)
                     
                     content = file.read()
                     json_content = json.loads(content)
@@ -83,6 +94,7 @@ class JsonApi(Resource):
                         'translate': 0,
                         'proofread': len([j for j in job_list if j['is_proofread'] == 0]),
                         'job_list': job_list,
+                        'cn_content': cn_obj,
                         'json_content': json_content,
                     }])
         else:
@@ -98,31 +110,25 @@ class JsonApi(Resource):
             return []
         job_list = []
         rel_path = os.path.relpath(file_path, SPLITED_5ETOOLS_EN_PATH)
-        job_file_path = os.path.join(APP_TEMP_PATH, rel_path.replace('.json', '.job.json'))
-        if os.path.exists(job_file_path):
+        job_file_path = os.path.join(APP_TEMP_PATH, rel_path+'.jobs')
+        cn_file_path = os.path.join(APP_TEMP_PATH, rel_path)
+        if os.path.exists(job_file_path) and os.path.exists(cn_file_path):
             with open(job_file_path, 'r') as job_file:
                 job_list = json.load(job_file)
+            with open(cn_file_path, 'r') as cn_file:
+                cn_obj = json.load(cn_file)
         else:
-            json_analyser = JsonAnalyser()
-            file_work_infos = json_analyser.invoke([file_path],{'metadata':{'mode':'splited'}})
+            file_work_infos = (JsonAnalyser()|JsonGenerator(1)).invoke([file_path],{'metadata':{'mode':'splited'}})
             os.makedirs(os.path.dirname(job_file_path), exist_ok=True)
             for file_work_info in file_work_infos:
-                # 只留下need_translate为True的
+            #     # 只留下数据库里有的
                 file_work_info.job_list = [j.__dict__ for j in file_work_info.job_list if j.sql_id]
-            with open(job_file_path, 'w') as job_file:
-                job_file.write('[\n')
-                first_flag = True
-                for j in file_work_info.job_list:
-                    if first_flag:
-                        first_flag = False
-                    else:
-                        job_file.write(',\n')
-                    job_file.write(json.dumps(
-                        j, default=lambda o: o.__dict__ if hasattr(o, '__dict__') else str(o), ensure_ascii=False, indent=2))
-                job_file.write('\n]')
+                write_file_work_infos(file_work_info, APP_TEMP_PATH)
             with open(job_file_path, 'r') as job_file:
                 job_list = json.load(job_file)
-        return job_list
+            with open(cn_file_path, 'r') as cn_file:
+                cn_obj = json.load(cn_file)
+        return job_list, cn_obj
         
     def __check_source(self, json_dict, source):
         return_dict = {}

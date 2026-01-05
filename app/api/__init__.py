@@ -13,3 +13,5 @@ from .json import api
 api.init_app(api_bp)
 from .source import api
 api.init_app(api_bp)
+from .file import api
+api.init_app(api_bp)

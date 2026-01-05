@@ -1,7 +1,7 @@
 
 from typing import List,Optional
 
-from config import logger
+from logger_config import logger
 from .bean import DocumentBean, PTTSW_ID_PREIX
 
 def split_common_entry(origin_json: dict, prefix_id: str) -> (Optional[List[DocumentBean]]):
@@ -32,7 +32,7 @@ def split_common_entry(origin_json: dict, prefix_id: str) -> (Optional[List[Docu
                 split_bean.id = f"{prefix_id}-{entry_index}"
                 res_bean_list.append(split_bean)
 
-def split_bestiary(origin_json: dict, source:str) -> (Optional[List[DocumentBean]]):
+def split_bestiary(origin_json: dict, source:str, origin_file: str = "") -> (Optional[List[DocumentBean]]):
     """检查bestiary-xxx.json是否符合拆分条件，符合则返回拆分后的SplitBean列表
 
     Args:
@@ -46,7 +46,7 @@ def split_bestiary(origin_json: dict, source:str) -> (Optional[List[DocumentBean
     # 检查基础data字段是否存在
     if "monster" not in origin_json or not isinstance(origin_json["monster"], list):
         # logger.error(f"bestiary json {prefix_id} not found data field or data is not list")
-        return None
+        return None, {}
     
     combine_info = {}
     res = []
@@ -63,12 +63,12 @@ def split_bestiary(origin_json: dict, source:str) -> (Optional[List[DocumentBean
             "data": item,
             "name": item["name"] ,
             "type": "statblockInline",
-        }, type="monster", source=source, _meta=_meta)
+        }, type="monster", source=source, _meta=_meta, origin_file=origin_file)
         res.append(document_bean)
         combine_info["monster"].append(PTTSW_ID_PREIX + document_bean._meta["pttsw_id"])
     return res, combine_info
 
-def split_class(origin_json: dict, source:str) -> (Optional[List[DocumentBean]]):
+def split_class(origin_json: dict, source:str, origin_file: str = "") -> (Optional[List[DocumentBean]]):
     """检查class-xxx.json是否符合拆分条件，符合则返回拆分后的SplitBean列表
 
     Args:
@@ -91,18 +91,20 @@ def split_class(origin_json: dict, source:str) -> (Optional[List[DocumentBean]])
         return None
     combine_info["classFeature"] = []
     for item in origin_json["classFeature"]:
-        document_bean = DocumentBean(item, type="classFeature", _meta=_meta)
+        # 这里不要传入source，因为按照从文件名获得的source（传入的）是错的，所以让DocumentBean自动从item里面拿。
+        document_bean = DocumentBean(item, type="classFeature", _meta=_meta, origin_file=origin_file)
         res.append(document_bean)
         combine_info["classFeature"].append(PTTSW_ID_PREIX + document_bean._meta["pttsw_id"])
     if "subclassFeature" in origin_json and isinstance(origin_json["subclassFeature"], list):
         combine_info["subclassFeature"] = []
         for item in origin_json["subclassFeature"]:
-            document_bean = DocumentBean(item, type="subclassFeature", _meta=_meta)
+            # 这里不要传入source，因为按照从文件名获得的source（传入的）是错的，所以让DocumentBean自动从item里面拿。
+            document_bean = DocumentBean(item, type="subclassFeature", _meta=_meta, origin_file=origin_file)
             res.append(document_bean)
             combine_info["subclassFeature"].append(PTTSW_ID_PREIX + document_bean._meta["pttsw_id"])
     return res, combine_info
 
-def split_normal_file(origin_json: dict, source:str, skip_keys: List[str] = []):
+def split_normal_file(origin_json: dict, source:str, origin_file: str = "", skip_keys: List[str] = []):
     """检查普通文件是否符合拆分条件，符合则返回拆分后的DocumentBean列表
 
     Args:
@@ -116,6 +118,9 @@ def split_normal_file(origin_json: dict, source:str, skip_keys: List[str] = []):
     res = []
     _meta = {}
     combine_info = {}
+    if not isinstance(origin_json,dict):
+        logger.error(f"normal json {origin_file} not found data field or data is not dict")
+        return None, None
     for key, value in origin_json.items():
         if key == '_meta':
             combine_info[key] = value
@@ -126,7 +131,7 @@ def split_normal_file(origin_json: dict, source:str, skip_keys: List[str] = []):
         elif isinstance(value, list):
             combine_info[key] = []
             for item in value:
-                document_bean = DocumentBean(item, type=key, _meta=_meta, source=source)
+                document_bean = DocumentBean(item, type=key, _meta=_meta, source=source, origin_file=origin_file)
                 res.append(document_bean)
                 combine_info[key].append(PTTSW_ID_PREIX + document_bean._meta["pttsw_id"])
         else:

@@ -199,6 +199,29 @@ SPLIT_VEHICLES_FUNC = {
     "output_dir": "vehicles",
     "args": {}
 }
+SPLIT_MAGICVARIANT_FUNC = {
+    "prefix": "magicvariants.json",
+    "split_func": split_normal_file,
+    "combine_func": combine_normal_file,
+    "output_dir": "magicvariants",
+    "args": {}
+}
+
+SPLIT_MONSTERFEATURES_FUNC = {
+    "prefix": "monsterfeatures.json",
+    "split_func": split_normal_file,
+    "combine_func": combine_normal_file,
+    "output_dir": "monsterfeatures",
+    "args": {}
+}
+
+SPLIT_BASIC_FUNC = {
+    "prefix": "",
+    "split_func": split_normal_file,
+    "combine_func": combine_normal_file,
+    "output_dir": "",
+    "args": {}
+}
 
 SPLIT_FUNCS = [
     SPLIT_ADVENTURE_FUNC,

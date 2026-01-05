@@ -15,7 +15,7 @@ from .file_work_info import FileWorkInfo
 from typing import List
 
 find_json_files = RunnableLambda(lambda root_folder: find_files(root_folder))
-write_translate_cache = RunnableLambda(lambda file_work_info: __write_translate_cache(file_work_info))
+write_translate_cache = RunnableLambda(lambda file_work_info: write_translate_cache_func(file_work_info))
 def find_files(root_folder:str, file_extension = '.json'):
     # 判断root_folder是文件还是文件夹
     if os.path.isfile(root_folder):
@@ -48,7 +48,7 @@ def get_same_files(en_root_folder=EN_PATH, cn_root_folder='') :
 def get_rel_path(en_file, en_root_folder=EN_PATH):
     return os.path.relpath(en_file, en_root_folder)
 
-def __write_translate_cache(file_work_infos:List[FileWorkInfo]):
+def write_translate_cache_func(file_work_infos:List[FileWorkInfo], out_path:str=OUT_PATH):
     """将翻译的中间过程obj及job_list写入缓存文件
 
     Args:
@@ -58,31 +58,37 @@ def __write_translate_cache(file_work_infos:List[FileWorkInfo]):
         _type_: _description_
     """
     for file_work_info in file_work_infos:
-        out_path = os.path.join(OUT_PATH, file_work_info.out_path)  # 输出目录
-        rel_out_dir = os.path.dirname(out_path)  # 输出文件的文件夹
+        yield write_file_work_infos(file_work_info, out_path)
+        
+def write_file_work_infos(file_work_info:FileWorkInfo, out_path:str=OUT_PATH):
+    out_file_path = os.path.join(out_path, file_work_info.out_path)  # 输出目录
+    print(out_file_path)
+    rel_out_dir = os.path.dirname(out_file_path)  # 输出文件的文件夹
 
-        # 若输出文件夹不存在则创建
-        if not os.path.exists(rel_out_dir):
-            os.makedirs(rel_out_dir)
+    # 若输出文件夹不存在则创建
+    if not os.path.exists(rel_out_dir):
+        os.makedirs(rel_out_dir)
 
-        # 写入替换好Job uuid的Json文件
-        with open(out_path, 'w') as file:
-            file.write(json.dumps(file_work_info.json_obj, ensure_ascii=False, indent=2))
-
-        # 写入Job列表文件
-        with open(out_path+'.jobs', 'w') as file:
-            file.write('[\n')
-            first_flag = True
-            for j in file_work_info.job_list:
-                if first_flag:
-                    first_flag = False
-                else:
-                    file.write(',\n')
-                file.write(json.dumps(
-                    j, default=lambda o: o.__dict__ if hasattr(o, '__dict__') else str(o), ensure_ascii=False, indent=2))
-            file.write('\n]')
-        file_work_info.json_path = out_path
-        yield file_work_info
+    # 写入替换好Job uuid的Json文件
+    with open(out_file_path + '.en', 'w') as file:
+        file.write(json.dumps(file_work_info.json_obj, ensure_ascii=False, indent=2))
+    if file_work_info.cn_obj is not None:
+        with open(out_file_path, 'w') as file:
+            file.write(json.dumps(file_work_info.cn_obj, ensure_ascii=False, indent=2))
+    # 写入Job列表文件
+    with open(out_file_path+'.jobs', 'w') as file:
+        file.write('[\n')
+        first_flag = True
+        for j in file_work_info.job_list:
+            if first_flag:
+                first_flag = False
+            else:
+                file.write(',\n')
+            file.write(json.dumps(
+                j, default=lambda o: o.__dict__ if hasattr(o, '__dict__') else str(o), ensure_ascii=False, indent=2))
+        file.write('\n]')
+    file_work_info.json_path = out_file_path
+    return file_work_info
     
 if __name__ == "__main__":
     for f in get_same_files():

@@ -2,11 +2,11 @@ import json
 import os
 
 from logger_config import logger
-from config import SPLITED_5ETOOLS_EN_PATH
+from config import SPLITED_5ETOOLS_DATA_DIR
 from .bean import PTTSW_ID_PREIX
 
 from typing import List
-def combine_bestiary(combine_info: dict, splited_data_dir:str = SPLITED_5ETOOLS_EN_PATH):
+def combine_bestiary(combine_info: dict, splited_data_dir:str = SPLITED_5ETOOLS_DATA_DIR):
     """合并bestiary文件
 
     Args:
@@ -34,7 +34,7 @@ def combine_bestiary(combine_info: dict, splited_data_dir:str = SPLITED_5ETOOLS_
             combined_info["monster"].append(split_json["monster"]["data"])
     return combined_info
 
-def combine_normal_file(combine_info: dict, splited_data_dir: str = SPLITED_5ETOOLS_EN_PATH, skip_keys: List[str] = []):
+def combine_normal_file(combine_info: dict, splited_data_dir: str = SPLITED_5ETOOLS_DATA_DIR, skip_keys: List[str] = []):
     """合并普通文件
 
     Args:
