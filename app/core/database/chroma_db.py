@@ -53,7 +53,7 @@ class ChromaAdapter:
         
         return sentences
     
-    def _merge_and_deduplicate_results(self, results_list: List[List]) ->(List):
+    def _merge_and_deduplicate_results(self, results: List) ->(List):
         """
         合并多个搜索结果列表并去重，保留原始顺序
         """
@@ -61,12 +61,11 @@ class ChromaAdapter:
         seen_contents = set()
         
         # 直接遍历所有结果，按照原始顺序添加不重复的结果
-        for results in results_list:
-            for result in results:
-                # 使用page_content作为去重标识
-                if result.page_content not in seen_contents:
-                    seen_contents.add(result.page_content)
-                    merged_results.append(result)
+        for result in results:
+            # 使用page_content作为去重标识
+            if result.page_content not in seen_contents:
+                seen_contents.add(result.page_content)
+                merged_results.append(result)
         
         return merged_results
 
@@ -103,7 +102,7 @@ class ChromaAdapter:
                         continue
             
             # 合并结果并去重
-            results = self._merge_and_deduplicate_results([all_results])
+            results = self._merge_and_deduplicate_results(all_results)
         else:
             # 短文本直接搜索
             results = self.collection.similarity_search(
@@ -111,6 +110,7 @@ class ChromaAdapter:
                 k=5,
                 filter=where
             )
+            results = self._merge_and_deduplicate_results(results)
         
         # 过滤只保留包含 query_text 的文档
         filtered_results = []

@@ -12,6 +12,7 @@ class TermSetter(Runnable):
     def __init__(self):
         self.term_db: RedisDB = RedisDB(db=1)
         term_set = self.term_db.keys()
+        logger.info(f"载入术语数量: {len(term_set)}")
         if term_set:
             # 2. 处理术语列表（排序：长术语优先）
             self.terms = sorted(term_set, key=lambda x: len(x), reverse=True)
@@ -92,15 +93,15 @@ class TermSetter(Runnable):
                 # 收集处理结果
                 processed_jobs = []
                 for future in concurrent.futures.as_completed(future_to_job):
-                    try:
-                        processed_job = future.result()
-                        processed_jobs.append(processed_job)
-                    except Exception as exc:
-                        # 获取出错的原始job
-                        original_job = future_to_job[future]
-                        logger.error(f"处理job时出错: {original_job.en_str}, 错误: {str(exc)}")
-                        # 将出错的job也添加回结果列表
-                        processed_jobs.append(original_job)
+                    # try:
+                    processed_job = future.result()
+                    processed_jobs.append(processed_job)
+                    # except Exception as exc:
+                    #     # 获取出错的原始job
+                    #     original_job = future_to_job[future]
+                    #     logger.error(f"处理job时出错: {original_job.en_str}, 错误: {str(exc)}")
+                    #     # 将出错的job也添加回结果列表
+                    #     processed_jobs.append(original_job)
                 
                 # 替换原来的job_list
                 res.job_list = processed_jobs

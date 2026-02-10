@@ -46,17 +46,18 @@ class JobNeedTranslateSetter(Runnable):
             try:
                 # 创建参考日期
                 # reference_date = datetime(2025, 11, 13)
-                reference_date = datetime(2025, 12, 15)
+                # reference_date = datetime(2025, 12, 15)
+                reference_date = datetime(2026, 1, 13)
                 
                 # 确保job.modified_at是datetime对象
                 if isinstance(job.modified_at, datetime):
-                    if job.modified_at < reference_date:
+                    if job.modified_at > reference_date:
                         return False
                 elif isinstance(job.modified_at, str):
                     # 尝试将字符串转换为datetime对象
                     try:
                         modified_date = datetime.fromisoformat(job.modified_at.replace('Z', '+00:00'))
-                        if modified_date < reference_date:
+                        if modified_date > reference_date:
                             return False
                     except ValueError:
                         # 如果日期格式无法解析，继续后续检查

@@ -1,11 +1,15 @@
 
 SPLITED_SOURCE_MAP = {
+    "griffin macaulay": "第三方/狮鹫的鞍中珍宝Ⅱ",
+    "blood hunter": "第三方/血猎手",
+    "avantris; crooked moon": "第三方/歪曲之月",
+    "chaosium inc.; cthulhu by torchlight": "第三方/火炬光下的克苏鲁",
+    "dosi": "模组/风骸岛",
     "dmg": "城主指南",
     "phb": "玩家手册",
     "tce": "塔莎的万事坩埚",
     "scag": "剑湾冒险者指南",
     "erlw": "艾伯伦：从终末战争中崛起",
-    "ai": "艾奎兹玄有限责任公司",
     "sato": "印记城与外域",
     "mot": "塞洛斯之神话奥德赛",
     "mpmm": "多元宇宙的怪物",
@@ -25,10 +29,10 @@ SPLITED_SOURCE_MAP = {
     "aag": "星界冒险者指南",
     "tftyp": "模组/哈欠门",
     "ditlcot": "模组/坠入塔莎洞",
-    
     "uthftlh": "小独与追寻失落之角",
+    
+    "ai": "艾奎兹玄有限责任公司",
     # homebrew
-    "avantris; crooked moon": "第三方/歪曲之月"
 }
 
 SPLITED_DIR_MAP = {

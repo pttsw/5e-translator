@@ -1,5 +1,6 @@
 import threading
 from . import DBDictionary, RedisDB
+from config import logger
 class DatabaseAdapter:
     def __init__(self, source="", version='1.209.1') -> (None):
         self.lock = threading.Lock()
@@ -34,7 +35,7 @@ class DatabaseAdapter:
         if self.redis_db != None:
             ok = self.redis_db.put(key, value, tag=tag)
             if not ok:
-                return ok
+                logger.error(f"写入redis失败:{key}, {value}, {rel_f}, {proofread}, {tag}")
         ok = self.db_d.put(key, value, rel_f, proofread=proofread, tag=tag)
         return ok
     

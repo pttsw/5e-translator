@@ -1,5 +1,5 @@
 import pymysql
-
+from config import logger
 class MySQLDatabase:
     def __init__(self, host, port, user, password, database):
         self.host = host
@@ -45,7 +45,7 @@ class MySQLDatabase:
             self.cursor.execute(query, params)
             return self.cursor.fetchall()
         except pymysql.MySQLError as e:
-            print(f"查询失败，SQL:{query} 错误原因: {e}")
+            logger.error(f"查询失败，SQL:{query} 错误原因: {e}")
             return None
 
     def execute_non_query(self, query, params=None):
@@ -54,7 +54,7 @@ class MySQLDatabase:
             self.cursor.execute(query, params)
             self.connection.commit()
         except pymysql.MySQLError as e:
-            print(f"语句执行失败，错误原因: {e},{query},{params}")
+            logger.error(f"语句执行失败，错误原因: {e},{query},{params}")
             self.connection.rollback()
             return False
         return True
@@ -64,7 +64,7 @@ class MySQLDatabase:
         columns = ', '.join(data.keys())
         placeholders = ', '.join(['%s'] * len(data))
         query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
-        self.execute_non_query(query, tuple(data.values()))
+        return self.execute_non_query(query, tuple(data.values()))
 
     def update(self, table, data, condition):
         """更新数据"""

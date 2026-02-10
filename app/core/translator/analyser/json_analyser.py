@@ -1,6 +1,7 @@
 import json
 import uuid
 import os
+import time
 from typing import List, Tuple
 from config import  EN_PATH, PLU_EN_PATH, SKIP_FILES, SKIP_DIRS, logger, SPLITED_5ETOOLS_EN_PATH, HOMEBREW_EN_PATH, UA_EN_PATH, PLU_SCENES_PATH, PLU_DBD_PATH, ADD_TRANSLATOR_KEY
 from app.core.utils import read_file, get_rel_path, FileWorkInfo, Job, get_file_name_from_obj
@@ -11,6 +12,8 @@ from .spell_source_analyser import SpellSourceAnalyser
 from .foundry_items_analyser import FoundryItemsAnalyser
 from .books_analyser import BooksAnalyser
 from .adventures_analyser import AdventuresAnalyser
+from .backgrounds_analyser import BackgroundsAnalyser
+from .items_analyser import ItemsAnalyser
 
 
 class JsonAnalyser(Runnable):
@@ -25,6 +28,7 @@ class JsonAnalyser(Runnable):
         self.mode = '5et' # 是否是处理拆分后的数据
         self.en_obj = None # 英文json对象
         self.entries = None # 存放所有的entry
+        self.force_title = False
 
     def __init_dictionary(self):
         """
@@ -36,7 +40,8 @@ class JsonAnalyser(Runnable):
     def invoke(self, input, config=None, **kwargs):
         inputs = [input] if isinstance(input, str) else input
         self.mode = config['metadata'].get('mode', '5et')
-        
+        self.force_title = config['metadata'].get('force_title', False)
+
         # print(config)
         for j in inputs:
             self.en_obj = None
@@ -207,18 +212,30 @@ class JsonAnalyser(Runnable):
         elif self.rel_path == "adventures.json" and self.mode == '5et':
             obj, self.job_list = AdventuresAnalyser(
                 self.dictionary, self.rel_path).process(en_json_obj)
+        elif self.rel_path == "backgrounds.json":
+            obj, self.job_list = BackgroundsAnalyser(
+                self.dictionary, self.rel_path).process(en_json_obj)
+        elif self.rel_path == "items.json":
+            obj, self.job_list = ItemsAnalyser(
+                self.dictionary, self.rel_path).process(en_json_obj)
         else:  # 正常处理文本逻辑
             if self.mode == 'plu':
                 self.rel_path = os.path.join('plu/', self.rel_path)
             # 只处理dict格式的文件
-            analyser = BaseAnalyser(self.dictionary, self.rel_path)
+            analyser = BaseAnalyser(self.dictionary, self.rel_path, self.force_title)
             if self.mode == 'homebrew':
                 en_name = json_file[json_file.rfind(';')+1:json_file.rfind('.json')].strip()
-                analyser.set_job('{!@ #HOME_BREW}', en_name, None)
+                analyser.set_job('#HOME_BREW', en_name, None)
             elif self.mode == 'ua':
+                en_category = json_file[json_file.rfind('/')+1:json_file.rfind('-')].strip()
                 en_name = json_file[json_file.rfind('-')+1:json_file.rfind('.json')].strip()
-                analyser.set_job('{!@ #UA}', en_name, None)
+                analyser.set_job('#UA_CATEGORY', en_category, None)
+                analyser.set_job('#UA', en_name, None)
             obj, self.job_list = analyser.process(en_json_obj, self.byhand)
+        
+        if self.mode == 'ua' or self.mode == 'homebrew':
+            # 设置为当前时间戳
+            obj['_meta']['dateLastModified'] = int(time.time())
 
         return self.job_list, obj, True
 

@@ -69,6 +69,7 @@ def main():
     # 从数据库中编码
     if args.function == 'transform':
         transform_proofread()
+        
     # 数据解析流程
     elif args.function == 'translate':
         if args.en == '':
@@ -87,8 +88,9 @@ def main():
                 from config import UA_EN_PATH
                 args.en = UA_EN_PATH
         
-        res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
-        # res = (find_json_files|JsonAnalyser()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
+        res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)|JsonGenerator(args.thread_num)|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
+        # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
+        # res = (find_json_files|JsonAnalyser()).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()|JsonGenerator(args.thread_num)|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'splited': args.splited})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force})
@@ -109,14 +111,17 @@ def main():
         elif args.mode == 'dump':
             combine_temp_terms_to_csv()
         elif args.mode == 'analyze':
-            for root, dirs, files in os.walk('/data/DND5e_chm/Generator/Generated/txt/'):
+            dir_path = '/data/5e-translator/app/core/crawler/valda'
+            # dir_path = '/data/DND5e_chm/Generator/Generated/txt/第三方/瓦尔达的秘密尖塔'
+            for root, dirs, files in os.walk(dir_path):
                 for file in files:
                     if not file.endswith('.txt'):
                         continue
                     terms = load_term_from_text(os.path.join(root, file))
                     db = DBDictionary(conn_num=1)
+                    db.get_bunch(terms.keys(), ['' for _ in range(len(terms.keys()))], '')
                     for en,cn in terms.items():
-                        db_bean = db.get(en,load_from_sql=True)
+                        db_bean = db.get(en,load_from_sql=False)
                         if db_bean is None:
                             print(f'{en} not found in db')
                         else:

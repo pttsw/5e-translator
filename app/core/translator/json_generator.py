@@ -10,7 +10,7 @@ from app.core.utils import Job, TranslatorStatus
 from app.core.database import DatabaseAdapter
 from .siliconflow_adapter import SiliconFlowAdapter
 from .llm_factory import LLMFactory
-from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, reset_tags_index, format_llm_msg, parse_foundry_items_uuid_format
+from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, reset_tags_index, format_llm_msg, parse_foundry_items_uuid_format, split_string
 from typing import List, Tuple, Optional
 from app.core.bean.term import Term, to_terms
 
@@ -49,8 +49,8 @@ class JsonGenerator(Runnable):
                 continue
             
             res.cn_obj = cn_obj
-            logger.info(f"生成中文Json成功: {res.out_path}")
             # self.write_2_json(res.out_path, cn_obj)
+            logger.info(f"生成中文Json成功: {res.out_path}")
             
             yield res
     
@@ -73,6 +73,8 @@ class JsonGenerator(Runnable):
         处理单个值，进行前缀、后缀检查和翻译替换
         """
         if need_translate_str(value):
+            if len(split_string(value)) > 1:
+                return value, False
             value_without_prefix, prefix = check_prefix(value)
             value_pure, suffix = check_suffix(value_without_prefix)
             new_value, ok = self.__get(value_pure,tag)
@@ -138,6 +140,7 @@ class JsonGenerator(Runnable):
                 if (len(filter_values) > 2):
                     # 正常至少有3个值
                     cv_page = filter_values[1]
+                    word_tag = cv_page[:-1] if cv_page.endswith("s") else cv_page
                     cv_name, _ = self.__process_value(filter_values[0], tag=cv_page)
                     if cv_page == "bestiary":
                         cv_conditions = []
@@ -146,21 +149,25 @@ class JsonGenerator(Runnable):
                                 # 锁定type
                                 cv_conditions.append(eev)
                             elif eev.startswith('tag='):
-                                # 锁定tag
-                                cv_conditions.append(eev)
+                                en_tags = eev[4:].split(';')
+                                cn_tags = []
+                                for et in en_tags:
+                                    ctag, _ = self.__process_value(et, tag="creature")
+                                    cn_tags.append(ctag)
+                                cv_conditions.append(f'tag={";".join(cn_tags)}')
                             else:
-                                ccv, _ = self.__process_value(eev, tag=cv_page)
+                                ccv, _ = self.__process_value(eev, tag=word_tag)
                                 cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
                     elif cv_page in ["items", "spells", "optionalfeatures", "races"]:
                         cv_conditions = []
                         for eev in filter_values[2:]:
-                            ccv, _ = self.__process_value(eev, tag=cv_page)
+                            ccv, _ = self.__process_value(eev, tag=word_tag)
                             cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
-            if tag == "adventure" or tag == "area":
+            elif tag == "adventure" or tag == "area":
                filter_values = en_str.split("|")
                if (len(filter_values) > 2):
                     # 正常至少有3个值
@@ -172,9 +179,9 @@ class JsonGenerator(Runnable):
                         cv_conditions.append(ccv)
                     cn_str = f"{cv_name}|{cv_source}|{'|'.join(cv_conditions)}"
                     return cn_str, True
-           
-            en_split = en_str.split('|')
-            cn_split = cn_str.split('|')
+                
+            en_split = split_string(en_str)
+            cn_split = split_string(cn_str)
             res_split = []
             for i, eev in enumerate(en_split):
                 if len(cn_split) > i:
@@ -183,6 +190,9 @@ class JsonGenerator(Runnable):
                     ccv = None
                 if "{@" in eev and ccv is not None and ccv != eev:
                     res_split.append(ccv)
+                elif "{@" in eev:
+                    p_v, ok = self.__replace_sub_jobs(eev, tag=tag)
+                    res_split.append(p_v)
                 else:
                     p_v, ok = self.__process_value(eev, tag=tag)
                     if ok or ccv is None:
@@ -211,18 +221,21 @@ class JsonGenerator(Runnable):
             return False
         if self.mode == 'homebrew':
             # 删除原始文件
-            os.remove(json_path)
+            # os.remove(json_path)
             # 替换文件名中的字段
             eng_name = json_path.split(';')[-1].strip()[:-5]
             cn_name, _ = self.__process_value(eng_name)
             json_path = json_path.replace(f'; {eng_name}', f'; {cn_name}')
         elif self.mode == 'ua':
             # 删除原始文件
-            os.remove(json_path)
+            # os.remove(json_path)
             # 替换文件名中的字段
+            en_category = json_path[json_path.rfind('/')+1:json_path.rfind('-')].strip()
+            cn_category, _ = self.__process_value(en_category)
             eng_name = json_path.split('-')[-1].strip()[:-5]
             cn_name, _ = self.__process_value(eng_name)
             json_path = json_path.replace(f'- {eng_name}', f'- {cn_name}')
+            json_path = json_path.replace(f'/{en_category}', f'/{cn_category}')
         try:
             with open(json_path, "w") as file:
                 file.write(json.dumps(new_obj, ensure_ascii=False, indent=2))
@@ -262,27 +275,33 @@ class JsonGenerator(Runnable):
             for k, v in obj.items():
                 if k == 'ENG_name':
                     continue
-                try:
+                # try:
+                if (k != "uuid"):
                     new_v, ok = self.__replace_jobs(v)
                     if ok:
-                        # 临时在这里特殊处理foundry-items.json和foundry-optinalfeatures.json中的uuid特殊格式
-                        if (k == "uuid"):
-                            ev = ''
-                            for j in self.done_jobs:
-                                if j.cn_str == new_v:
-                                    ev = j.en_str
-                                    break
-                            if ev != '':
-                                new_v = ev
-                            match_k, match_v,_ = parse_foundry_items_uuid_format(new_v)
-                            if (len(match_k) > 0):
-                                for mk,mv in zip(match_k, match_v):
-                                    cn_v,_ = self.__get(mv, mk)
-                                    new_v = new_v.replace(mv, cn_v)
-                        
                         obj[k] = new_v
-                except Exception as exc:
-                    logger.error(f'{k} generated an exception: {exc}')
+                else:
+                    # 临时在这里特殊处理foundry-items.json和foundry-optinalfeatures.json中的uuid特殊格式
+                    # ev = ''
+                    # for j in self.done_jobs:
+                    #     if j.cn_str == new_v:
+                    #         ev = j.en_str
+                    #         break
+                    # if ev != '':
+                    #     new_v = ev
+                    new_v = v
+                    match_k, match_v,_ = parse_foundry_items_uuid_format(new_v)
+                    if (len(match_k) > 0):
+                        for mk,mv in zip(match_k, match_v):
+                            cn_v,ok = self.__get(mv, mk)
+                            if not ok:
+                                logger.error(f'{new_v} generated an exception: {mv}')
+                                continue
+                            new_v = new_v.replace(mv, cn_v)
+                    obj[k] = new_v
+                    
+                # except Exception as exc:
+                    # logger.error(f'{k} generated an exception: {exc}')
             return obj, True
         elif isinstance(obj, list):
             for i, o in enumerate(obj):

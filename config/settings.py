@@ -39,7 +39,16 @@ PLU_SCENES_PATH="/data/plutonium-scenes/"
 FORCE_TRANSLATE_STR=["ox"]
 
 # JSON分析器所用的标签匹配配置，用于将JSON中的标签转换为数据库中对应的标签
-KEY_MATCHED_TAG={'gear':'item', 'baseItem':'item', 'attachedSpells':'spell', 'startingEquipment':'item'}
+KEY_MATCHED_TAG={
+  'gear':'item',
+  'baseItem':'item',
+  'attachedItems':'item',
+  'startingEquipment':'item',
+  'mastery':'itemMastery',
+  'attachedSpells':'spell',
+  'monster': 'creature',
+  'languages': 'language',
+}
 
 # 检测字符串中标签所用的正则表达式
 # 检测字符串中是否包含标签，匹配标签的值
@@ -50,25 +59,30 @@ ONLY_SUBJOB_PATTERN = r"^{@[^ \}]+ ([^\}\{@}]+)\}$"
 TAG_PATTERN = r"{@([^ \}]+) [^\}\{@}]+\}"
 
 #region 字符串跳过配置
+# 永不跳过的键路径
+NO_SKIP_PATH=['type/tags', 'value/tags']
 # 跳过字符串的正则，满足的不翻译
-SKIP_PATTERN=[r'^Math\.',r'\.json$',r'\.mp3$',r'\.pdf$',r'\.svg$',r'^system\.',r'^[+*\-\dd]+$',r'\.webp$',r'\.glb$',r'^col-', r'^\{@dice [0-9d+\-×*/; ]+\}$', r'^[0-9d+\-–×*/%％;\[\]& ]*$',r'^https://.+',r'^http://.+', r'^www\..+',r'^Challenge Rating=.+',r'^@abilities\..*',r'^@classes\..*']
+SKIP_PATTERN=[r'^Math\.',r'\.json$',r'\.mp3$',r'\.pdf$',r'\.svg$', r'\.glb$',r'^system\.',r'^[+*\-\dd]+$',r'\.webp$',r'\.glb$',r'^col-', r'^\{@dice [0-9d+\-×*/; ]+\}$', r'^[0-9d+\-–×*/%％;\[\]& ]*$',r'^https://.+',r'^http://.+', r'^www\..+',r'^Challenge Rating=.+',r'^@abilities\..*',r'^@classes\..*']
 # 跳过的前缀，此类字符串的前缀不翻译，只翻译前缀后面的内容
-SKIP_PREFIX=['source=','level=','class=','subclass=','challenge rating=','speed type=','type=','miscellaneous=','category=','school=','components & miscellaneous=', 'Components & Miscellaneous=','spell attack=','tag=','search=','Type=','damage type=','Feature Type=','Base Species=', 'environment=','strength=','property=']
+SKIP_PREFIX=['source=','level=','class=','subclass=','challenge rating=','speed type=','type=','miscellaneous=','category=','school=','subschool=','group=','range=','components & miscellaneous=', 'Components & Miscellaneous=','spell attack=','tag=','search=','Type=','damage type=','Feature Type=','Base Species=', 'environment=','strength=','property=','feature type=']
 # 完全跳过的前缀，有此类前缀的字符串，整个字符串都不翻译
-TOTAL_SKIP_PREFIX=['rarity=']
+TOTAL_SKIP_PREFIX=['rarity=', 'featrue type=', 'size=','alignment=', 'cr=', 'area style=']
 # 跳过的后缀，此类字符串的后缀不翻译，只翻译后缀前面的内容
 SKIP_SUFFIX=['#2','#c','#x']
 # 完全跳过的键，有此类键的字符串，整个字符串都不翻译
-SKIP_KEYS=['source', 'fonts', 'type', 'path', 'id', 'href','mode','_meta','group','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId','identifier', 'walls', 'tag', 'mapRegions','preparedSpellsChange', 'casterProgression', 'scfType']
+SKIP_KEYS=['source', 'fonts', 'path', 'id', 'href','mode','_meta','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId','identifier', 'walls', 'tag', 'mapRegions','preparedSpellsChange', 'casterProgression', 'scfType', 'property', 'equipmentType', 'weaponCategory','miscTags', 'referenceSources']
 # 添加“翻译”字段的KEY
-ADD_TRANSLATOR_KEY=['monster','spell','feat','background','condition','disease', 'status','race','item','deity','vehicle','variantrule','trap','table','sense','recipe','psionic','optionalfeature','magicvariant','deck','cult','boon','facility']
+ADD_TRANSLATOR_KEY=['monster','spell','feat','background','condition','disease', 'status','race','item','deity','vehicle','variantrule','trap','table','sense','recipe','psionic','optionalfeature','magicvariant','deck','cult','boon','facility', 'action', 'object','skill']
 # 完全跳过的路径，有此类路径的字符串，整个字符串都不翻译
 SKIP_KEY_PATH=[
-  'ability/choose/from', 
+  'ability/choose/from',
+  'adventure/group',
+  'book/group',
   'toolProficiencies/choose/from',
   'entries/entries/tag',
   'entries/entries/prop',
   '_copy/_mod/variant',
+  '_versions/_mod/variant',
   'effects/changes/key',
   'effects/changes/value',
   'effects/changes/mode',
@@ -92,7 +106,7 @@ SKIP_KEY_PATH=[
   'multiclassing/proficienciesGained/skills'
 ]
 # 仅当键对应的值为纯字符串时，才跳过该键,如果包含“{@aaa bbb}”的tag，则不跳过
-SKIP_ONLY_PURE_STR_KEYS=['weapons']
+SKIP_ONLY_PURE_STR_KEYS=['weapons','type']
 # 跳过的项，有此类项的字符串，整个字符串都不翻译
 SKIP_ITEMS = [{'key':'action','value':'remove'}, {'key':'action','value':'insert'}]
 # SKIP_FILES = ['book/book-phb.json', 'bestiary/bestiary-mm.json']

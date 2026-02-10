@@ -3,18 +3,18 @@ from config import logger
 from typing import List
 from .base_analyser import BaseAnalyser
 from app.core.database import DBDictionary
-from app.core.utils import parse_foundry_items_uuid_format, need_translate_str
+from app.core.utils import need_translate_str
 class BooksAnalyser(BaseAnalyser):
     def __init__(self, dictionary: DBDictionary, rel_path: str) -> (None):
         super().__init__(dictionary, rel_path)
         self.book_translators: dict = {
-            "PHB": "不全书/Kiwee",
-            "XPHB": "不全书/Kiwee",
-            "DMG": "不全书/Kiwee",
-            "XDMG": "不全书/Kiwee",
-            "MM": "不全书/山德鲁",
+            "PHB": "不全书",
+            "XPHB": "不全书",
+            "DMG": "不全书",
+            "XDMG": "不全书",
+            "MM": "不全书",
             "XMM": "不全书/AI搬运",
-            "TCE": "不全书/Kiwee",
+            "TCE": "不全书",
         }
         
         

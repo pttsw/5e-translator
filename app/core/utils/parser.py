@@ -194,6 +194,8 @@ soure_json_to_full["MisMV1"] = f"{Parser['MisMVX_PREFIX']}卷一"
 soure_json_to_full["AATM"] = f"{Parser['AA_PREFIX']}葬仪社"
 
 soure_json_to_full["avantris; crooked moon"] = "歪曲之月"
+soure_json_to_full["chaosium inc.; cthulhu by torchlight"] = "火炬光下的克苏鲁"
+
 
 soure_json_to_full["action"] = "动作"
 soure_json_to_full["disease"] = "疾病"

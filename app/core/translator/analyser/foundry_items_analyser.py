@@ -15,14 +15,14 @@ class FoundryItemsAnalyser(BaseAnalyser):
             match_k, match_v, _ = parse_foundry_items_uuid_format(en_dict["uuid"])
             if len(match_k) == 0:
                 return super().process_dict(en_dict, key_path, current_names, [])
-            uid = uuid.uuid1()
-            cn_str = None
-            j = self.get_job(en_dict["uuid"])
-            if j is not None:
-                uid = j.uid
-            else :
-                self.set_job(uid, en_dict["uuid"], en_dict["uuid"], current_names=current_names)
-            en_dict["uuid"] = f'{{!@ {uid}}}'
+            # uid = uuid.uuid1()
+            # cn_str = None
+            # j = self.get_job(en_dict["uuid"])
+            # if j is not None:
+            #     uid = j.uid
+            # else :
+            #     self.set_job(uid, en_dict["uuid"], en_dict["uuid"], current_names=current_names)
+            # en_dict["uuid"] = f'{{!@ {uid}}}'
             
             for m, t in zip(match_v, match_k):
                 if need_translate_str(m):

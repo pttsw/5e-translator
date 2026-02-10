@@ -9,7 +9,7 @@ from jsonpath_ng.ext import parse as ext_parse
 
 
 class BaseAnalyser:
-    def __init__(self, dictionary: DBDictionary, rel_path: str) -> (None):
+    def __init__(self, dictionary: DBDictionary, rel_path: str, force_title: bool = False) -> (None):
         self.name_list: List[str] = []
         self.job_list: List[Job] = []
         self.dictionary = dictionary
@@ -21,7 +21,8 @@ class BaseAnalyser:
         self.name_should_proofread = False # 对于Job的Parent是否只添加校对过得
         self.correct_tag_from_db = False # 是否根据标签从数据库中准确抽取？(影响性能)
         self.locked_entries = {} # 已锁定的条目
-
+        self.force_title = force_title
+        
     def process(self,  en_obj: dict, byhand: bool = False):
         self.byhand = byhand
         
@@ -58,9 +59,22 @@ class BaseAnalyser:
                             })
                         credit_section["entries"].append(current_credits)
         elif (isinstance(en_obj, list)):
-            res_dict, ok = self.__process_list(en_obj, "", tag=self.name_tag)
+            res_dict, ok = self.process_list(en_obj, "", tag=self.name_tag)
             if not ok:
                 raise RuntimeError(f'process error:{en_obj}')
+        # 最终从数据库里查job
+        query_en_list = [j.en_str for j in self.job_list if j.cn_str == None]
+        query_tag_list = [j.tag for j in self.job_list if j.cn_str == None]
+        query_res_list = self.dictionary.get_bunch(query_en_list, query_tag_list, self.rel_path, ignore_case=True, correct_tag_from_db=self.correct_tag_from_db)
+        for j in self.job_list:
+            if j.cn_str != None:
+                continue
+            db_res = self.dictionary.get(j.en_str, rel_f=self.rel_path, load_from_sql=False, ignore_case=True, tag=j.tag, correct_tag_from_db=self.correct_tag_from_db)
+            if db_res:
+                j.cn_str = db_res['cn']
+                j.sql_id = db_res['sql_id']
+                j.is_proofread = db_res['proofread']
+                j.is_key = db_res['is_key']
         return res_dict, self.job_list
 
     def str_2_job(self, en_str: str, current_names: list = [], tag = "", key_path = ""):
@@ -73,6 +87,8 @@ class BaseAnalyser:
         Returns:
             job_str: 整理后的有job替换id的字符串
         """
+        if self.force_title and "name" not in key_path:
+            return en_str
         # "需要考虑句中有{@tag 标识|对的|1}"的情况。job添加["需要考虑句中有{@tag 标识|对的|1}","标识","对的",]
         match_k, match_v, is_valid = parse_custom_format(en_str)
         if len(match_v) == 0:
@@ -127,22 +143,22 @@ class BaseAnalyser:
             # 如果只有{@tag xxx}的文本，则无需翻译，直接原样放置即可
             if only_has_format(en):
                 cn = en
-            else:
-                # 先从内存中读取
-                cn_bean = self.dictionary.get(
-                    en, load_from_sql=False, ignore_case=True, tag=tag)
-                if cn_bean != None and self.correct_tag_from_db and tag != "" and cn_bean['category'] != tag:
-                    cn_bean = None
-                if cn_bean == None and self.load_from_sql:
-                    # 从数据库中读取
-                    cn_bean = self.dictionary.get(
-                        en, rel_f=self.rel_path, load_from_sql=True, ignore_case=True, tag=tag, correct_tag_from_db=self.correct_tag_from_db)
-                if cn_bean != None:
-                    cn = cn_bean['cn']
-                    is_proofread = cn_bean['proofread']
-                    is_key = cn_bean['is_key']
-                    sql_id = cn_bean['sql_id']
-                    modified_at = cn_bean['modified_at']
+            # else:
+        #         # 先从内存中读取
+        #         cn_bean = self.dictionary.get(
+        #             en, load_from_sql=False, ignore_case=True, tag=tag)
+        #         if cn_bean != None and self.correct_tag_from_db and tag != "" and cn_bean['category'] != tag:
+        #             cn_bean = None
+        #         if cn_bean == None and self.load_from_sql:
+        #             # 从数据库中读取
+        #             cn_bean = self.dictionary.get(
+        #                 en, rel_f=self.rel_path, load_from_sql=True, ignore_case=True, tag=tag, correct_tag_from_db=self.correct_tag_from_db)
+        #         if cn_bean != None:
+        #             cn = cn_bean['cn']
+        #             is_proofread = cn_bean['proofread']
+        #             is_key = cn_bean['is_key']
+        #             sql_id = cn_bean['sql_id']
+        #             modified_at = cn_bean['modified_at']
         
         # 手动翻译关键字（name）
         if self.byhand and is_proofread != 1 and ((current_names != [] and en == current_names[-1]) or  len(en.split(' ')) < 5) and need_translate_str(en):
@@ -172,7 +188,17 @@ class BaseAnalyser:
         res_dict = {}
         for k, v in obj.items():
             if k == '_meta':
-                res_dict[k] = v
+                meta_obj = v
+                for kk, vv in v.items():
+                    if kk == 'optionalFeatureTypes':
+                        optFeat, ok = self.process_base_item(vv, f"/{kk}", current_names=[], tag="feat")
+                        if not ok:
+                            raise Exception(f"处理optionalFeatureTypes {kk} 失败")
+                        meta_obj[kk] = optFeat
+                    else:
+                        meta_obj[kk] = vv
+                        
+                res_dict[k] = meta_obj
                 continue
             if isinstance(v, dict):
                 cn_json, is_ok = self.process_locked_entry(v, k, source)
@@ -246,7 +272,16 @@ class BaseAnalyser:
         if "name" in en_dict.keys() and isinstance(en_dict['name'], str):
             __current_names.append(en_dict["name"])
             self.name_list.append(en_dict["name"])
-            res_dict['ENG_name'] = en_dict["name"]
+            
+            # 去除ENG_name里面的标识符
+            # 如果eng_name里开头是{@，且只有一个{@,且结尾是}。则截取第一个空格到第一个|或}之间的内容
+            eng_name = en_dict["name"]
+            if eng_name.startswith("{@") and eng_name.count("{@") == 1 and eng_name.endswith("}"):
+                start_idx = eng_name.find(" ")
+                end_idx = eng_name.find("|")
+                eng_name = eng_name[start_idx+1:end_idx]
+            
+            res_dict['ENG_name'] = eng_name
             name_job = self.get_job(en_dict["name"],tag=tag)
             if name_job is None:
                 cn_bean = self.dictionary.get(
@@ -269,7 +304,7 @@ class BaseAnalyser:
                     self.job_list.append(Job(name_jsonpath, en_dict["name"], cn_bean['cn'], rel_path=self.rel_path, tag=tag, knowledge=[
                     ], current_names=names_in_job, is_proofread=cn_bean['proofread'], is_key=cn_bean['is_key'], sql_id=cn_bean['sql_id'], modified_at=cn_bean['modified_at']))
                     skip_name = True
-            else:
+            elif "{@" not in en_dict["name"] and name_job.cn_str != None:
                 res_dict['name'] = name_job.cn_str
                 skip_name = True
                 # print(res_dict['name'])
@@ -288,7 +323,10 @@ class BaseAnalyser:
                 if not ok:
                     raise RuntimeError(f'process error:{k}')
                 res_dict[k] = tmp_dict
-
+            if k == 'nameSuffix' and ' Barding' != v:
+                # 后置描述改前置
+                res_dict['namePrefix'] = res_dict['nameSuffix']
+                del res_dict['nameSuffix']
         return res_dict, True
 
     def process_base_item(self, en_item, key_path: str, current_names: list = [], tag=""):
@@ -316,10 +354,10 @@ class BaseAnalyser:
         elif isinstance(en_item, dict):
             return self.process_dict(en_item, key_path, current_names, tag=tag)
         elif isinstance(en_item, list):
-            return self.__process_list(en_item, key_path, current_names, tag=tag)
+            return self.process_list(en_item, key_path, current_names, tag=tag)
         return None, False
 
-    def __process_list(self, en_list, key_path, current_names: list = [], tag: str = ""):
+    def process_list(self, en_list, key_path, current_names: list = [], tag: str = ""):
         res_list = []
         for index, v in enumerate(en_list):
             # 对于列表项，我们需要在key_path后添加索引以确保唯一性
@@ -389,8 +427,12 @@ class BaseAnalyser:
                             # 锁定type
                             cv_conditions.append(eev)
                         elif eev.startswith('tag='):
-                            # 锁定tag
-                            cv_conditions.append(eev)
+                            en_tags = eev[4:].split(';')
+                            cn_tags = []
+                            for et in en_tags:
+                                ctag = _process_value(et, value_index=idx)
+                                cn_tags.append(ctag)
+                            cv_conditions.append(f'tag={";".join(cn_tags)}')
                         else:
                             ccv = _process_value(eev, value_index=idx)
                             cv_conditions.append(ccv)

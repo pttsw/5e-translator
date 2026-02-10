@@ -79,9 +79,11 @@ class JobProcessor(Runnable):
             # 加载临时术语
             self.__load_temple_terms(res.job_list, res.out_path)
             self.factory.start_work()
-            if self.factory.isAllDone():
-                self.write_2_json(res.out_path, res.json_obj)
-            else:
+            # if self.factory.isAllDone():
+                # yield res
+                # self.write_2_json(res.out_path, res.json_obj)
+            # else:
+            if not self.factory.isAllDone():
                 logger.error(f"处理{res.json_path}中的Job总计{self.factory.job_count}个，成功{self.factory.finish_count}个，失败{self.factory.error_count}个！")
                 # 将失败的 job 列表导出到文件，方便人工查看与重试
                 failed = []
@@ -109,6 +111,7 @@ class JobProcessor(Runnable):
                     print(f"python3 main.py retry-failed --file \"{failed_path}\" --thread_num {self.thread_num} --byhand {self.byhand} --force {self.force}")
                 else:
                     logger.info('没有记录到被丢弃的失败 Job。')
+                continue
             yield res
 
     def __load_temple_terms(self, job_list, out_path):
@@ -168,7 +171,9 @@ class JobProcessor(Runnable):
                 return job, TranslatorStatus.SUCCESS
             # 添加缓存中的术语
             if self.cache and self.temple_terms:
-                job.terms.extend(self.__search_temple_terms(job.en_str))
+                for temp in self.__search_temple_terms(job.en_str):
+                    if temp not in job.terms:
+                        job.terms.append(temp)
             # 发送给大模型进行翻译
             request, promot = job.to_llm_question()
             if job.cn_str and job.cn_str != "" and self.byhand:
@@ -249,8 +254,11 @@ class JobProcessor(Runnable):
                 if self.update and job.need_translate:
                     # 写入数据库,如果手动模式，则默认就是校对过得
                     if job.sql_id is None:
-                        self.dictionary.put(
+                        logger.info(f"处理完成任务:{job.en_str}, 中文:{job.cn_str}")
+                        ok = self.dictionary.put(
                             job.en_str, job.cn_str, job.rel_path, proofread=self.byhand, tag=job.tag)
+                        if not ok:
+                            logger.error(f"写入字典失败:{job}")
                     else:
                         self.dictionary.update(job.sql_id, job.en_str, job.cn_str, proofread=self.byhand, tag=job.tag)
                 self.done_jobs.append(job)
@@ -363,8 +371,12 @@ class JobProcessor(Runnable):
                                 # 锁定type
                                 cv_conditions.append(eev)
                             elif eev.startswith('tag='):
-                                # 锁定tag
-                                cv_conditions.append(eev)
+                                en_tags = eev[4:].split(';')
+                                cn_tags = []
+                                for et in en_tags:
+                                    ctag, _ = self.__process_value(et, tag="creature")
+                                    cn_tags.append(ctag)
+                                cv_conditions.append(f'tag={";".join(cn_tags)}')
                             else:
                                 ccv, _ = self.__process_value(eev, tag=cv_page)
                                 cv_conditions.append(ccv)
@@ -436,18 +448,21 @@ class JobProcessor(Runnable):
             return False
         if self.mode == 'homebrew':
             # 删除原始文件
-            os.remove(json_path)
+            # os.remove(json_path)
             # 替换文件名中的字段
             eng_name = json_path.split(';')[-1].strip()[:-5]
             cn_name, _ = self.__process_value(eng_name)
             json_path = json_path.replace(f'; {eng_name}', f'; {cn_name}')
         elif self.mode == 'ua':
             # 删除原始文件
-            os.remove(json_path)
+            # os.remove(json_path)
             # 替换文件名中的字段
+            en_category = json_path[json_path.rfind('/')+1:json_path.rfind('-')].strip()
+            cn_category, _ = self.__process_value(en_category)
             eng_name = json_path.split('-')[-1].strip()[:-5]
             cn_name, _ = self.__process_value(eng_name)
             json_path = json_path.replace(f'- {eng_name}', f'- {cn_name}')
+            json_path = json_path.replace(f'/{en_category}', f'/{cn_category}')
         try:
             with open(json_path, "w") as file:
                 file.write(json.dumps(new_obj, ensure_ascii=False, indent=2))

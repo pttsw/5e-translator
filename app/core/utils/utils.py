@@ -1,5 +1,5 @@
 import re
-from config import SKIP_PATTERN,SKIP_ONLY_PURE_STR_KEYS, SKIP_PREFIX, SKIP_SUFFIX, TOTAL_SKIP_PREFIX, SKIP_KEYS, SKIP_KEY_PATH, SKIP_ITEMS, FORCE_TRANSLATE_STR, logger
+from config import SKIP_PATTERN,SKIP_ONLY_PURE_STR_KEYS, SKIP_PREFIX, SKIP_SUFFIX, TOTAL_SKIP_PREFIX, SKIP_KEYS, SKIP_KEY_PATH, SKIP_ITEMS, FORCE_TRANSLATE_STR, logger,NO_SKIP_PATH
 import json
 from typing import Tuple, List
 
@@ -14,11 +14,13 @@ def check_skip_key(key: str, value: str, prefix_key_path: str):
     Returns:
         _type_: _description_
     """
+    key_with_prefix = prefix_key_path+'/'+key
+    if any(no_skip_path in key_with_prefix for no_skip_path in NO_SKIP_PATH):
+        return False
     if key in SKIP_KEYS:
         return True
-    if key in SKIP_ONLY_PURE_STR_KEYS and isinstance(value, str) and '@{' not in value:
+    if key in SKIP_ONLY_PURE_STR_KEYS and ((isinstance(value, str) and '@{' not in value) or isinstance(value, int)):
         return True
-    key_with_prefix = prefix_key_path+'/'+key
     # 去掉key_with_prefix中的[0]、[1]等
     key_with_prefix = re.sub(r'\[\d+\]', '', key_with_prefix)
     return any(hk in key_with_prefix for hk in SKIP_KEY_PATH) or \
@@ -222,20 +224,25 @@ def only_has_format(text):
 def split_string(text):
     result = []
     current_part = ""
-    in_special_format = False
+    bracket_level = 0
     i = 0
     while i < len(text):
-        if text[i:i + 2] == "{@" and not in_special_format:
+        if text[i:i + 2] == "{@":
             # 进入特定格式
-            in_special_format = True
+            bracket_level += 1
             current_part += text[i:i + 2]
             i += 2
-        elif text[i] == '}' and in_special_format:
-            # 离开特定格式
-            in_special_format = False
+        elif text[i] == '{':
+            # 进入特定格式
+            bracket_level += 1
             current_part += text[i]
             i += 1
-        elif text[i] == '|' and not in_special_format:
+        elif text[i] == '}':
+            # 离开特定格式
+            bracket_level -= 1
+            current_part += text[i]
+            i += 1
+        elif text[i] == '|' and bracket_level == 0:
             # 遇到分隔符且不在特定格式内
             result.append(current_part)
             current_part = ""

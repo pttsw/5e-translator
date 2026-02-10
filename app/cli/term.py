@@ -102,6 +102,8 @@ def load_term_from_text(file_path: str):
                     english_part = match.group('english').strip().replace('  ',' ')
                     
                     # 英文做key，中文做value存入字典
+                    if english_part in res:
+                        continue
                     res[english_part] = chinese_part
                     print(f"行 {line_number}: 已解析 '{line}' -> {english_part} -> {chinese_part}")
                     matched = True

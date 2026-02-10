@@ -8,12 +8,12 @@ class AdventuresAnalyser(BaseAnalyser):
     def __init__(self, dictionary: DBDictionary, rel_path: str) -> (None):
         super().__init__(dictionary, rel_path)
         self.book_translators: dict = {
-            "LMoP": "庞瓦西等/Kiwee",
+            "LMoP": "庞瓦西等",
             "IDRotF": "亮君等/AI搬运",
             "DIP": "亮君等/AI搬运",
             "COS": "愈伤之叶等/AI搬运",
-            "KKW": "神秘的万智牌手六人组/Kiwee",
-            "UtHftLH": "东方等/Kiwee"
+            "KKW": "神秘的万智牌手六人组",
+            "UtHftLH": "东方等"
         }
         
         

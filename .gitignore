@@ -16,3 +16,6 @@ log/
 .env
 .vscode/
 chroma-persist/
+temp/
+.vscode/
+terms-bak/
