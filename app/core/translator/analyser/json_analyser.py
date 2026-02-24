@@ -142,7 +142,7 @@ class JsonAnalyser(Runnable):
 
     def json_2_job(self, json_file: str) -> (Tuple[List[Job], object, bool]):
         """
-        json_2_job:分析JSON文件组中需要翻译的任务
+        json_2_job: 分析JSON文件组中需要翻译的任务
 
         :param json_file: 传入英文Json文件的路径
         :return: jobList, object, bool: 工作列表、替换work_id后的原文件内容、 是否成功

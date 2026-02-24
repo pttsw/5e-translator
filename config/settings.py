@@ -70,7 +70,7 @@ TOTAL_SKIP_PREFIX=['rarity=', 'featrue type=', 'size=','alignment=', 'cr=', 'are
 # 跳过的后缀，此类字符串的后缀不翻译，只翻译后缀前面的内容
 SKIP_SUFFIX=['#2','#c','#x']
 # 完全跳过的键，有此类键的字符串，整个字符串都不翻译
-SKIP_KEYS=['source', 'fonts', 'path', 'id', 'href','mode','_meta','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId','identifier', 'walls', 'tag', 'mapRegions','preparedSpellsChange', 'casterProgression', 'scfType', 'property', 'equipmentType', 'weaponCategory','miscTags', 'referenceSources']
+SKIP_KEYS=['source', 'fonts', 'path', 'id', 'href','mode','_meta','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId','identifier', 'walls', 'tag', 'mapRegions','preparedSpellsChange', 'casterProgression', 'scfType', 'property', 'equipmentType', 'weaponCategory','miscTags', 'referenceSources', 'space', 'calculation', 'statuses', 'damageInflict', 'savingThrow', 'classSource', 'subclassSource', 'hidden']
 # 添加“翻译”字段的KEY
 ADD_TRANSLATOR_KEY=['monster','spell','feat','background','condition','disease', 'status','race','item','deity','vehicle','variantrule','trap','table','sense','recipe','psionic','optionalfeature','magicvariant','deck','cult','boon','facility', 'action', 'object','skill']
 # 完全跳过的路径，有此类路径的字符串，整个字符串都不翻译

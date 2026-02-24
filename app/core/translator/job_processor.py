@@ -389,7 +389,7 @@ class JobProcessor(Runnable):
                             cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
-            if tag == "adventure" or tag == "area":
+            elif tag == "adventure" or tag == "area":
                filter_values = en_str.split("|")
                if (len(filter_values) > 2):
                     # 正常至少有3个值
@@ -401,7 +401,7 @@ class JobProcessor(Runnable):
                         cv_conditions.append(ccv)
                     cn_str = f"{cv_name}|{cv_source}|{'|'.join(cv_conditions)}"
                     return cn_str, True
-           
+
             en_split = en_str.split('|')
             cn_split = cn_str.split('|')
             res_split = []

@@ -31,14 +31,14 @@ class JobNeedTranslateSetter(Runnable):
         if job.is_proofread:
             return False
         # 3.如果强制翻译标题，且当前术语是标题，则需要翻译
-        if self.force_title:
-            if len(job.current_names) > 0 and job.en_str == job.current_names[-1][0]:
-                # 为了防止原有父级被认为是标题，这里清空原有父级
-                job.current_names = job.current_names[:-1]
-                return True
-            else:
-                # 此模式下，非标题的都不翻译
-                return False
+        # if self.force_title:
+        #     if len(job.current_names) > 0 and job.en_str == job.current_names[-1][0]:
+        #         # 为了防止原有父级被认为是标题，这里清空原有父级
+        #         job.current_names = job.current_names[:-1]
+        #         return True
+        #     else:
+        #         # 此模式下，非标题的都不翻译
+        #         return False
         # 2.如果没有中文，说明没有翻译过。如果是手动模式或强制翻译模式，则没校对的且包含术语的，也需要翻译
         if job.cn_str is None or (self.byhand == True or self.force == True):
             logger.debug(f"job.modified_at: {job.modified_at}")

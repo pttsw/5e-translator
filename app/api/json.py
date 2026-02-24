@@ -112,22 +112,22 @@ class JsonApi(Resource):
         rel_path = os.path.relpath(file_path, SPLITED_5ETOOLS_EN_PATH)
         job_file_path = os.path.join(APP_TEMP_PATH, rel_path+'.jobs')
         cn_file_path = os.path.join(APP_TEMP_PATH, rel_path)
-        if os.path.exists(job_file_path) and os.path.exists(cn_file_path):
-            with open(job_file_path, 'r') as job_file:
-                job_list = json.load(job_file)
-            with open(cn_file_path, 'r') as cn_file:
-                cn_obj = json.load(cn_file)
-        else:
-            file_work_infos = (JsonAnalyser()|JsonGenerator(1)).invoke([file_path],{'metadata':{'mode':'splited'}})
-            os.makedirs(os.path.dirname(job_file_path), exist_ok=True)
-            for file_work_info in file_work_infos:
-            #     # 只留下数据库里有的
-                file_work_info.job_list = [j.__dict__ for j in file_work_info.job_list if j.sql_id]
-                write_file_work_infos(file_work_info, APP_TEMP_PATH)
-            with open(job_file_path, 'r') as job_file:
-                job_list = json.load(job_file)
-            with open(cn_file_path, 'r') as cn_file:
-                cn_obj = json.load(cn_file)
+        # if os.path.exists(job_file_path) and os.path.exists(cn_file_path):
+        #     with open(job_file_path, 'r') as job_file:
+        #         job_list = json.load(job_file)
+        #     with open(cn_file_path, 'r') as cn_file:
+        #         cn_obj = json.load(cn_file)
+        # else:
+        file_work_infos = (JsonAnalyser()|JsonGenerator(1)).invoke([file_path],{'metadata':{'mode':'splited'}})
+        os.makedirs(os.path.dirname(job_file_path), exist_ok=True)
+        for file_work_info in file_work_infos:
+        #     # 只留下数据库里有的
+            file_work_info.job_list = [j.__dict__ for j in file_work_info.job_list if j.sql_id]
+            write_file_work_infos(file_work_info, APP_TEMP_PATH)
+        with open(job_file_path, 'r') as job_file:
+            job_list = json.load(job_file)
+        with open(cn_file_path, 'r') as cn_file:
+            cn_obj = json.load(cn_file)
         return job_list, cn_obj
         
     def __check_source(self, json_dict, source):

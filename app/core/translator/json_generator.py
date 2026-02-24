@@ -135,6 +135,7 @@ class JsonGenerator(Runnable):
             cn_str = cn_str.replace(f"{{@{ek} {ev}}}", f"{{@{ek} {new_v}}}",1)
             
         if '|' in check_split_str:
+            str_list = check_split_str.split("|")
             if tag == "filter":
                 filter_values = en_str.split("|")
                 if (len(filter_values) > 2):
@@ -179,7 +180,28 @@ class JsonGenerator(Runnable):
                         cv_conditions.append(ccv)
                     cn_str = f"{cv_name}|{cv_source}|{'|'.join(cv_conditions)}"
                     return cn_str, True
-                
+            elif tag == "classFeature":
+                # 只需要翻译前两个
+                replaced_keys = []  # 替换为Job UUID后的文本
+                for idx, sk in enumerate(str_list):
+                    if idx == 2 or idx == 4:
+                        replaced_keys.append(sk)
+                        continue
+                    cn_sk, _ = self.__process_value(sk, tag=tag)
+                    replaced_keys.append(cn_sk)
+                cn_str = '|'.join(replaced_keys)
+                return cn_str, True
+            elif tag == "optfeature":
+                # 第二个不翻译
+                replaced_keys = []  # 替换为Job UUID后的文本
+                for idx, sk in enumerate(str_list):
+                    if idx == 1:
+                        replaced_keys.append(sk)
+                        continue
+                    cn_sk, _ = self.__process_value(sk, tag=tag)
+                    replaced_keys.append(cn_sk)
+                cn_str = '|'.join(replaced_keys)
+                return cn_str, True
             en_split = split_string(en_str)
             cn_split = split_string(cn_str)
             res_split = []
@@ -261,7 +283,7 @@ class JsonGenerator(Runnable):
             if len(matches) > 0:
                 for job_id in matches:
                     for j in self.done_jobs:
-                        if j.uid == job_id:
+                        if j.uid == job_id and j.cn_str is not None:
                             j.cn_str, ok = self.__replace_sub_jobs(
                                 j.cn_str, j.en_str, tag=j.tag)
                             obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)

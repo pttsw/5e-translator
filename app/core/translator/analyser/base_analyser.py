@@ -415,6 +415,8 @@ class BaseAnalyser:
             else:
                 return v
         # if len(sub_ks) > 1:
+        replaced_keys = []  # 替换为Job UUID后的文本
+
         if tag == "filter":
             if (len(str_list) > 2):
                 # 正常至少有3个值
@@ -445,12 +447,45 @@ class BaseAnalyser:
                         cv_conditions.append(ccv)
                     res_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                     return res_str
-                
-        replaced_keys = []  # 替换为Job UUID后的文本
-        for idx, sk in enumerate(str_list):
-            replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
-        res_str = '|'.join(replaced_keys)
-        return res_str
+        elif tag == "classFeature":
+            # 只需要翻译前两个
+            for idx, sk in enumerate(str_list):
+                if idx == 2 or idx == 4:
+                    replaced_keys.append(sk)
+                    continue
+                replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
+            res_str = '|'.join(replaced_keys)
+            return res_str
+        elif tag == "optfeature":
+            for idx, sk in enumerate(str_list):
+                if idx == 1:
+                    replaced_keys.append(sk)
+                    continue
+                replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
+            res_str = '|'.join(replaced_keys)
+            return res_str
+        else:
+            # 没有tag的情况
+            replaced_keys = []  # 替换为Job UUID后的文本
+            if "/classFeature" in key_path:
+                # classFeature 只需要翻译前2个
+                for idx, sk in enumerate(str_list):
+                    if idx == 2 or idx == 4:
+                        replaced_keys.append(sk)
+                        continue
+                    replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
+            elif "/subclassFeatures" in key_path:
+                # subclassFeatures 只需要翻译前2个
+                for idx, sk in enumerate(str_list):
+                    if idx == 2 or idx == 4:
+                        replaced_keys.append(sk)
+                        continue
+                    replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
+            else:
+                for idx, sk in enumerate(str_list):
+                    replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
+            res_str = '|'.join(replaced_keys)
+            return res_str
 
     def get_job(self, en, tag=""):
         # first_match = None

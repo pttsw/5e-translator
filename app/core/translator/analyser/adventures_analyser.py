@@ -13,7 +13,8 @@ class AdventuresAnalyser(BaseAnalyser):
             "DIP": "亮君等/AI搬运",
             "COS": "愈伤之叶等/AI搬运",
             "KKW": "神秘的万智牌手六人组",
-            "UtHftLH": "东方等"
+            "UtHftLH": "东方等",
+            "DoSI": "Eygma等",
         }
         
         

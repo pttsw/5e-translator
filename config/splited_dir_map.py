@@ -4,6 +4,7 @@ SPLITED_SOURCE_MAP = {
     "blood hunter": "第三方/血猎手",
     "avantris; crooked moon": "第三方/歪曲之月",
     "chaosium inc.; cthulhu by torchlight": "第三方/火炬光下的克苏鲁",
+    "benjamin huffman; pugilist - 2024": "第三方/拳斗士",
     "dosi": "模组/风骸岛",
     "dmg": "城主指南",
     "phb": "玩家手册",
