@@ -1,7 +1,7 @@
 import re
 from config import SKIP_PATTERN,SKIP_ONLY_PURE_STR_KEYS, SKIP_PREFIX, SKIP_SUFFIX, TOTAL_SKIP_PREFIX, SKIP_KEYS, SKIP_KEY_PATH, SKIP_ITEMS, FORCE_TRANSLATE_STR, logger,NO_SKIP_PATH
 import json
-from typing import Tuple, List
+from typing import Tuple, List, Callable, Optional, Set
 
 
 def check_skip_key(key: str, value: str, prefix_key_path: str):
@@ -226,6 +226,8 @@ def split_string(text):
     current_part = ""
     bracket_level = 0
     i = 0
+    if not text:
+        return []
     while i < len(text):
         if text[i:i + 2] == "{@":
             # 进入特定格式
@@ -256,6 +258,82 @@ def split_string(text):
     if current_part:
         result.append(current_part)
     return result
+
+
+def replace_split_values(
+    values: List[str],
+    process_value: Callable[[str, Optional[str], int], str],
+    tag: Optional[str] = "",
+    skip_indices: Optional[Set[int]] = None
+) -> str:
+    """处理按|拆分后的文本列表，支持按索引跳过替换。"""
+    if skip_indices is None:
+        skip_indices = set()
+
+    replaced_values = []
+    for idx, value in enumerate(values):
+        if idx in skip_indices:
+            replaced_values.append(value)
+            continue
+        replaced_values.append(process_value(value, tag, idx))
+
+    return '|'.join(replaced_values)
+
+
+def process_filter_split_values(
+    values: List[str],
+    process_value: Callable[[str, Optional[str], int], str],
+    support_pages: List[str],
+    condition_tag_resolver: Optional[Callable[[str, int, str], Optional[str]]] = None,
+    bestiary_tag_resolver: Optional[Callable[[int, str], Optional[str]]] = None,
+) -> Tuple[Optional[str], bool]:
+    """处理filter标签的|分隔结构。"""
+    if len(values) <= 2:
+        return None, False
+
+    page = values[1]
+    if page != "bestiary" and page not in support_pages:
+        return None, False
+
+    name_value = process_value(values[0], page, 0)
+    processed_conditions = []
+
+    for idx, raw_value in enumerate(values[2:], 2):
+        if page == "bestiary" and raw_value.startswith('type='):
+            processed_conditions.append(raw_value)
+            continue
+
+        if page == "bestiary" and raw_value.startswith('tag='):
+            en_tags = raw_value[4:].split(';')
+            cn_tags = []
+            for en_tag in en_tags:
+                tag = bestiary_tag_resolver(
+                    idx, en_tag) if bestiary_tag_resolver else None
+                cn_tags.append(process_value(en_tag, tag, idx))
+            processed_conditions.append(f'tag={";".join(cn_tags)}')
+            continue
+
+        value_tag = condition_tag_resolver(
+            page, idx, raw_value) if condition_tag_resolver else None
+        processed_conditions.append(process_value(raw_value, value_tag, idx))
+
+    return f"{name_value}|{page}|{'|'.join(processed_conditions)}", True
+
+
+def process_post_filter_split_values(
+    values: List[str],
+    process_value: Callable[[str, Optional[str], int], str],
+    tag: Optional[str] = "",
+    key_path: str = "",
+) -> Tuple[Optional[str], bool]:
+    """处理filter分支之后可复用的按|拆分逻辑。"""
+    if tag == "classFeature":
+        return replace_split_values(values, process_value, tag=tag, skip_indices={2, 4}), True
+    if tag == "optfeature":
+        return replace_split_values(values, process_value, tag=tag, skip_indices={1}), True
+    if key_path and ("/classFeature" in key_path or "/subclassFeatures" in key_path):
+        return replace_split_values(values, process_value, tag=tag, skip_indices={2, 4}), True
+    return None, False
 
 
 def tag_duplicate_removal(en_match_k, en_match_v, cn_match_k, cn_match_v):

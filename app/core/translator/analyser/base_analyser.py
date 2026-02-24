@@ -1,7 +1,7 @@
 import uuid
 from config import logger,KEY_MATCHED_TAG
 from typing import List, Optional
-from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path
+from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path, replace_split_values, process_filter_split_values, process_post_filter_split_values
 from app.core.database import DBDictionary
 # 添加jsonpath_ng的导入
 from jsonpath_ng import parse
@@ -414,78 +414,19 @@ class BaseAnalyser:
                 return f'{prefix}{{!@ {uid}}}{suffix}'
             else:
                 return v
-        # if len(sub_ks) > 1:
-        replaced_keys = []  # 替换为Job UUID后的文本
-
         if tag == "filter":
-            if (len(str_list) > 2):
-                # 正常至少有3个值
-                cv_page = str_list[1]
-                cv_name = _process_value(str_list[0], tag=cv_page, value_index=0)
-                if cv_page == "bestiary":
-                    cv_conditions = []
-                    for idx, eev in enumerate(str_list[2:], 2):
-                        if eev.startswith('type='):
-                            # 锁定type
-                            cv_conditions.append(eev)
-                        elif eev.startswith('tag='):
-                            en_tags = eev[4:].split(';')
-                            cn_tags = []
-                            for et in en_tags:
-                                ctag = _process_value(et, value_index=idx)
-                                cn_tags.append(ctag)
-                            cv_conditions.append(f'tag={";".join(cn_tags)}')
-                        else:
-                            ccv = _process_value(eev, value_index=idx)
-                            cv_conditions.append(ccv)
-                    res_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
-                    return res_str
-                elif cv_page in ["items", "spells", "optionalfeatures", "races", "rewards"]:
-                    cv_conditions = []
-                    for idx, eev in enumerate(str_list[2:], 2):
-                        ccv = _process_value(eev, value_index=idx)
-                        cv_conditions.append(ccv)
-                    res_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
-                    return res_str
-        elif tag == "classFeature":
-            # 只需要翻译前两个
-            for idx, sk in enumerate(str_list):
-                if idx == 2 or idx == 4:
-                    replaced_keys.append(sk)
-                    continue
-                replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
-            res_str = '|'.join(replaced_keys)
+            res_str, handled = process_filter_split_values(
+                str_list,
+                _process_value,
+                support_pages=["items", "spells", "optionalfeatures", "races", "rewards"],
+            )
+            if handled:
+                return res_str
+        res_str, handled = process_post_filter_split_values(
+            str_list, _process_value, tag=tag, key_path=key_path)
+        if handled:
             return res_str
-        elif tag == "optfeature":
-            for idx, sk in enumerate(str_list):
-                if idx == 1:
-                    replaced_keys.append(sk)
-                    continue
-                replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
-            res_str = '|'.join(replaced_keys)
-            return res_str
-        else:
-            # 没有tag的情况
-            replaced_keys = []  # 替换为Job UUID后的文本
-            if "/classFeature" in key_path:
-                # classFeature 只需要翻译前2个
-                for idx, sk in enumerate(str_list):
-                    if idx == 2 or idx == 4:
-                        replaced_keys.append(sk)
-                        continue
-                    replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
-            elif "/subclassFeatures" in key_path:
-                # subclassFeatures 只需要翻译前2个
-                for idx, sk in enumerate(str_list):
-                    if idx == 2 or idx == 4:
-                        replaced_keys.append(sk)
-                        continue
-                    replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
-            else:
-                for idx, sk in enumerate(str_list):
-                    replaced_keys.append(_process_value(sk, tag=tag, value_index=idx))
-            res_str = '|'.join(replaced_keys)
-            return res_str
+        return replace_split_values(str_list, _process_value, tag=tag)
 
     def get_job(self, en, tag=""):
         # first_match = None
