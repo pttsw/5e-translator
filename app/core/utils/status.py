@@ -4,3 +4,4 @@ class TranslatorStatus(Enum):
     SUCCESS = 0
     FAILURE = 1
     WAITING = 2
+    FATAL = 3

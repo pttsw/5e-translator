@@ -1,5 +1,6 @@
 
 SPLITED_SOURCE_MAP = {
+    "gunslinger": "第三方/瓦尔达的秘密尖塔/铳士",
     "griffin macaulay": "第三方/狮鹫的鞍中珍宝Ⅱ",
     "blood hunter": "第三方/血猎手",
     "avantris; crooked moon": "第三方/歪曲之月",

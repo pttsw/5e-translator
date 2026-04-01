@@ -85,6 +85,25 @@ class LLMFactory:
         self.add_finish = add_finish
         self.lock.release()
 
+    def abort(self, job=None, reason: str = ""):
+        self.lock.acquire()
+        if job is not None:
+            self.error_count += 1
+            try:
+                self.failed_jobs.append(job)
+            except Exception:
+                pass
+        while len(self.job_queue) != 0:
+            pending_job = self.job_queue.popleft()
+            self.error_count += 1
+            try:
+                self.failed_jobs.append(pending_job)
+            except Exception:
+                pass
+        self.add_finish = True
+        self.lock.release()
+        if reason:
+            logger.error(reason)
 
     def get_job(self):
         self.lock.acquire()
@@ -161,6 +180,10 @@ def kimi_work(factory: LLMFactory, work_func,
             logger.warning(f"线程{work_id}，获得结果失败,重新处理JOBS") 
             factory.reset_job(job, True)
             # __sleep(120)
+        elif kimi_status == TranslatorStatus.FATAL:
+            logger.error(f"线程{work_id}，遇到不可恢复错误，停止剩余任务")
+            factory.abort(job, reason=f"线程{work_id} 遇到不可恢复错误，任务已提前终止")
+            return
         elif kimi_status == TranslatorStatus.WAITING:
             logger.warning(f"线程{work_id}，要求超时等待，暂停1分30秒，重新处理JOBS")
             factory.reset_job(job, False)

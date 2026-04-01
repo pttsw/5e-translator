@@ -72,6 +72,32 @@ class TestJobProcessorReplaceSubJobs:
 
         assert success is True
         assert "@{spell fireball|lightning bolt}" in result
+
+    def test_match_already_translated_values_when_order_differs(self):
+        en_str = (
+            "It removes {@condition Exhaustion|XPHB} and also "
+            "{@condition Poisoned|XPHB}."
+        )
+        cn_str = "它会移除{@condition 中毒|XPHB}并且移除{@condition 力竭|XPHB}。"
+
+        def fake_process_value(value, tag=""):
+            if value == en_str:
+                return value, False
+            if tag == "condition":
+                translations = {
+                    "Exhaustion": ("力竭", True),
+                    "Poisoned": ("中毒", True),
+                }
+                if value in translations:
+                    return translations[value]
+            return value, False
+
+        self.processor._JobProcessor__process_value = fake_process_value
+
+        result, success = self.processor._JobProcessor__replace_sub_jobs(cn_str, en_str)
+
+        assert success is True
+        assert result == cn_str
         
         
 

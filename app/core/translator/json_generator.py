@@ -98,6 +98,7 @@ class JsonGenerator(Runnable):
 
         used_en = set()
         matches = {}
+        translated_match_cache = {}
 
         # 1) tag+value完全一致
         for cn_item in cn_items:
@@ -109,7 +110,24 @@ class JsonGenerator(Runnable):
                     used_en.add(en_item["idx"])
                     break
 
-        # 2) tag一致时，按value的|分段位置相似度匹配
+        # 2) tag一致，且英文value替换后的结果与当前中文value一致
+        for cn_item in cn_items:
+            if cn_item["idx"] in matches:
+                continue
+            for en_item in en_items:
+                if en_item["idx"] in used_en or cn_item["tag"] != en_item["tag"]:
+                    continue
+                cache_key = (cn_item["idx"], en_item["idx"])
+                if cache_key not in translated_match_cache:
+                    replaced_value, ok = self.__replace_sub_jobs(
+                        cn_item["value"], en_item["value"], tag=en_item["tag"])
+                    translated_match_cache[cache_key] = ok and replaced_value == cn_item["value"]
+                if translated_match_cache[cache_key]:
+                    matches[cn_item["idx"]] = en_item["idx"]
+                    used_en.add(en_item["idx"])
+                    break
+
+        # 3) tag一致时，按value的|分段位置相似度匹配
         for cn_item in cn_items:
             if cn_item["idx"] in matches:
                 continue
@@ -132,7 +150,7 @@ class JsonGenerator(Runnable):
                 matches[cn_item["idx"]] = best_en_idx
                 used_en.add(best_en_idx)
 
-        # 3) fallback: 仅按tag顺序匹配
+        # 4) fallback: 仅按tag顺序匹配
         for cn_item in cn_items:
             if cn_item["idx"] in matches:
                 continue

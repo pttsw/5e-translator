@@ -10,7 +10,7 @@ from app.core.utils import Job, TranslatorStatus
 from app.core.database import DatabaseAdapter
 from .siliconflow_adapter import SiliconFlowAdapter
 from .llm_factory import LLMFactory
-from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, reset_tags_index, format_llm_msg, parse_foundry_items_uuid_format
+from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format
 from typing import List, Tuple, Optional
 from app.core.bean.term import Term, to_terms
 
@@ -312,6 +312,90 @@ class JobProcessor(Runnable):
             else:
                 return value, False
         return value, True
+
+    def __match_tag_values_by_priority(self, cn_match_k, cn_match_v, en_match_k, en_match_v):
+        """按优先级匹配cn/en中的{@tag value}对，避免顺序错位。"""
+        cn_items = [{"idx": i, "tag": k, "value": v}
+                    for i, (k, v) in enumerate(zip(cn_match_k, cn_match_v))]
+        en_items = [{"idx": i, "tag": k, "value": v}
+                    for i, (k, v) in enumerate(zip(en_match_k, en_match_v))]
+
+        used_en = set()
+        matches = {}
+        translated_match_cache = {}
+
+        # 1) tag+value完全一致
+        for cn_item in cn_items:
+            for en_item in en_items:
+                if en_item["idx"] in used_en:
+                    continue
+                if cn_item["tag"] == en_item["tag"] and cn_item["value"] == en_item["value"]:
+                    matches[cn_item["idx"]] = en_item["idx"]
+                    used_en.add(en_item["idx"])
+                    break
+
+        # 2) tag一致，且英文value替换后的结果与当前中文value一致
+        for cn_item in cn_items:
+            if cn_item["idx"] in matches:
+                continue
+            for en_item in en_items:
+                if en_item["idx"] in used_en or cn_item["tag"] != en_item["tag"]:
+                    continue
+                cache_key = (cn_item["idx"], en_item["idx"])
+                if cache_key not in translated_match_cache:
+                    replaced_value, ok = self.__replace_sub_jobs(
+                        cn_item["value"], en_item["value"], tag=en_item["tag"])
+                    translated_match_cache[cache_key] = ok and replaced_value == cn_item["value"]
+                if translated_match_cache[cache_key]:
+                    matches[cn_item["idx"]] = en_item["idx"]
+                    used_en.add(en_item["idx"])
+                    break
+
+        # 3) tag一致时，按value的|分段位置相似度匹配
+        for cn_item in cn_items:
+            if cn_item["idx"] in matches:
+                continue
+            best_en_idx = None
+            best_score = 0
+            cn_parts = cn_item["value"].split("|")
+            for en_item in en_items:
+                if en_item["idx"] in used_en or cn_item["tag"] != en_item["tag"]:
+                    continue
+                en_parts = en_item["value"].split("|")
+                score = 0
+                max_len = max(len(cn_parts), len(en_parts))
+                for pos, (cn_part, en_part) in enumerate(zip(cn_parts, en_parts)):
+                    if cn_part == en_part:
+                        score += (max_len - pos)
+                if score > best_score:
+                    best_score = score
+                    best_en_idx = en_item["idx"]
+            if best_en_idx is not None and best_score > 0:
+                matches[cn_item["idx"]] = best_en_idx
+                used_en.add(best_en_idx)
+
+        # 4) fallback: 仅按tag顺序匹配
+        for cn_item in cn_items:
+            if cn_item["idx"] in matches:
+                continue
+            for en_item in en_items:
+                if en_item["idx"] in used_en:
+                    continue
+                if cn_item["tag"] == en_item["tag"]:
+                    matches[cn_item["idx"]] = en_item["idx"]
+                    used_en.add(en_item["idx"])
+                    break
+
+        if len(matches) != len(cn_items):
+            return False, None
+
+        paired = []
+        for cn_item in cn_items:
+            en_item = en_items[matches[cn_item["idx"]]]
+            paired.append((cn_item["tag"], cn_item["value"],
+                          en_item["tag"], en_item["value"]))
+        return True, paired
+
     def __replace_sub_jobs(self, cn_str: str, en_str: Optional[str] = None, tag = ""):
         # print(cn_str)
         processed = False
@@ -338,8 +422,8 @@ class JobProcessor(Runnable):
         if (not en_is_valid) or (not cn_is_valid) or (len(cn_match_v) != len(en_match_v)):
             return cn_str, False
 
-        ok, en_match_k, en_match_v, cn_match_k, cn_match_v = reset_tags_index(
-            en_match_k, en_match_v, cn_match_k, cn_match_v)
+        ok, matched_pairs = self.__match_tag_values_by_priority(
+            cn_match_k, cn_match_v, en_match_k, en_match_v)
         if not ok:
             return cn_str, False
         check_split_str = en_str
@@ -347,7 +431,7 @@ class JobProcessor(Runnable):
         # if len(cn_match_k) > 0:
         #     processed = True
             
-        for ck, cv, ek, ev in zip(cn_match_k, cn_match_v, en_match_k, en_match_v):
+        for ck, cv, ek, ev in matched_pairs:
             check_split_str = check_split_str.replace(f"{{@{ek} {ev}}}", "")
 
             cn_str = cn_str.replace(f"{{@{ck} {cv}}}", f"{{@{ek} {ev}}}",1)

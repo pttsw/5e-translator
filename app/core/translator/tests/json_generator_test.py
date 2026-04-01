@@ -34,3 +34,35 @@ def test_replace_sub_jobs_keeps_marker_mapping_when_order_differs():
 
     assert success is True
     assert result == cn_str
+
+
+def test_replace_sub_jobs_matches_already_translated_values_by_order():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    en_str = (
+        "It removes {@condition Exhaustion|XPHB} and also "
+        "{@condition Poisoned|XPHB}."
+    )
+    cn_str = (
+        "它会移除{@condition 中毒|XPHB}并且移除{@condition 力竭|XPHB}。"
+    )
+
+    def fake_process_value(value, tag=""):
+        if value == en_str:
+            return value, False
+        if tag == "condition":
+            translations = {
+                "Exhaustion": "力竭",
+                "Poisoned": "中毒",
+            }
+            if value in translations:
+                return translations[value], True
+        return value, False
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(cn_str, en_str)
+
+    assert success is True
+    assert result == cn_str
