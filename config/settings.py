@@ -331,13 +331,15 @@ BESTIARY_FILE_MAP = {
 }
 #endregion
 
-# region 外部PTTSW-Core
-CORE_OUTPUT_DATA_DIR = "/data/pttsw-core/output"
+# region PTTSW split output
+SPLIT_OUTPUT_ROOT = "/data/5e-translator/output"
 
-# SPLITED_5ETOOLS_DATA_DIR = EN_PATH
-SPLITED_5ETOOLS_EN_PATH = CORE_OUTPUT_DATA_DIR + "/split-data"
-COMBINE_INFO_DATA_DIR = CORE_OUTPUT_DATA_DIR + "/combine-info"
-COMBINED_5ETOOLS_DATA_DIR = CORE_OUTPUT_DATA_DIR + "/combined-data"
+# app/core/spliter 复用了原 pttsw-core 的配置命名，这里在当前项目内统一提供
+ORIGIN_5ETOOLS_DATA_DIR = EN_PATH
+SPLITED_5ETOOLS_DATA_DIR = SPLIT_OUTPUT_ROOT + "/split-data"
+SPLITED_5ETOOLS_EN_PATH = SPLITED_5ETOOLS_DATA_DIR
+COMBINE_INFO_DATA_DIR = SPLIT_OUTPUT_ROOT + "/combine-info"
+COMBINED_5ETOOLS_DATA_DIR = SPLIT_OUTPUT_ROOT + "/combined-data"
 #endregion
 
 # region HOMEBREW
@@ -351,4 +353,3 @@ UA_EN_PATH = "/data/unearthed-arcana-en"
 
 # region app config
 APP_TEMP_PATH = "/data/5e-translator/temp"
-

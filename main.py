@@ -3,6 +3,7 @@ from app.core.utils import find_json_files, write_translate_cache, Job, FileWork
 from app.core.translator import JsonAnalyser, JobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler, JsonGenerator
 from app.cli import transform_proofread, search_knowledge, compare_term, add_mysql_terms_to_redis, combine_temp_terms_to_csv,load_files_into_chroma_db, load_chm_files_into_chroma_db, load_term_from_text, transform_html_2_txt
 from app.core.para import ParaUpdater, set_terms_to_para
+from app.core.file_progress_service import get_split_file_path, sync_source_file
 from config import EN_PATH, logger
 from app.core.database import DBDictionary
 import os
@@ -30,6 +31,8 @@ def main():
                                   help='Mode to use, default to 5et, can be 5et, splited, homebrew, plu or ua')
     translate_parser.add_argument('--cache', action='store_false', default=True,
                                   help='Whether to use cache terms, default to True')
+    translate_parser.add_argument('--file', default='', type=str,
+                                  help='Only process one file. In splited mode this should be the relative split json path.')
     
     search_parser = subparsers.add_parser('search')
     search_parser.add_argument('--query', default='', type=str,
@@ -63,6 +66,12 @@ def main():
     retry_parser.add_argument('--byhand', action='store_true', default=False,
                               help='Whether to use by hand mode, default to False')
 
+    sync_parser = subparsers.add_parser('sync-splited')
+    sync_parser.add_argument('--source-file', required=True, type=str,
+                             help='Relative source json path under configured source roots, e.g. 5etools or homebrew')
+    sync_parser.add_argument('--skip-jobs', action='store_true', default=False,
+                             help='Only rebuild split files and file table, skip jobs cache')
+
     
     args = parser.parse_args()
     
@@ -87,6 +96,11 @@ def main():
             elif args.mode == 'ua':
                 from config import UA_EN_PATH
                 args.en = UA_EN_PATH
+        if args.file:
+            if args.mode == 'splited':
+                args.en = get_split_file_path(args.file.strip('/'))
+            else:
+                args.en = args.file
         
         res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)|JsonGenerator(args.thread_num)|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
@@ -187,6 +201,9 @@ def main():
         res = processor.invoke([file_info], config=cfg)
         for r in res:
             print(len(r.job_list), getattr(r, 'json_path', ''))
+    elif args.function == 'sync-splited':
+        res = sync_source_file(args.source_file, rebuild_jobs=not args.skip_jobs)
+        print(res)
         
 if __name__ == '__main__':
     main()

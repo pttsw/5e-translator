@@ -2,6 +2,7 @@ import threading
 import time
 import datetime
 import json
+import os
 from .mysql_db import MySQLDatabase
 from config import DB_CONFIG, logger
 from app.core.utils import find_reference
@@ -585,10 +586,11 @@ class DBDictionary:
         return credits
     
     def update_file_table(self, file_path: str, source_file: str, total: int, translate: int, proofread: int, en_json: str = None):
+        parent_dir = os.path.dirname(file_path)
         self.lock.acquire()
         ok = self.db_list[0].execute_non_query(
-            "INSERT INTO file (file, source_file, total, translate, proofread, en_json) VALUES (%s, %s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE total = VALUES(total), translate = VALUES(translate), proofread = VALUES(proofread), en_json = VALUES(en_json)",
-            (file_path, source_file, total, translate, proofread, en_json))
+            "INSERT INTO file (file, parent_dir, source_file, total, translate, proofread, en_json) VALUES (%s, %s, %s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE parent_dir = VALUES(parent_dir), total = VALUES(total), translate = VALUES(translate), proofread = VALUES(proofread), en_json = VALUES(en_json)",
+            (file_path, parent_dir, source_file, total, translate, proofread, en_json))
         self.lock.release()
         return ok
     

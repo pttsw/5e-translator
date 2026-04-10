@@ -4,7 +4,7 @@
 from flask import Flask
 from flask_cors import CORS
 from .api import login_manager, api_bp as api_blueprint
-from .model import db, migrate
+from .model import db, migrate, ensure_file_table_schema, migrate_plaintext_passwords, ensure_user_table_schema, ensure_invite_code_table_schema
 
 from config import DB_CONFIG, swagger
 
@@ -29,3 +29,9 @@ login_manager.init_app(app)
 
 # 注册蓝图
 app.register_blueprint(api_blueprint, url_prefix='/api/v1')
+
+with app.app_context():
+    ensure_invite_code_table_schema()
+    ensure_user_table_schema()
+    ensure_file_table_schema()
+    migrate_plaintext_passwords()
