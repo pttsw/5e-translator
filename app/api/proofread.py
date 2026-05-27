@@ -1,7 +1,7 @@
 # api_foo.py
 from flask_restful import Resource, Api, request
 from .restful_utils import *
-from app.model import FileModule, ProofreadModel,WordsModel, session, SourceModel
+from app.model import FileModule, ProofreadModel,WordsModel, session, SourceModel, UserModel
 from .base import BaseApi
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from sqlalchemy import text
@@ -32,7 +32,68 @@ class ProofreadApi(Resource, BaseApi):
     model = ProofreadModel
     @login_required
     def get(self):
-        return super().get()
+        pageNum = request.args.get('page', None, int)
+        pageSize = request.args.get('limit', 10, int)
+        id = request.args.get('id', None, int)
+        query = self.model.query
+
+        if id:
+            s = query.get(id)
+            return self._get_id(s)
+        else:
+            sort_by = request.args.get('sort')
+            equal_filters = dict()
+            contain_filters = dict()
+            not_equal_filters = dict()
+            not_contain_filters = dict()
+            for attr, v in request.args.items():
+                if attr.startswith('eq_'):
+                    equal_filters[attr[3:]] = v
+                elif attr.startswith('in_'):
+                    contain_filters[attr[3:]] = v
+                elif attr.startswith('neq_'):
+                    not_equal_filters[attr[4:]] = v
+                elif attr.startswith('nin_'):
+                    not_contain_filters[attr[4:]] = v
+            for f in equal_filters:
+                if equal_filters[f]:
+                    query = query.filter(getattr(self.model, f) == equal_filters[f])
+            for f in contain_filters:
+                if contain_filters[f]:
+                    query = query.filter(getattr(self.model, f).contains(contain_filters[f]))
+            for f, v in not_equal_filters.items():
+                if v:
+                    query = query.filter(getattr(self.model, f) != v)
+            for f, v in not_contain_filters.items():
+                if v:
+                    query = query.filter(getattr(self.model, f).notlike(f'%{v}%'))
+            if sort_by:
+                if sort_by[0] == '+':
+                    query = query.order_by(getattr(self.model, sort_by[1:]).asc())
+                elif sort_by[0] == '-':
+                    query = query.order_by(getattr(self.model, sort_by[1:]).desc())
+            query = self._get(query)
+            if pageNum:
+                pageItems = query.paginate(
+                    page=pageNum, per_page=pageSize, error_out=False)
+                items = [self._enrich_item(item) for item in pageItems.items]
+                return success(data={"count": pageItems.total, "items": items})
+            else:
+                items = query.all()
+                results = [self._enrich_item(item) for item in items]
+        return success(data={"count": len(results), "items": results})
+
+    def _enrich_item(self, item):
+        data = item.to_dict()
+        if item.modified_by:
+            user = UserModel.query.get(item.modified_by)
+            if user:
+                data['modified_by_username'] = user.username
+            else:
+                data['modified_by_username'] = None
+        else:
+            data['modified_by_username'] = None
+        return data
      
     @login_required
     def put(self):

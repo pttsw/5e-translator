@@ -8,3 +8,4 @@ class FileWorkInfo:
         self.json_path = json_path
         self.out_path = out_path
         self.cn_obj = None
+        self.batch_meta = {}

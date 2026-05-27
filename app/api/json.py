@@ -112,18 +112,28 @@ class JsonApi(Resource):
         file_name = file_name.strip('/')
         if file_name and file_name != '':
             file_path = os.path.join(SPLITED_5ETOOLS_EN_PATH, file_name)
+            db_file = FileModule.query.filter_by(file=file_name).first()
+
+            if db_file is not None and not os.path.exists(file_path):
+                try:
+                    sync_split_file(file_name)
+                    db_file = FileModule.query.filter_by(file=file_name).first()
+                except Exception as exc:
+                    logger.error(f'拆分文件缺失，自动同步失败: {file_name}, {exc}')
+                file_path = os.path.join(SPLITED_5ETOOLS_EN_PATH, file_name)
+
             if os.path.isdir(file_path):
                 files = list_json_entries(file_name)
                 return success(data=files)
             elif os.path.isfile(file_path):
-                db_file = FileModule.query.filter_by(file=file_name).first()
                 if db_file is None:
-                    return error(f"{file_name}不在数据库中")
+                    return error(f'{file_name}不在数据库中')
                 if db_file.stale or is_file_marked_stale(file_name) or is_source_file_stale(db_file.source_file, file_name):
                     sync_split_file(file_name)
                     db_file = FileModule.query.filter_by(file=file_name).first()
                     if db_file is None:
-                        return error(f"{file_name}已被移除")
+                        return error(f'{file_name}已被移除')
+                    file_path = os.path.join(SPLITED_5ETOOLS_EN_PATH, file_name)
                 if db_file.locked:
                     return success(data={
                         'file': file_name,
@@ -138,7 +148,7 @@ class JsonApi(Resource):
                 with open(file_path, 'r') as file:
                     content = file.read()
                 json_content = json.loads(content)
-                if source and isinstance(json_content,dict):
+                if source and isinstance(json_content, dict):
                     json_content = self.__check_source(json_content, source)
                 return success(data=[{
                     'file': file_name,
@@ -154,12 +164,12 @@ class JsonApi(Resource):
             dir_entries = list_json_entries(file_name)
             if dir_entries:
                 return success(data=dir_entries)
-            return error(f"{file_name}不存在")
+            return error(f'{file_name}不存在')
         else:
             files = list_json_entries('')
             return success(data=files)
-        return error("参数错误")
-    
+        return error('参数错误')
+
     def __get_job_list_by_file(self, file_path):
         if SPLITED_5ETOOLS_EN_PATH not in file_path:
             return []

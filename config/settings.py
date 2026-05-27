@@ -70,7 +70,7 @@ TOTAL_SKIP_PREFIX=['rarity=', 'featrue type=', 'size=','alignment=', 'cr=', 'are
 # 跳过的后缀，此类字符串的后缀不翻译，只翻译后缀前面的内容
 SKIP_SUFFIX=['#2','#c','#x']
 # 完全跳过的键，有此类键的字符串，整个字符串都不翻译
-SKIP_KEYS=['source', 'fonts', 'path', 'id', 'href','mode','_meta','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId','identifier', 'walls', 'tag', 'mapRegions','preparedSpellsChange', 'casterProgression', 'scfType', 'property', 'equipmentType', 'weaponCategory','miscTags', 'referenceSources', 'space', 'calculation', 'statuses', 'damageInflict', 'savingThrow', 'classSource', 'subclassSource', 'hidden', 'proficiency']
+SKIP_KEYS=['source', 'fonts', 'path', 'id', 'href','mode','_meta','armor','trapHazType','vehicleType','rarity','imageType', 'edition','facilityType','activation.type','foundryId','foundrySystem','img', 'formula','damage.parts','target.affects.count','system','saveDamage','attackDamage', 'definedInSource', 'displayAs','abbreviation','tokenCredit', 'credit', 'addAs','dataType','converterId','identifier', 'walls', 'tag', 'mapRegions','preparedSpellsChange', 'casterProgression', 'scfType', 'property', 'equipmentType', 'weaponCategory','miscTags', 'referenceSources', 'space', 'calculation', 'statuses', 'damageInflict', 'savingThrow', 'classSource', 'subclassSource', 'hidden', 'proficiency', 'unit', 'onSave']
 # 添加“翻译”字段的KEY
 ADD_TRANSLATOR_KEY=['monster','spell','feat','background','condition','disease', 'status','race','item','deity','vehicle','variantrule','trap','table','sense','recipe','psionic','optionalfeature','magicvariant','deck','cult','boon','facility', 'action', 'object','skill']
 # 完全跳过的路径，有此类路径的字符串，整个字符串都不翻译
@@ -175,6 +175,24 @@ SIMPLE_PROMOT = """
   输出{"trans_str":["它扩展了关于{@book 星界|DMG|2}{@b}（选自{@book 城主指南|DMG}）的描述"], "add_terms":{"Astral Plane": "星界"}}
   输入{"trans_str":["druid"]}
   输出{"trans_str":["德鲁伊"], "add_terms":{"druid": "德鲁伊"}}
+"""
+
+PROMOT_BATCH = """
+- Role:D&D 5e 与 JSON 数据处理专家
+- Background: 用户需按条目批量翻译 D&D 5e 英文 Json 数据，并保持每个子句的 uid 与格式精确对应。
+- Goals: 基于 context、parents、reference 和 known_translations 理解上下文，只翻译 items 中给出的英文文本。
+- Constrains: 只能返回 items 中出现的 uid；不能新增、删除、合并或拆分 uid；{@aaa bbb} 的数量、内容和顺序必须与对应英文一致。
+- OutputFormat: 输出 json，对象格式为 {"batch_id":"","source_hash":"","items":[{"uid":"","trans_str":""}],"add_terms":{}}。
+- Workflow:
+1. 阅读 context、parents、reference、known_translations，理解当前条目的上下文。
+2. 逐个翻译 items 中的 en_str，并保留其 uid 不变。
+3. 不要翻译 context 或 known_translations 本身，它们仅用于理解语境。
+4. 检查返回的 uid 集合必须与输入 items 完全一致，且每个 uid 只出现一次。
+5. 检查每条译文中的 {@aaa bbb} 结构与英文完全对应。
+6. 提取新增专有名词到 add_terms。
+- Example:
+  输入：{"batch_id":"mm/monster/owlbear.json#0","source_hash":"abc","items":[{"uid":"$.monster.trait[0].entries[0].0","en_str":"The owlbear has advantage on Wisdom (Perception) checks that rely on sight or smell."},{"uid":"$.monster.action[0].entries[0].0","en_str":"Melee Weapon Attack: {@hit 7} to hit, reach 5 ft., one target."}]}
+  输出：{"batch_id":"mm/monster/owlbear.json#0","source_hash":"abc","items":[{"uid":"$.monster.trait[0].entries[0].0","trans_str":"枭熊在依赖视觉或嗅觉的感知（察觉）检定上具有优势。"},{"uid":"$.monster.action[0].entries[0].0","trans_str":"近战武器攻击：{@hit 7}，触及5尺，单一目标。"}],"add_terms":{"owlbear":"枭熊"}}
 """
 
 PROMOT_KNOWLEDGE = """

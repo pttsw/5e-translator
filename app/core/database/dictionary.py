@@ -1,11 +1,14 @@
 import threading
+import os
 from . import DBDictionary, RedisDB
 from config import logger
 class DatabaseAdapter:
     def __init__(self, source="", version='1.209.1') -> (None):
         self.lock = threading.Lock()
         self.ok = True
-        self.redis_db = RedisDB()
+        use_memory_backend = os.getenv("TRANSLATOR_DB_BACKEND", "").lower() == "memory"
+        disable_redis = use_memory_backend or os.getenv("TRANSLATOR_DISABLE_REDIS", "").lower() in ("1", "true", "yes", "on")
+        self.redis_db = None if disable_redis else RedisDB()
         # self.redis_db = None
         # if not self.redis_db.ok:
         #     self.ok = False

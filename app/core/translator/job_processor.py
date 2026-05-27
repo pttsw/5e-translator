@@ -9,6 +9,7 @@ from config import logger, DS_KEY, OUT_PATH
 from app.core.utils import Job, TranslatorStatus
 from app.core.database import DatabaseAdapter
 from .siliconflow_adapter import SiliconFlowAdapter
+from .mock_adapter import MockAdapter
 from .llm_factory import LLMFactory
 from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format
 from typing import List, Tuple, Optional
@@ -158,6 +159,9 @@ class JobProcessor(Runnable):
         return self.dictionary.ok
 
     def __init_adapter(self):
+        if os.getenv("TRANSLATOR_LLM_BACKEND", "").lower() == "mock":
+            self.adapter = MockAdapter()
+            return True
         self.adapter = SiliconFlowAdapter(DS_KEY)
         return True
 

@@ -3,7 +3,7 @@ from config import *
 from typing import Tuple
 
 class Job:
-    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, is_key=False, sql_id=None, modified_at=0, source="") -> (None):
+    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, is_key=False, sql_id=None, modified_at=0, source="", key_path="", entry_path="", batch_id="", batch_seq=-1) -> (None):
         self.uid = str(uid)
         self.en_str = en_str # 英文原文
         self.cn_str = cn_str # 中文译文
@@ -23,6 +23,10 @@ class Job:
         self.sql_id = sql_id
         self.last_answer = ""
         self.modified_at = modified_at
+        self.key_path = key_path
+        self.entry_path = entry_path
+        self.batch_id = batch_id
+        self.batch_seq = batch_seq
         
     def __str__(self):
         return f'en_str:{self.en_str} \ncn_str:{self.cn_str}'
@@ -30,8 +34,14 @@ class Job:
     def __eq__(self, __value: object) -> bool:
         if isinstance(__value, str):
             return __value == self.en_str
-        else:
-            return self == __value
+        if isinstance(__value, Job):
+            return (
+                self.uid == __value.uid
+                and self.en_str == __value.en_str
+                and self.tag == __value.tag
+                and self.rel_path == __value.rel_path
+            )
+        return False
         
     def to_llm_question(self) -> (Tuple[str, str]):
         """

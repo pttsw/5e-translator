@@ -63,7 +63,7 @@ class SiliconFlowAdapter:
             f"trust_env={self.trust_env}, structured_output_supported={self.structured_output_supported}"
         )
 
-    def sendText(self, text, promot: str = ""):
+    def sendText(self, text, promot: str = "", structured_output: bool = True):
         if not self.__is_accessable():
             return None, TranslatorStatus.WAITING
 
@@ -78,9 +78,9 @@ class SiliconFlowAdapter:
             f"source_tokens={self.__estimate_text_tokens(source_text)}, "
             f"max_tokens={max_tokens}, payload={text}"
         )
-        return self.__send(data, max_tokens)
+        return self.__send(data, max_tokens, structured_output=structured_output)
 
-    def __post(self, data, max_tokens: int):
+    def __post(self, data, max_tokens: int, structured_output: bool = True):
         retry_tokens = min(self.max_tokens_cap, max(max_tokens * 2, max_tokens + self.min_tokens))
         token_budgets = [max_tokens]
         if retry_tokens > max_tokens:
@@ -90,7 +90,7 @@ class SiliconFlowAdapter:
             current_data = data
             for validation_retry in range(2):
                 try:
-                    response_text, need_validation = self.__invoke_once(current_data, token_budget)
+                    response_text, need_validation = self.__invoke_once(current_data, token_budget, structured_output)
                     if response_text is None:
                         self.__wait(60)
                         return None, TranslatorStatus.WAITING
@@ -142,8 +142,8 @@ class SiliconFlowAdapter:
                     return None, TranslatorStatus.FAILURE
         return None, TranslatorStatus.FAILURE
 
-    def __invoke_once(self, data, token_budget: int):
-        if self.structured_output_supported:
+    def __invoke_once(self, data, token_budget: int, structured_output: bool = True):
+        if structured_output and self.structured_output_supported:
             try:
                 structured_text = self.__invoke_structured_output(data, token_budget)
                 if structured_text is not None:
@@ -206,8 +206,8 @@ class SiliconFlowAdapter:
 
         return TranslatorStatus.SUCCESS
 
-    def __send(self, data, max_tokens: int):
-        message_content, kimi_status = self.__post(data, max_tokens)
+    def __send(self, data, max_tokens: int, structured_output: bool = True):
+        message_content, kimi_status = self.__post(data, max_tokens, structured_output=structured_output)
         if kimi_status != TranslatorStatus.SUCCESS:
             return None, kimi_status
         kimi_status = self.__check_res(message_content)

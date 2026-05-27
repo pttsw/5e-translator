@@ -113,7 +113,7 @@ class BaseAnalyser:
                 uid = j.uid
             else:
                 # 将本身添加到Job列表
-                self.set_job(uid, en_str, cn_str, current_names=current_names, tag=tag)
+                self.set_job(uid, en_str, cn_str, current_names=current_names, tag=tag, key_path=key_path)
             en_str = f'{{!@ {uid}}}'
 
             # 处理tag的value内容
@@ -125,7 +125,7 @@ class BaseAnalyser:
                 index+=1
             return en_str
 
-    def set_job(self, uid: str, en: str, cn: Optional[str] = None, tag=None, current_names: List = []):
+    def set_job(self, uid: str, en: str, cn: Optional[str] = None, tag=None, current_names: List = [], key_path: str = "", entry_path: str = ""):
         """向Job列表中添加Job
 
         Args:
@@ -177,7 +177,7 @@ class BaseAnalyser:
             else:
                 names_in_job.append((name, ""))
         self.job_list.append(Job(uid, en, cn, rel_path=self.rel_path, tag=tag, knowledge=[
-        ], current_names=names_in_job, is_proofread=is_proofread, is_key=is_key, sql_id=sql_id, modified_at=modified_at))
+        ], current_names=names_in_job, is_proofread=is_proofread, is_key=is_key, sql_id=sql_id, modified_at=modified_at, key_path=key_path, entry_path=entry_path or key_path))
 
     def process_first_level(self, obj: dict, source = None):
         """处理dict的第一级，将其中的每个元素添加到Job列表中

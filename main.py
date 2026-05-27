@@ -1,12 +1,71 @@
 import argparse
+import copy
+import statistics
 from app.core.utils import find_json_files, write_translate_cache, Job, FileWorkInfo
-from app.core.translator import JsonAnalyser, JobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler, JsonGenerator
+from app.core.utils import need_translate_str
+from app.core.translator import JsonAnalyser, JobProcessor, BatchJobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler, JsonGenerator
+from app.core.translator.batch_chunker import BatchChunker
 from app.cli import transform_proofread, search_knowledge, compare_term, add_mysql_terms_to_redis, combine_temp_terms_to_csv,load_files_into_chroma_db, load_chm_files_into_chroma_db, load_term_from_text, transform_html_2_txt
 from app.core.para import ParaUpdater, set_terms_to_para
 from app.core.file_progress_service import get_split_file_path, sync_source_file
 from config import EN_PATH, logger
 from app.core.database import DBDictionary
 import os
+
+
+def preview_batch_units(file_infos, batch_max_chars: int, include_all_jobs: bool = False, detail_limit: int = 5):
+    chunker = BatchChunker(max_chars=batch_max_chars)
+    for res in file_infos:
+        if include_all_jobs:
+            preview_file = FileWorkInfo(copy.deepcopy(res.job_list), copy.deepcopy(res.json_obj), res.json_path, res.out_path)
+            preview_file.batch_meta = copy.deepcopy(getattr(res, "batch_meta", {}))
+            for job in preview_file.job_list:
+                job.need_translate = need_translate_str(job.en_str)
+            working_res = preview_file
+        else:
+            working_res = res
+        units = chunker.build_units(working_res)
+        if not units:
+            print(f"FILE {working_res.json_path} -> units=0")
+            continue
+
+        context_sizes = [len(unit.context_text) for unit in units]
+        job_counts = [len(unit.jobs) for unit in units]
+        retry_splits = []
+        for unit in units:
+            sub_units = chunker.split_retry_unit(unit)
+            if sub_units:
+                retry_splits.append({
+                    "batch_id": unit.batch_id,
+                    "child_jobs": [len(child.jobs) for child in sub_units],
+                })
+
+        print(
+            f"FILE {working_res.json_path} -> "
+            f"units={len(units)} jobs={sum(job_counts)} "
+            f"context_chars[min/avg/max]={min(context_sizes)}/{int(statistics.mean(context_sizes))}/{max(context_sizes)} "
+            f"jobs_per_unit[min/avg/max]={min(job_counts)}/{round(statistics.mean(job_counts), 1)}/{max(job_counts)} "
+            f"retry_split_candidates={len(retry_splits)}"
+        )
+
+        largest_units = sorted(units, key=lambda unit: len(unit.context_text), reverse=True)[:detail_limit]
+        for index, unit in enumerate(largest_units, start=1):
+            print(
+                "  "
+                f"top{index} id={unit.batch_id} "
+                f"jobs={len(unit.jobs)} "
+                f"context_chars={len(unit.context_text)} "
+                f"uids={[job.uid for job in unit.jobs[:3]]}"
+            )
+            sub_units = chunker.split_retry_unit(unit)
+            if sub_units:
+                print(
+                    "    "
+                    f"retry_children={len(sub_units)} "
+                    f"child_jobs={[len(child.jobs) for child in sub_units]}"
+                )
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='function', required=True)
@@ -33,6 +92,24 @@ def main():
                                   help='Whether to use cache terms, default to True')
     translate_parser.add_argument('--file', default='', type=str,
                                   help='Only process one file. In splited mode this should be the relative split json path.')
+    translate_parser.add_argument('--batch', action='store_true', default=False,
+                                  help='Whether to translate by batch unit, default to False')
+    translate_parser.add_argument('--batch-max-chars', default=12000, type=int,
+                                  help='Max context chars per batch chunk, default to 12000')
+    translate_parser.add_argument('--batch-preview', action='store_true', default=False,
+                                  help='Only preview batch split results, default to False')
+    translate_parser.add_argument('--batch-preview-all', action='store_true', default=False,
+                                  help='Preview using all translatable jobs, ignoring current DB translation state')
+    translate_parser.add_argument('--batch-preview-detail-limit', default=5, type=int,
+                                  help='How many largest preview units to print per file, default to 5')
+    translate_parser.add_argument('--mock-db', action='store_true', default=False,
+                                  help='Use in-memory mock database backend for this run')
+    translate_parser.add_argument('--mock-db-seed', default='', type=str,
+                                  help='Optional JSON seed file for in-memory mock database')
+    translate_parser.add_argument('--mock-llm', action='store_true', default=False,
+                                  help='Use local mock LLM adapter for this run')
+    translate_parser.add_argument('--mock-llm-seed', default='', type=str,
+                                  help='Optional JSON seed file for mock LLM translations')
     
     search_parser = subparsers.add_parser('search')
     search_parser.add_argument('--query', default='', type=str,
@@ -81,6 +158,19 @@ def main():
         
     # 数据解析流程
     elif args.function == 'translate':
+        if args.mock_db:
+            os.environ['TRANSLATOR_DB_BACKEND'] = 'memory'
+            os.environ['TRANSLATOR_DISABLE_REDIS'] = '1'
+            if args.mock_db_seed:
+                os.environ['TRANSLATOR_MEMORY_DB_SEED'] = args.mock_db_seed
+        elif args.mock_db_seed:
+            os.environ['TRANSLATOR_MEMORY_DB_SEED'] = args.mock_db_seed
+        if args.mock_llm:
+            os.environ['TRANSLATOR_LLM_BACKEND'] = 'mock'
+            if args.mock_llm_seed:
+                os.environ['TRANSLATOR_MOCK_LLM_SEED'] = args.mock_llm_seed
+        elif args.mock_llm_seed:
+            os.environ['TRANSLATOR_MOCK_LLM_SEED'] = args.mock_llm_seed
         if args.en == '':
             if args.mode == '5et':
                 args.en = EN_PATH
@@ -101,8 +191,20 @@ def main():
                 args.en = get_split_file_path(args.file.strip('/'))
             else:
                 args.en = args.file
+
+        config = {'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache, 'batch': args.batch, 'batch_max_chars': args.batch_max_chars}
+        if args.batch_preview:
+            res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()).invoke(args.en, config=config)
+            preview_batch_units(
+                res,
+                args.batch_max_chars,
+                include_all_jobs=args.batch_preview_all,
+                detail_limit=max(args.batch_preview_detail_limit, 0),
+            )
+            return
         
-        res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)|JsonGenerator(args.thread_num)|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
+        processor = BatchJobProcessor(args.thread_num, update=True) if args.batch else JobProcessor(args.thread_num, update=True)
+        res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|processor|JsonGenerator(args.thread_num)|write_translate_cache).invoke(args.en, config=config)
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()|JsonGenerator(args.thread_num)|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})

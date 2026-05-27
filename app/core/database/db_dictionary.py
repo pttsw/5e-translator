@@ -3,6 +3,7 @@ import time
 import datetime
 import json
 import os
+from .memory_db_dictionary import MemoryDBDictionary
 from .mysql_db import MySQLDatabase
 from config import DB_CONFIG, logger
 from app.core.utils import find_reference
@@ -13,6 +14,8 @@ class DBDictionary:
     _instance_lock = threading.Lock()
     
     def __new__(cls, *args, **kwargs):
+        if os.getenv("TRANSLATOR_DB_BACKEND", "").lower() == "memory":
+            return MemoryDBDictionary(*args, **kwargs)
         if not hasattr(DBDictionary, "_instance"):
             with DBDictionary._instance_lock:
                 if not hasattr(DBDictionary, "_instance"):
