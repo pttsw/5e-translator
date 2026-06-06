@@ -13,9 +13,14 @@ KNOWLEDGE_SOURCE_DICT = {
 class KnowledgeSetter(Runnable):
     def __init__(self):
         self.current_collection = "dnd"
-        self.knowledge_db:ChromaAdapter = ChromaAdapter(self.current_collection)
+        self.knowledge_db:ChromaAdapter = None
         self.knowledge_source_dirs = []
         self.mode = '5et'
+
+    def _get_knowledge_db(self):
+        if self.knowledge_db is None:
+            self.knowledge_db = ChromaAdapter(self.current_collection)
+        return self.knowledge_db
         
     def invoke(self, file_infos, config = None, **kwargs):
         """知识库设置器
@@ -42,7 +47,7 @@ class KnowledgeSetter(Runnable):
                         # knowledge_text, need_embedding = self.__map_chm_knowledge(res.json_path, title)
                         is_loaded_documents = self.__map_chm_knowledge(res.out_path, "")
                     
-                    documents:Document = self.knowledge_db.query(job.en_str)
+                    documents:Document = self._get_knowledge_db().query(job.en_str)
                     documents = documents[:2]
                     if len(documents) != 0:
                         job.knowledge.extend([d.page_content for d in documents])
@@ -92,20 +97,20 @@ class KnowledgeSetter(Runnable):
                     continue
                     logger.info(f"查询知识库: {job.en_str}")
                     # 先按照英文名称查询
-                    documents = self.knowledge_db.query(job.en_str, eng_name=job.en_str)
+                    documents = self._get_knowledge_db().query(job.en_str, eng_name=job.en_str)
                     if len(documents) != 0:
                         job.knowledge.append(documents[0].metadata['name'].split('/')[-1])
                         continue
                     
                     # 再按照中文名称查询
                     if job.cn_str is not None:
-                        documents = self.knowledge_db.query(job.cn_str)
+                        documents = self._get_knowledge_db().query(job.cn_str)
                     
                         for doc in documents:
                             job.knowledge.append(doc.page_content)
                     # 如果这个Job有CurrentNames字段，则用最后一个（离这个Job最近的）来查询知识库
                     if len(job.knowledge) == 0 and len(job.current_names) > 0:
-                        name_documents = self.knowledge_db.query(job.current_names[-1])
+                        name_documents = self._get_knowledge_db().query(job.current_names[-1])
                         documents.extend(name_documents)
                         for name_doc in name_documents:
                             if job.en_str in name_doc.page_content:
@@ -123,7 +128,7 @@ class KnowledgeSetter(Runnable):
         for job in file_work_info.job_list:
             if not job.need_translate:
                 continue
-            documents:Document = self.knowledge_db.query(job.en_str)
+            documents:Document = self._get_knowledge_db().query(job.en_str)
             documents = documents[:2]
             if len(documents) != 0:
                 job.knowledge.extend([d.page_content for d in documents])
@@ -213,7 +218,8 @@ class KnowledgeSetter(Runnable):
             
             documents.extend(load_adventure_files(os.path.join(CHM_TXT_DIR, base_dir)))
         #对lines临时进行嵌入编码
-        self.knowledge_db.reset()
-        self.knowledge_db.add(documents)
+        knowledge_db = self._get_knowledge_db()
+        knowledge_db.reset()
+        knowledge_db.add(documents)
         self.knowledge_source_dirs = base_dirs
         return True

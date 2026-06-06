@@ -1,6 +1,7 @@
 import threading
 import os
 from . import DBDictionary, RedisDB
+from .memory_db_dictionary import MemoryDBDictionary
 from config import logger
 class DatabaseAdapter:
     def __init__(self, source="", version='1.209.1') -> (None):
@@ -15,7 +16,11 @@ class DatabaseAdapter:
         #     return
         self.db_d = DBDictionary(source, version)
         if not self.db_d.ok:
-            self.ok = False
+            logger.warning("MySQL 词典不可用，回退到内存词典后端")
+            self.db_d = MemoryDBDictionary(source, version)
+            self.ok = self.db_d.ok
+            if self.redis_db is not None:
+                self.redis_db = None
             return
             
     def get(self, k: str, rel_f="", tag=""):

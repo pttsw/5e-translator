@@ -8,6 +8,7 @@ from app.core.translator.siliconflow_adapter import (
     SiliconFlowAdapter,
     StructuredTranslateResponse,
     TranslatorStatus,
+    resolve_llm_api_key,
 )
 
 
@@ -50,6 +51,34 @@ def test_adaptive_max_tokens_grows_with_source_length(adapter):
     assert short_budget >= adapter.min_tokens
     assert long_budget > short_budget
     assert long_budget <= adapter.max_tokens_cap
+
+
+def test_resolve_llm_api_key_prefers_mimo_key_for_mimo_provider(monkeypatch):
+    monkeypatch.setenv("MIMO_API_KEY", "mimo-secret")
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "sf-secret")
+
+    provider, api_key = resolve_llm_api_key(
+        explicit_api_key="legacy-ds-key",
+        base_url="https://token-plan-cn.xiaomimimo.com/v1",
+        model="mimo-v2.5-pro",
+    )
+
+    assert provider == "mimo"
+    assert api_key == "mimo-secret"
+
+
+def test_resolve_llm_api_key_prefers_siliconflow_key_for_siliconflow_provider(monkeypatch):
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "sf-secret")
+
+    provider, api_key = resolve_llm_api_key(
+        explicit_api_key="legacy-ds-key",
+        base_url="https://api.siliconflow.cn/v1",
+        model="deepseek-ai/DeepSeek-V3.2",
+    )
+
+    assert provider == "siliconflow"
+    assert api_key == "sf-secret"
 
 
 def test_send_text_prefers_structured_output(adapter):
@@ -126,6 +155,47 @@ def test_send_text_retries_once_after_local_validation_failure(adapter):
     assert "只返回一个合法 JSON 对象" in second_invoke_messages[0].content
     assert status == TranslatorStatus.SUCCESS
     assert result == '{"trans_str": "法术", "add_terms": {}}'
+
+
+def test_send_text_accepts_valid_batch_json_in_batch_mode(adapter):
+    adapter.structured_output_supported = False
+    payload = {"items": [{"uid": "$.spell[0].entries[0]", "en_str": '"False destination" is a place.'}]}
+    text = json.dumps(payload, ensure_ascii=False)
+    valid_batch_response = json.dumps(
+        {
+            "batch_id": "spell/test.json",
+            "source_hash": "abc123",
+            "items": [
+                {
+                    "uid": "$.spell[0].entries[0]",
+                    "trans_str": "“查无此地”指的是一个地方。",
+                }
+            ],
+            "add_terms": {},
+        },
+        ensure_ascii=False,
+    )
+
+    adapter._SiliconFlowAdapter__invoke_once = Mock(return_value=(valid_batch_response, True))
+
+    result, status = adapter.sendText(text, "prompt", structured_output=False, response_mode="batch")
+
+    assert status == TranslatorStatus.SUCCESS
+    assert json.loads(result) == json.loads(valid_batch_response)
+
+
+def test_send_text_rejects_single_schema_for_batch_mode(adapter):
+    adapter.structured_output_supported = False
+    payload = {"items": [{"uid": "$.spell[0].entries[0]", "en_str": "spell"}]}
+    text = json.dumps(payload, ensure_ascii=False)
+    invalid_batch_response = '{"trans_str":"法术","add_terms":{}}'
+
+    adapter._SiliconFlowAdapter__invoke_once = Mock(return_value=(invalid_batch_response, True))
+
+    result, status = adapter.sendText(text, "prompt", structured_output=False, response_mode="batch")
+
+    assert result is None
+    assert status == TranslatorStatus.FAILURE
 
 
 def test_post_retries_with_larger_max_tokens_after_length_error(adapter):

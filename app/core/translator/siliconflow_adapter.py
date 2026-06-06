@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from typing import Optional
 
 import httpx
 import requests
@@ -16,7 +17,7 @@ from openai import (
     PermissionDeniedError,
     RateLimitError,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.core.utils import TranslatorStatus, format_llm_msg
 from config import *
@@ -24,7 +25,53 @@ from config import *
 
 class StructuredTranslateResponse(BaseModel):
     trans_str: str
-    add_terms: dict[str, str]
+    add_terms: dict[str, str] = {}
+
+
+class StructuredBatchTranslateItem(BaseModel):
+    uid: str
+    trans_str: str
+
+
+class StructuredBatchTranslateResponse(BaseModel):
+    batch_id: str
+    source_hash: str
+    items: list[StructuredBatchTranslateItem]
+    add_terms: dict[str, str] = {}
+
+
+def is_mimo_provider(base_url: Optional[str], model: Optional[str]) -> bool:
+    normalized_base_url = (base_url or "").lower()
+    normalized_model = (model or "").lower()
+    return "xiaomimimo.com" in normalized_base_url or normalized_model.startswith("mimo-")
+
+
+def resolve_llm_api_key(
+    explicit_api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+) -> tuple[str, str]:
+    normalized_base_url = base_url or os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+    normalized_model = model or os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3.2")
+
+    if is_mimo_provider(normalized_base_url, normalized_model):
+        provider = "mimo"
+        api_key = (
+            os.getenv("MIMO_API_KEY")
+            or os.getenv("SILICONFLOW_API_KEY")
+            or explicit_api_key
+            or ""
+        )
+    else:
+        provider = "siliconflow"
+        api_key = (
+            os.getenv("SILICONFLOW_API_KEY")
+            or explicit_api_key
+            or os.getenv("DS_KEY")
+            or ""
+        )
+
+    return provider, api_key.strip()
 
 
 class SiliconFlowAdapter:
@@ -32,9 +79,13 @@ class SiliconFlowAdapter:
         self.retry_time = 0
         self.access_time = 0
         self.id = "None"
-        self.api_key = api_key
         self.base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
         self.model = os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3.2")
+        self.provider, self.api_key = resolve_llm_api_key(
+            explicit_api_key=api_key,
+            base_url=self.base_url,
+            model=self.model,
+        )
         self.max_tokens_cap = int(os.getenv("SILICONFLOW_MAX_TOKENS", "8192"))
         self.min_tokens = int(os.getenv("SILICONFLOW_MIN_TOKENS", "256"))
         self.structured_output_supported = os.getenv(
@@ -59,11 +110,17 @@ class SiliconFlowAdapter:
             http_client=self.http_client,
         )
         logger.info(
-            f"SiliconFlow 初始化: base_url={self.base_url}, model={self.model}, "
+            f"SiliconFlow 初始化: provider={self.provider}, base_url={self.base_url}, model={self.model}, "
             f"trust_env={self.trust_env}, structured_output_supported={self.structured_output_supported}"
         )
 
-    def sendText(self, text, promot: str = "", structured_output: bool = True):
+    def sendText(
+        self,
+        text,
+        promot: str = "",
+        structured_output: bool = True,
+        response_mode: str = "single",
+    ):
         if not self.__is_accessable():
             return None, TranslatorStatus.WAITING
 
@@ -78,9 +135,20 @@ class SiliconFlowAdapter:
             f"source_tokens={self.__estimate_text_tokens(source_text)}, "
             f"max_tokens={max_tokens}, payload={text}"
         )
-        return self.__send(data, max_tokens, structured_output=structured_output)
+        return self.__send(
+            data,
+            max_tokens,
+            structured_output=structured_output,
+            response_mode=response_mode,
+        )
 
-    def __post(self, data, max_tokens: int, structured_output: bool = True):
+    def __post(
+        self,
+        data,
+        max_tokens: int,
+        structured_output: bool = True,
+        response_mode: str = "single",
+    ):
         retry_tokens = min(self.max_tokens_cap, max(max_tokens * 2, max_tokens + self.min_tokens))
         token_budgets = [max_tokens]
         if retry_tokens > max_tokens:
@@ -90,13 +158,20 @@ class SiliconFlowAdapter:
             current_data = data
             for validation_retry in range(2):
                 try:
-                    response_text, need_validation = self.__invoke_once(current_data, token_budget, structured_output)
+                    response_text, need_validation = self.__invoke_once(
+                        current_data,
+                        token_budget,
+                        structured_output,
+                        response_mode=response_mode,
+                    )
                     if response_text is None:
                         self.__wait(60)
                         return None, TranslatorStatus.WAITING
 
                     if need_validation:
-                        normalized_text = self.__normalize_response_text(response_text)
+                        normalized_text = self.__normalize_response_text(
+                            response_text, response_mode=response_mode
+                        )
                         if normalized_text is not None:
                             logger.info("DeepSeek回答：" + normalized_text)
                             return normalized_text, TranslatorStatus.SUCCESS
@@ -106,7 +181,10 @@ class SiliconFlowAdapter:
 
                     if validation_retry == 0:
                         logger.warning("SiliconFlow 本地校验失败，追加严格 JSON 提示后重试一次")
-                        current_data = self.__add_validation_retry_instruction(data)
+                        current_data = self.__add_validation_retry_instruction(
+                            data,
+                            response_mode=response_mode,
+                        )
                         continue
 
                     logger.warning(f"SiliconFlow 本地校验失败，原始返回：{response_text}")
@@ -129,7 +207,11 @@ class SiliconFlowAdapter:
                     self.__wait(30)
                     return None, TranslatorStatus.WAITING
                 except (AuthenticationError, PermissionDeniedError) as e:
-                    logger.exception(f"SiliconFlow 鉴权或额度错误: {e}")
+                    logger.exception(
+                        f"SiliconFlow 鉴权或额度错误: provider={self.provider}, "
+                        f"base_url={self.base_url}, model={self.model}, "
+                        f"key_hint={self.__api_key_hint()}, error={e}"
+                    )
                     return None, TranslatorStatus.FATAL
                 except APIConnectionError as e:
                     logger.exception(f"SiliconFlow 连接失败: {e}")
@@ -137,15 +219,32 @@ class SiliconFlowAdapter:
                 except httpx.ConnectError as e:
                     logger.exception(f"HTTP 连接失败: {e}")
                     return None, TranslatorStatus.FAILURE
+                except RuntimeError as e:
+                    if "cannot schedule new futures after interpreter shutdown" in str(e):
+                        logger.warning(f"SiliconFlow 线程池关闭，等待重试: {e}")
+                        time.sleep(5)
+                        return None, TranslatorStatus.WAITING
+                    logger.exception(f"SiliconFlow 运行时异常: {e}")
+                    return None, TranslatorStatus.FAILURE
                 except Exception as e:
                     logger.exception(f"SiliconFlow 未知异常: {e}")
                     return None, TranslatorStatus.FAILURE
         return None, TranslatorStatus.FAILURE
 
-    def __invoke_once(self, data, token_budget: int, structured_output: bool = True):
+    def __invoke_once(
+        self,
+        data,
+        token_budget: int,
+        structured_output: bool = True,
+        response_mode: str = "single",
+    ):
         if structured_output and self.structured_output_supported:
             try:
-                structured_text = self.__invoke_structured_output(data, token_budget)
+                structured_text = self.__invoke_structured_output(
+                    data,
+                    token_budget,
+                    response_mode=response_mode,
+                )
                 if structured_text is not None:
                     return structured_text, False
                 logger.warning("SiliconFlow 结构化输出未返回可用结果，回退到 json_object")
@@ -153,13 +252,38 @@ class SiliconFlowAdapter:
                 if self.__is_structured_output_unsupported_error(e):
                     logger.warning(f"SiliconFlow 不支持 structured output，回退到 json_object: {e}")
                     self.structured_output_supported = False
+                elif self.__should_fallback_to_json_object_on_parse_error(e):
+                    logger.warning(f"SiliconFlow structured output 解析失败，回退到 json_object: {e}")
                 else:
                     raise
         return self.__invoke_json_object(data, token_budget), True
 
-    def __invoke_structured_output(self, data, token_budget: int):
-        structured_llm = self.llm.with_structured_output(
-            StructuredTranslateResponse,
+    def __invoke_structured_output(
+        self,
+        data,
+        token_budget: int,
+        response_mode: str = "single",
+    ):
+        # 创建独立的 LLM 实例避免多线程共享状态导致的 RuntimeError
+        local_llm = ChatOpenAI(
+            temperature=0,
+            base_url=self.base_url,
+            openai_api_key=self.api_key,
+            max_tokens=self.max_tokens_cap,
+            model=self.model,
+            response_format={"type": "json_object"},
+            http_client=httpx.Client(
+                timeout=httpx.Timeout(90.0, connect=15.0),
+                trust_env=self.trust_env,
+            ),
+        )
+        schema = (
+            StructuredBatchTranslateResponse
+            if response_mode == "batch"
+            else StructuredTranslateResponse
+        )
+        structured_llm = local_llm.with_structured_output(
+            schema,
             method="json_schema",
             strict=True,
             include_raw=True,
@@ -175,13 +299,28 @@ class SiliconFlowAdapter:
             logger.warning(f"SiliconFlow 结构化输出解析失败: {parsing_error}")
             return None
 
-        normalized = self.__normalize_response_payload(result.get("parsed"))
+        if response_mode == "batch":
+            normalized = self.__normalize_batch_response_payload(result.get("parsed"))
+        else:
+            normalized = self.__normalize_response_payload(result.get("parsed"))
         if normalized is None:
             return None
         return json.dumps(normalized, ensure_ascii=False)
 
     def __invoke_json_object(self, data, token_budget: int):
-        message = self.llm.bind(max_tokens=token_budget).invoke(data)
+        local_llm = ChatOpenAI(
+            temperature=0,
+            base_url=self.base_url,
+            openai_api_key=self.api_key,
+            max_tokens=self.max_tokens_cap,
+            model=self.model,
+            response_format={"type": "json_object"},
+            http_client=httpx.Client(
+                timeout=httpx.Timeout(90.0, connect=15.0),
+                trust_env=self.trust_env,
+            ),
+        )
+        message = local_llm.bind(max_tokens=token_budget).invoke(data)
         return message.content
 
     def __wait(self, second):
@@ -190,6 +329,14 @@ class SiliconFlowAdapter:
 
     def __is_accessable(self):
         return int(time.time()) > self.access_time
+
+    def __api_key_hint(self) -> str:
+        if not self.api_key:
+            if self.provider == "mimo":
+                return "missing MIMO_API_KEY"
+            return "missing SILICONFLOW_API_KEY/DS_KEY"
+        masked = self.api_key[:6]
+        return f"{masked}***"
 
     def __check_res(self, message_content: str):
         logger.debug("msg: " + message_content)
@@ -206,8 +353,19 @@ class SiliconFlowAdapter:
 
         return TranslatorStatus.SUCCESS
 
-    def __send(self, data, max_tokens: int, structured_output: bool = True):
-        message_content, kimi_status = self.__post(data, max_tokens, structured_output=structured_output)
+    def __send(
+        self,
+        data,
+        max_tokens: int,
+        structured_output: bool = True,
+        response_mode: str = "single",
+    ):
+        message_content, kimi_status = self.__post(
+            data,
+            max_tokens,
+            structured_output=structured_output,
+            response_mode=response_mode,
+        )
         if kimi_status != TranslatorStatus.SUCCESS:
             return None, kimi_status
         kimi_status = self.__check_res(message_content)
@@ -254,16 +412,64 @@ class SiliconFlowAdapter:
         budget = ((budget + 127) // 128) * 128
         return min(self.max_tokens_cap, budget)
 
-    def __normalize_response_text(self, message_content: str):
+    def __normalize_response_text(self, message_content: str, response_mode: str = "single"):
         if not isinstance(message_content, str):
             return None
         payload, ok = format_llm_msg(message_content)
         if not ok:
             return None
+        if response_mode == "batch":
+            normalized = self.__normalize_batch_response_payload(payload)
+            if normalized is None:
+                return None
+            return json.dumps(normalized, ensure_ascii=False)
         normalized = self.__normalize_response_payload(payload)
         if normalized is None:
             return None
         return json.dumps(normalized, ensure_ascii=False)
+
+    def __normalize_batch_response_payload(self, payload):
+        if isinstance(payload, BaseModel):
+            payload = payload.model_dump()
+        if not isinstance(payload, dict):
+            return None
+
+        batch_id = payload.get("batch_id")
+        source_hash = payload.get("source_hash")
+        items = payload.get("items")
+        add_terms = payload.get("add_terms", {})
+
+        if not isinstance(batch_id, str) or not isinstance(source_hash, str):
+            return None
+        if not isinstance(items, list):
+            return None
+        if add_terms in ("", None):
+            add_terms = {}
+        if not isinstance(add_terms, dict):
+            return None
+
+        normalized_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                return None
+            uid = item.get("uid")
+            trans_str = item.get("trans_str")
+            if not isinstance(uid, str) or not isinstance(trans_str, str):
+                return None
+            normalized_items.append({"uid": uid, "trans_str": trans_str})
+
+        normalized_terms = {}
+        for key, value in add_terms.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                return None
+            normalized_terms[key] = value
+
+        return {
+            "batch_id": batch_id,
+            "source_hash": source_hash,
+            "items": normalized_items,
+            "add_terms": normalized_terms,
+        }
 
     def __normalize_response_payload(self, payload):
         if isinstance(payload, BaseModel):
@@ -294,13 +500,22 @@ class SiliconFlowAdapter:
             "add_terms": normalized_terms,
         }
 
-    def __add_validation_retry_instruction(self, data):
-        retry_instruction = (
-            "\n额外要求：只返回一个合法 JSON 对象，格式必须为"
-            '{"trans_str":"...","add_terms":{}}。'
-            "add_terms 必须是对象；没有术语时返回 {}。"
-            "禁止输出解释、代码块或任何额外文本。"
-        )
+    def __add_validation_retry_instruction(self, data, response_mode: str = "single"):
+        if response_mode == "batch":
+            retry_instruction = (
+                "\n额外要求：只返回一个合法 JSON 对象，格式必须为"
+                '{"batch_id":"","source_hash":"","items":[{"uid":"","trans_str":""}],"add_terms":{}}。'
+                "items 中只能包含输入里已有的 uid，且每个 uid 只能出现一次。"
+                "add_terms 必须是对象；没有术语时返回 {}。"
+                "禁止输出解释、代码块或任何额外文本。"
+            )
+        else:
+            retry_instruction = (
+                "\n额外要求：只返回一个合法 JSON 对象，格式必须为"
+                '{"trans_str":"...","add_terms":{}}。'
+                "add_terms 必须是对象；没有术语时返回 {}。"
+                "禁止输出解释、代码块或任何额外文本。"
+            )
         updated_data = list(data)
         if len(updated_data) == 0:
             return updated_data
@@ -326,6 +541,13 @@ class SiliconFlowAdapter:
             "schema",
         )
         return any(pattern in error_msg for pattern in patterns)
+
+    def __should_fallback_to_json_object_on_parse_error(self, error: Exception):
+        if isinstance(error, ValidationError):
+            error_msg = str(error).lower()
+            return "json_invalid" in error_msg or "trailing characters" in error_msg
+        error_msg = str(error).lower()
+        return "trailing characters" in error_msg or "invalid json" in error_msg
 
     @staticmethod
     def parse_translate_str(message_content: str):

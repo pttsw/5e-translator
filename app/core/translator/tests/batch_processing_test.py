@@ -217,6 +217,76 @@ def test_batch_chunker_falls_back_to_job_grouping_when_no_structural_block_match
     assert units[1].jobs[0].uid == "$.adventure.text.1"
 
 
+def test_batch_chunker_keeps_unmatched_jobs_when_some_blocks_do_match():
+    jobs = [
+        make_job(
+            "$.spell[0].entries[0]",
+            "matched block text " * 120,
+            key_path="/spell[0]/entries[0]",
+            entry_path="/spell[0]/entries[0]",
+            batch_seq=0,
+        ),
+        make_job(
+            "$.spell[0].name.0",
+            "Bloodsight",
+            key_path="",
+            entry_path="",
+            batch_seq=1,
+        ),
+    ]
+    file_info = FileWorkInfo(
+        job_list=jobs,
+        json_obj={
+            "spell": [
+                {
+                    "name": "{!@ $.spell[0].name.0}",
+                    "entries": ["{!@ $.spell[0].entries[0]}"],
+                }
+            ]
+        },
+        json_path="spells/spells-homebrew.json",
+        out_path="homebrew/spell/mixed.json",
+    )
+
+    chunker = BatchChunker(max_chars=1200)
+    units = chunker.build_units(file_info)
+
+    assert len(units) == 2
+    assert [job.uid for job in units[0].jobs] == ["$.spell[0].entries[0]"]
+    assert [job.uid for job in units[1].jobs] == ["$.spell[0].name.0"]
+
+
+def test_batch_chunker_ignores_unhashable_type_field_when_extracting_blocks():
+    jobs = [
+        make_job(
+            "$.spell[0].entries[0]",
+            "safe block text " * 60,
+            key_path="/spell[0]/entries[0]",
+            entry_path="/spell[0]/entries[0]",
+            batch_seq=0,
+        )
+    ]
+    file_info = FileWorkInfo(
+        job_list=jobs,
+        json_obj={
+            "spell": [
+                {
+                    "type": {"unexpected": "dict"},
+                    "entries": ["{!@ $.spell[0].entries[0]}"],
+                }
+            ]
+        },
+        json_path="spells/spells-homebrew.json",
+        out_path="homebrew/spell/unhashable-type.json",
+    )
+
+    chunker = BatchChunker(max_chars=1200)
+    units = chunker.build_units(file_info)
+
+    assert len(units) == 1
+    assert [job.uid for job in units[0].jobs] == ["$.spell[0].entries[0]"]
+
+
 def test_batch_chunker_split_retry_unit_prefers_entry_boundaries():
     jobs = [
         make_job("$.data[0].entries[0]", "alpha " * 400, key_path="/data[0]/entries[0]", entry_path="/data[0]", batch_seq=0),

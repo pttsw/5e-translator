@@ -4,6 +4,7 @@ import time
 from collections import deque
 from config import logger
 from app.core.utils import TranslatorStatus
+from app.core.utils.console_progress import console_progress
 
 
 def done_f(obj):
@@ -12,12 +13,7 @@ def done_f(obj):
 
 
 def all_done_f(obj):
-    print(len(obj))
-    # print("ALLDONE" + str(obj))
-
-
-def more_job_f(jobs):
-    return False
+    pass
 
 
 class LLMFactory:
@@ -48,6 +44,9 @@ class LLMFactory:
         self.failed_jobs = []
         self.lock = threading.Lock()
         self.workers = []
+        self.progress_label = "Current"
+        self.progress_total_weight = 0
+        self.progress_completed_weight = 0
 
     def reset(self):
         self.job_count = 0
@@ -56,13 +55,28 @@ class LLMFactory:
         self.job_queue.clear()
         self.res_obj.clear()
         self.add_finish = False
+        self.progress_total_weight = 0
+        self.progress_completed_weight = 0
+        console_progress.clear_file()
         
     def add_jobs(self, objs: list):
         self.lock.acquire()
         self.job_count += len(objs)
         for j in objs:
             self.job_queue.append(j)
+            self.progress_total_weight += self._get_job_weight(j)
         self.lock.release()
+        self._render_progress()
+
+    def set_progress_context(
+        self,
+        label: str,
+    ):
+        self.lock.acquire()
+        self.progress_label = label or "Current"
+        current_total = self.progress_total_weight
+        self.lock.release()
+        console_progress.set_file(self.progress_label, current_total)
 
     def reset_job(self, job: list, add_err_num: bool = True):
         self.lock.acquire()
@@ -72,6 +86,7 @@ class LLMFactory:
             self.job_queue.append(job)
         else:
             self.error_count += 1
+            self.progress_completed_weight += self._get_job_weight(job)
             # 记录到 failed_jobs 以便外部采集与重试
             try:
                 self.failed_jobs.append(job)
@@ -79,6 +94,7 @@ class LLMFactory:
                 pass
             logger.error(f"解析JOB超过最大重试次数，跳过JOB：{job}")
         self.lock.release()
+        self._render_progress()
 
     def set_finish(self, add_finish):
         self.lock.acquire()
@@ -89,6 +105,7 @@ class LLMFactory:
         self.lock.acquire()
         if job is not None:
             self.error_count += 1
+            self.progress_completed_weight += self._get_job_weight(job)
             try:
                 self.failed_jobs.append(job)
             except Exception:
@@ -96,12 +113,14 @@ class LLMFactory:
         while len(self.job_queue) != 0:
             pending_job = self.job_queue.popleft()
             self.error_count += 1
+            self.progress_completed_weight += self._get_job_weight(pending_job)
             try:
                 self.failed_jobs.append(pending_job)
             except Exception:
                 pass
         self.add_finish = True
         self.lock.release()
+        self._render_progress()
         if reason:
             logger.error(reason)
 
@@ -118,12 +137,14 @@ class LLMFactory:
     def done_job(self, job):
         self.lock.acquire()
         self.finish_count += 1
+        self.progress_completed_weight += self._get_job_weight(job)
         self.res_obj.append(job)
         isF = self.isFinish()
         self.lock.release()
 
         self.done_func(job)
         if isF:
+            console_progress.clear_file()
             self.all_done_func(self.res_obj)
 
     def isFinish(self):
@@ -134,6 +155,7 @@ class LLMFactory:
         )
 
     def start_work(self):
+        self._render_progress()
         for i in range(self.work_num):
             self.workers.append(
                 threading.Thread(target=kimi_work,
@@ -146,9 +168,46 @@ class LLMFactory:
         for w in self.workers:
             w.join()
         self.workers.clear()
+        if self.isFinish():
+            console_progress.clear_file()
+
     def isAllDone(self):
         return self.finish_count == self.job_count
 
+    def _progress_snapshot(self):
+        current_total = self.progress_total_weight
+        current_completed = self.progress_completed_weight
+        return {
+            "current_total": current_total,
+            "current_completed": current_completed,
+            "errors": self.error_count,
+            "queued": len(self.job_queue),
+            "current_label": self.progress_label,
+        }
+
+    def _render_progress(self):
+        self.lock.acquire()
+        snapshot = self._progress_snapshot()
+        self.lock.release()
+
+        current_total = snapshot["current_total"]
+        if current_total <= 0:
+            return
+
+        console_progress.update_file(
+            snapshot["current_completed"],
+            snapshot["current_total"],
+            snapshot["errors"],
+            snapshot["queued"],
+            snapshot["current_label"],
+        )
+
+    def _get_job_weight(self, job) -> int:
+        if hasattr(job, "need_translate"):
+            return 1 if getattr(job, "need_translate", False) else 0
+        if hasattr(job, "jobs") and isinstance(job.jobs, list):
+            return max(1, len(job.jobs))
+        return 1
 
 # 定义消费者函数
 def kimi_work(factory: LLMFactory, work_func,
@@ -190,23 +249,3 @@ def kimi_work(factory: LLMFactory, work_func,
             __sleep(90)
         else:
             factory.done_job(res)
-
-
-if __name__ == "__main__":
-
-    factory = LLMFactory(
-        work_num=2,
-        work_func=kimi_work,
-        done_func=done_f,
-        all_done_func=all_done_f
-    )
-    # # 启动线程
-    # consumer_thread_1.start()
-    # consumer_thread_2.start()
-    factory.add_job("123")
-    factory.add_job("234")
-    factory.set_finish(True)
-    factory.start_work()
-# # 等待线程结束（这里为了演示，实际应用中应有适当的退出条件）
-# consumer_thread_1.join()
-# consumer_thread_2.join()

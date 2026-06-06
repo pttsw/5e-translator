@@ -15,7 +15,12 @@ class ByHandHandler(Runnable):
     def __init__(self):
         # self.knowledge_db:ChromaAdapter = ChromaAdapter()
         self.byhand = False
-        self.dictionary = DBDictionary()
+        self.dictionary = None
+
+    def _get_dictionary(self):
+        if self.dictionary is None:
+            self.dictionary = DBDictionary()
+        return self.dictionary
         
     def invoke(self, input: List[FileWorkInfo], config = None, **kwargs):
         """手动处理器
@@ -38,7 +43,7 @@ class ByHandHandler(Runnable):
                             or len(job.en_str.split(' ')) < 5:
                             
                         print(job.to_llm_question()[0])
-                        self.dictionary.update_by_hand(job.en_str, job.cn_str)
+                        self._get_dictionary().update_by_hand(job.en_str, job.cn_str)
                         # job.need_translate = True
                     # else:
                         # job.need_translate = False

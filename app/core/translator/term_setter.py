@@ -10,18 +10,27 @@ from typing import List, Dict, Any
 
 class TermSetter(Runnable):
     def __init__(self):
-        self.term_db: RedisDB = RedisDB(db=1)
-        term_set = self.term_db.keys()
-        logger.info(f"载入术语数量: {len(term_set)}")
-        if term_set:
-            # 2. 处理术语列表（排序：长术语优先）
-            self.terms = sorted(term_set, key=lambda x: len(x), reverse=True)
-            self.exact_pattern = re.compile(r'\b(' + '|'.join(re.escape(term.lower()) for term in self.terms) + r')\b', re.IGNORECASE)
-            self.term_map_remaining = {term.lower(): term for term in self.terms}
+        self.term_db: RedisDB = None
+        self.terms = []
+        self.term_map_remaining = {}
+        self.exact_pattern = None
+        try:
+            self.term_db = RedisDB(db=1)
+            term_set = self.term_db.keys()
+            logger.info(f"载入术语数量: {len(term_set)}")
+            if term_set:
+                # 长术语优先，减少短词误匹配。
+                self.terms = sorted(term_set, key=lambda x: len(x), reverse=True)
+                self.exact_pattern = re.compile(r'\b(' + '|'.join(re.escape(term.lower()) for term in self.terms) + r')\b', re.IGNORECASE)
+                self.term_map_remaining = {term.lower(): term for term in self.terms}
+        except Exception as exc:
+            logger.warning(f"术语 Redis 不可用，跳过术语缓存加载: {exc}")
         self.max_workers = 8  # 设置线程池大小，可根据实际情况调整
 
     def _process_job(self, job: Any) -> (Any):
         """处理单个job的术语匹配"""
+        if self.term_db is None or self.exact_pattern is None:
+            return job
         # 如果已经校对过了，则跳过
         if not job.need_translate:
             return job

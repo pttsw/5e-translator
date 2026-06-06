@@ -6,6 +6,7 @@ from typing import List, Tuple
 from config import  EN_PATH, PLU_EN_PATH, SKIP_FILES, SKIP_DIRS, logger, SPLITED_5ETOOLS_EN_PATH, HOMEBREW_EN_PATH, UA_EN_PATH, PLU_SCENES_PATH, PLU_DBD_PATH, ADD_TRANSLATOR_KEY
 from app.core.utils import read_file, get_rel_path, FileWorkInfo, Job, get_file_name_from_obj
 from app.core.database import DBDictionary
+from app.core.database.memory_db_dictionary import MemoryDBDictionary
 from langchain_core.runnables import Runnable
 from .base_analyser import BaseAnalyser
 from .spell_source_analyser import SpellSourceAnalyser
@@ -35,6 +36,10 @@ class JsonAnalyser(Runnable):
         初始化字典
         """
         self.dictionary = DBDictionary()
+        if self.dictionary.ok:
+            return True
+        logger.warning("JsonAnalyser 初始化数据库字典失败，回退到内存词典后端")
+        self.dictionary = MemoryDBDictionary()
         return self.dictionary.ok
 
     def invoke(self, input, config=None, **kwargs):

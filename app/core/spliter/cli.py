@@ -22,8 +22,16 @@ def split_origin_files(
     # 检查合并信息目录是否存在，不存在则创建
     if not os.path.exists(combine_info_dir):
         os.makedirs(combine_info_dir)
+    excluded_dirs = {
+        os.path.abspath(splited_data_dir),
+        os.path.abspath(combine_info_dir),
+    }
     # 遍历目录下所有文件
     for root, dirs, files in os.walk(origin_5etoos_data_dir):
+        dirs[:] = [
+            dir_name for dir_name in dirs
+            if os.path.abspath(os.path.join(root, dir_name)) not in excluded_dirs
+        ]
         for file_name in files:
             file_path = os.path.join(root, file_name)
             # 检查是否为json文件

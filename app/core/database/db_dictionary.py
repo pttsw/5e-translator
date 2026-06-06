@@ -146,7 +146,6 @@ class DBDictionary:
             str: 翻译结果
             bool: 若翻译成功，则返回True， 否则返回False
         """
-        start_time = time.time()
         v_bean = None # 翻译结果   
         redis_bean = self.__get_redis(k, tag, ignore_case, correct_tag_from_db)
         if redis_bean != None:
@@ -247,47 +246,60 @@ class DBDictionary:
             correct_tag_from_db (bool, optional): 是否从数据库中获取标签. Defaults to False.
 
         Returns:
-            dict: 翻译结果，key为英文，value为翻译结果
+            dict: 翻译结果，key为(en, tag)，value为翻译结果
         """
-        res_beans = []
+        res_beans = {}
+        query_requests = []
         query_keys = []
+        seen_query_keys = set()
         query_beans = []
         for k, t in zip(keys, tags):
             redis_bean = self.__get_redis(k, t, ignore_case, correct_tag_from_db)
             if redis_bean != None:
-                res_beans.append(redis_bean)
+                res_beans[(k, t)] = redis_bean
             else:
-                query_keys.append(k)
+                query_requests.append((k, t))
+                if k not in seen_query_keys:
+                    query_keys.append(k)
+                    seen_query_keys.add(k)
         if len(query_keys) == 0:
             return res_beans
         db_index = self.__get_db_index()
         db = self.db_list[db_index]
-        placeholders = ','.join(['%s'] * len(query_keys))
-        query_sql = f"select id, en, cn, json_file, proofread, category, modified_at, is_key from words where en in ({placeholders}) order by version desc"
-        params = tuple(query_keys)
-        logger.debug(f"从数据库中查询keys: {query_sql}")
-        res = db.execute_query(query_sql, params)
-        logger.debug(f"从数据库中查询到结果，keys数量: {len(query_keys)}, res数量: {len(res)}")
-        for query_k in query_keys:
-            res_k = [r for r in res if r['en'] == query_k]
-            if len(res_k) == 0:
-                logger.error(f"从数据库中不包含此项，en: {query_k}, tag: {t}")
-                continue
-            v_bean = self.__get_best_match(res_k, query_k, t)
-            if v_bean == None:
-                continue
-            res_beans.append(v_bean)
-            query_beans.append(v_bean)
-            self.__put_redis(query_k, v_bean['cn'], v_bean['category'], v_bean['proofread'], v_bean['is_key'], v_bean['sql_id'], v_bean['modified_at'])                
-        if rel_f != "":
-            insert_values = [f"(\"{rel_f}\", {v_bean['sql_id']}, \"{self.version}\")" for v_bean in query_beans]
-            if len(insert_values) != 0:
-                insert_sql = f"insert into source (file, word_id, version) values {','.join(insert_values)} ON DUPLICATE KEY UPDATE version = VALUES(version);"
-                logger.debug(f"插入source表，sql: {insert_sql}")
-                ok = db.execute_non_query(insert_sql)
-                if not ok:
-                    logger.error(f"插入source表失败，values: {insert_values}")
-        self.__release_db(db_index)
+        try:
+            placeholders = ','.join(['%s'] * len(query_keys))
+            query_sql = f"select id, en, cn, json_file, proofread, category, modified_at, is_key from words where en in ({placeholders}) order by version desc"
+            params = tuple(query_keys)
+            logger.debug(f"从数据库中查询keys: {query_sql}")
+            res = db.execute_query(query_sql, params)
+            if res is None:
+                return res_beans
+            logger.debug(f"从数据库中查询到结果，keys数量: {len(query_keys)}, res数量: {len(res)}")
+            grouped_res = {}
+            for row in res:
+                grouped_res.setdefault(row['en'], []).append(row)
+
+            for query_k, query_t in query_requests:
+                res_k = grouped_res.get(query_k, [])
+                if len(res_k) == 0:
+                    logger.info(f"数据库中不包含此项，en: {query_k}, tag: {query_t}")
+                    continue
+                v_bean = self.__get_best_match(res_k, query_k, query_t)
+                if v_bean == None:
+                    continue
+                res_beans[(query_k, query_t)] = v_bean
+                query_beans.append(v_bean)
+                self.__put_redis(query_k, v_bean['cn'], v_bean['category'], v_bean['proofread'], v_bean['is_key'], v_bean['sql_id'], v_bean['modified_at'])
+            if rel_f != "":
+                insert_values = [f"(\"{rel_f}\", {v_bean['sql_id']}, \"{self.version}\")" for v_bean in query_beans]
+                if len(insert_values) != 0:
+                    insert_sql = f"insert into source (file, word_id, version) values {','.join(insert_values)} ON DUPLICATE KEY UPDATE version = VALUES(version);"
+                    logger.debug(f"插入source表，sql: {insert_sql}")
+                    ok = db.execute_non_query(insert_sql)
+                    if not ok:
+                        logger.error(f"插入source表失败，values: {insert_values}")
+        finally:
+            self.__release_db(db_index)
         return res_beans
 
     def put2(self, key: str, value, rel_f: str) -> (bool):

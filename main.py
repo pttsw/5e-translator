@@ -1,16 +1,53 @@
+import os
+import sys
+
+
+def _ensure_project_python():
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    venv_python = os.path.join(project_root, ".venv", "bin", "python")
+    current_python = os.path.abspath(sys.executable)
+    if not os.path.exists(venv_python):
+        return
+    if current_python == os.path.abspath(venv_python):
+        return
+    os.execv(venv_python, [venv_python, __file__, *sys.argv[1:]])
+
+
+_ensure_project_python()
+os.environ.setdefault("SKIP_APP_BOOTSTRAP", "1")
+
 import argparse
 import copy
 import statistics
-from app.core.utils import find_json_files, write_translate_cache, Job, FileWorkInfo
+from contextlib import contextmanager
+from app.core.utils import find_json_files, write_translate_cache, Job, FileWorkInfo, find_files
 from app.core.utils import need_translate_str
 from app.core.translator import JsonAnalyser, JobProcessor, BatchJobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler, JsonGenerator
 from app.core.translator.batch_chunker import BatchChunker
-from app.cli import transform_proofread, search_knowledge, compare_term, add_mysql_terms_to_redis, combine_temp_terms_to_csv,load_files_into_chroma_db, load_chm_files_into_chroma_db, load_term_from_text, transform_html_2_txt
-from app.core.para import ParaUpdater, set_terms_to_para
+from app.cli import transform_proofread, search_knowledge, add_mysql_terms_to_redis, combine_temp_terms_to_csv, load_files_into_chroma_db, load_term_from_text
+from app.core.para import set_terms_to_para
 from app.core.file_progress_service import get_split_file_path, sync_source_file
-from config import EN_PATH, logger
+from app.core.utils.console_progress import console_progress
+from config import DB_CONFIG, EN_PATH
 from app.core.database import DBDictionary
-import os
+from flask import Flask
+from app.model import db
+
+
+@contextmanager
+def cli_db_app_context():
+    import pymysql
+
+    pymysql.install_as_MySQLdb()
+    app = Flask(__name__)
+    app.config['SQLALCHEMY_DATABASE_URI'] = (
+        f"mysql://{DB_CONFIG['USER']}:{DB_CONFIG['PASSWORD']}"
+        f"@{DB_CONFIG['HOST']}:{DB_CONFIG['PORT']}/{DB_CONFIG['DATABASE']}"
+    )
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    db.init_app(app)
+    with app.app_context():
+        yield
 
 
 def preview_batch_units(file_infos, batch_max_chars: int, include_all_jobs: bool = False, detail_limit: int = 5):
@@ -66,6 +103,16 @@ def preview_batch_units(file_infos, batch_max_chars: int, include_all_jobs: bool
                 )
 
 
+def iter_with_total_progress(results, total_files: int):
+    console_progress.set_total(total_files, label="Total")
+    try:
+        for file_work_info in results:
+            yield file_work_info
+            console_progress.advance_total()
+    finally:
+        console_progress.clear_all()
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='function', required=True)
@@ -110,6 +157,10 @@ def main():
                                   help='Use local mock LLM adapter for this run')
     translate_parser.add_argument('--mock-llm-seed', default='', type=str,
                                   help='Optional JSON seed file for mock LLM translations')
+    translate_parser.add_argument('--model', default='', type=str,
+                                  help='Override LLM model (e.g. mimo-v2.5-pro, mimo-v2-flash). Sets base_url to xiaomimimo API automatically')
+    translate_parser.add_argument('--mimo-api-key', default='', type=str,
+                                  help='API key for xiaomimimo model (or set MIMO_API_KEY env)')
     
     search_parser = subparsers.add_parser('search')
     search_parser.add_argument('--query', default='', type=str,
@@ -171,6 +222,13 @@ def main():
                 os.environ['TRANSLATOR_MOCK_LLM_SEED'] = args.mock_llm_seed
         elif args.mock_llm_seed:
             os.environ['TRANSLATOR_MOCK_LLM_SEED'] = args.mock_llm_seed
+        if args.model:
+            os.environ['SILICONFLOW_MODEL'] = args.model
+            mimo_models = ('mimo-v2.5-pro', 'mimo-v2-flash')
+            if args.model in mimo_models:
+                os.environ['SILICONFLOW_BASE_URL'] = 'https://token-plan-cn.xiaomimimo.com/v1'
+                if args.mimo_api_key:
+                    os.environ['MIMO_API_KEY'] = args.mimo_api_key
         if args.en == '':
             if args.mode == '5et':
                 args.en = EN_PATH
@@ -211,8 +269,9 @@ def main():
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'splited': args.splited})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title})
-        for r in res:
-            print(len(r.job_list), r.json_path)
+        total_files = sum(1 for _ in find_files(args.en))
+        for _ in iter_with_total_progress(res, total_files):
+            pass
     elif args.function == 'search':
         res = search_knowledge()
         print(res)
@@ -301,10 +360,11 @@ def main():
         # 注意：JobProcessor.invoke 内部通过 config['metadata'] 获取参数
         cfg = {'metadata': {'byhand': args.byhand, 'force': False, 'force_title': False, 'mode': 'splited'}}
         res = processor.invoke([file_info], config=cfg)
-        for r in res:
+        for r in iter_with_total_progress(res, 1):
             print(len(r.job_list), getattr(r, 'json_path', ''))
     elif args.function == 'sync-splited':
-        res = sync_source_file(args.source_file, rebuild_jobs=not args.skip_jobs)
+        with cli_db_app_context():
+            res = sync_source_file(args.source_file, rebuild_jobs=not args.skip_jobs)
         print(res)
         
 if __name__ == '__main__':

@@ -5,10 +5,10 @@ import csv
 import threading
 
 from langchain_core.runnables import Runnable
-from config import logger, DS_KEY, OUT_PATH
+from config import logger, OUT_PATH
 from app.core.utils import Job, TranslatorStatus
 from app.core.database import DatabaseAdapter
-from .siliconflow_adapter import SiliconFlowAdapter
+from .siliconflow_adapter import SiliconFlowAdapter, resolve_llm_api_key
 from .mock_adapter import MockAdapter
 from .llm_factory import LLMFactory
 from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format
@@ -71,6 +71,9 @@ class JobProcessor(Runnable):
             # self.obj = res['obj']
             self.done_jobs: List[Job] = []
             self.factory.reset()
+            self.factory.set_progress_context(
+                label=f"File {res.out_path}",
+            )
             if self.cache:
                 # 贪心，按照job的en_str长度从短到长排序。
                 # 这样短文本中的术语先处理。加速
@@ -107,16 +110,16 @@ class JobProcessor(Runnable):
                     for j in failed:
                         last = j.last_answer if hasattr(j, 'last_answer') else ''
                         last_short = last if not isinstance(last, str) else (last[:200] + '...' if len(last) > 200 else last)
-                        print(f"- uid: {j.uid}, en: {j.en_str}, err_time: {j.err_time}, last_answer: {last_short}")
-                    print('\n可用下面命令快速重试这些失败的Job (示例)：')
-                    print(f"python3 main.py retry-failed --file \"{failed_path}\" --thread_num {self.thread_num} --byhand {self.byhand} --force {self.force}")
+                        logger.error(f"失败Job uid={j.uid}, err_time={j.err_time}, en={j.en_str}, last_answer={last_short}")
+                    logger.error(f"可重试命令: python3 main.py retry-failed --file \"{failed_path}\" --thread_num {self.thread_num} --byhand {self.byhand} --force {self.force}")
                 else:
                     logger.info('没有记录到被丢弃的失败 Job。')
                 continue
             yield res
 
     def __load_temple_terms(self, job_list, out_path):
-        self.temple_terms.clear()
+        with self.cache_lock:
+            self.temple_terms.clear()
         self.terms_file_path = os.path.join(OUT_PATH, out_path+".terms.csv")
         if os.path.exists(self.terms_file_path):
             with open(self.terms_file_path, "r") as terms_file:
@@ -125,31 +128,36 @@ class JobProcessor(Runnable):
                     # 添加行数据验证，确保至少有3个元素
                     if len(term) >= 3 and term[0] and term[1]:  # 同时确保英文和中文术语不为空
                         try:
-                            self.temple_terms.add(Term(en=term[0], cn=term[1], category=term[2]))
+                            with self.cache_lock:
+                                self.temple_terms.add(Term(en=term[0], cn=term[1], category=term[2]))
                         except Exception as e:
                             logger.warning(f"解析术语行失败: {term}, 错误: {str(e)}")
                     elif term:  # 非空行但格式不正确
                         logger.warning(f"跳过格式不正确的术语行: {term}")
         for job in job_list:
-            self.temple_terms.update(to_terms(job.en_str, job.cn_str, job.tag))
+            with self.cache_lock:
+                self.temple_terms.update(to_terms(job.en_str, job.cn_str, job.tag))
     def __dump_temple_terms(self):
         with open(self.terms_file_path, "w") as terms_file:
-            term_list = [f"{term.en},{term.cn},{term.category}" for term in self.temple_terms]
+            with self.cache_lock:
+                term_list = [f"{term.en},{term.cn},{term.category}" for term in self.temple_terms]
             terms_file.write("\n".join(term_list))
     
     def __add_temple_terms(self, en, cn):
-        self.cache_lock.acquire()
-        en = en.lower()
-        term = Term(en=en, cn=cn, category=None)
-        if term not in self.temple_terms:
-            self.temple_terms.add(term)
-            with open(self.terms_file_path, "a") as terms_file:
-                terms_file.write(f"\n{en},{cn},{term.category}")
-            logger.info(f"添加术语到缓存:{en} -> {cn}")
-        self.cache_lock.release()
+        with self.cache_lock:
+            en = en.lower()
+            term = Term(en=en, cn=cn, category=None)
+            if term not in self.temple_terms:
+                self.temple_terms.add(term)
+                with open(self.terms_file_path, "a") as terms_file:
+                    terms_file.write(f"\n{en},{cn},{term.category}")
+                logger.info(f"添加术语到缓存:{en} -> {cn}")
     
     def __search_temple_terms(self, en_str: str):
-        return [term for term in self.temple_terms if term.en.lower() in en_str.lower()]
+        with self.cache_lock:
+            terms_snapshot = list(self.temple_terms)
+        lower_en = en_str.lower()
+        return [term for term in terms_snapshot if term.en.lower() in lower_en]
     
     def __init_dictionary(self):
         """
@@ -162,7 +170,21 @@ class JobProcessor(Runnable):
         if os.getenv("TRANSLATOR_LLM_BACKEND", "").lower() == "mock":
             self.adapter = MockAdapter()
             return True
-        self.adapter = SiliconFlowAdapter(DS_KEY)
+        base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+        model = os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3.2")
+        provider, api_key = resolve_llm_api_key(
+            explicit_api_key=None,
+            base_url=base_url,
+            model=model,
+        )
+        if not api_key:
+            env_name = "MIMO_API_KEY" if provider == "mimo" else "SILICONFLOW_API_KEY or DS_KEY"
+            logger.error(
+                f"初始化 LLM 失败: provider={provider}, base_url={base_url}, "
+                f"model={model}, 缺少可用 API Key，请配置 {env_name}"
+            )
+            return False
+        self.adapter = SiliconFlowAdapter(api_key)
         return True
 
     def __init_factory(self):

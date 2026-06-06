@@ -62,7 +62,6 @@ def write_translate_cache_func(file_work_infos:List[FileWorkInfo], out_path:str=
         
 def write_file_work_infos(file_work_info:FileWorkInfo, out_path:str=OUT_PATH):
     out_file_path = os.path.join(out_path, file_work_info.out_path)  # 输出目录
-    print(out_file_path)
     rel_out_dir = os.path.dirname(out_file_path)  # 输出文件的文件夹
 
     # 若输出文件夹不存在则创建

@@ -1,11 +1,18 @@
 import logging
 import logging.config
+import warnings
 from pathlib import Path
 from datetime import datetime
 
 # 确保日志目录存在
 LOG_DIR = Path("log")
 LOG_DIR.mkdir(exist_ok=True)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"WARNING! response_format is not default parameter\.",
+    category=UserWarning,
+)
 
 logging_file_name = f"_{datetime.now().strftime('%Y%m%d%H%M%S')}.log"
 
@@ -28,7 +35,7 @@ LOGGING_CONFIG = {
         # 控制台处理器（输出 INFO 及以上级别）
         "console": {
             "class": "logging.StreamHandler",
-            "level": "INFO",
+            "level": "ERROR",
             "formatter": "simple"
         },
         # 文件处理器（输出 DEBUG 及以上级别，全量日志）

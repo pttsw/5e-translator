@@ -186,7 +186,7 @@ class MemoryDBDictionary:
         return bean
 
     def get_bunch(self, keys: list, tags: list, rel_f: str, ignore_case=False, correct_tag_from_db=False):
-        res = []
+        res = {}
         for key, tag in zip(keys, tags):
             bean = self.get(
                 key,
@@ -197,7 +197,7 @@ class MemoryDBDictionary:
                 correct_tag_from_db=correct_tag_from_db,
             )
             if bean is not None:
-                res.append(bean)
+                res[(key, tag)] = bean
         return res
 
     def put(self, key: str, value: str, rel_f: str, proofread=False, tag=""):

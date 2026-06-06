@@ -1,5 +1,8 @@
 import pymysql
+import time
 from config import logger
+
+
 class MySQLDatabase:
     def __init__(self, host, port, user, password, database):
         self.host = host
@@ -50,14 +53,29 @@ class MySQLDatabase:
 
     def execute_non_query(self, query, params=None):
         """执行非查询语句（增、删、改）"""
-        try:
-            self.cursor.execute(query, params)
-            self.connection.commit()
-        except pymysql.MySQLError as e:
-            logger.error(f"语句执行失败，错误原因: {e},{query},{params}")
-            self.connection.rollback()
-            return False
-        return True
+        retryable_error_codes = {1205, 1213}
+        max_retries = 3
+        base_sleep_seconds = 0.2
+
+        for attempt in range(max_retries + 1):
+            try:
+                self.cursor.execute(query, params)
+                self.connection.commit()
+                return True
+            except pymysql.MySQLError as e:
+                self.connection.rollback()
+                error_code = e.args[0] if getattr(e, "args", None) else None
+                is_retryable = error_code in retryable_error_codes
+                if is_retryable and attempt < max_retries:
+                    sleep_seconds = base_sleep_seconds * (2 ** attempt)
+                    logger.warning(
+                        f"语句执行遇到可重试错误(code={error_code})，"
+                        f"{sleep_seconds:.1f}秒后重试第{attempt + 1}/{max_retries}次: {query}"
+                    )
+                    time.sleep(sleep_seconds)
+                    continue
+                logger.error(f"语句执行失败，错误原因: {e},{query},{params}")
+                return False
 
     def insert(self, table, data):
         """插入数据"""
@@ -71,13 +89,13 @@ class MySQLDatabase:
         set_clause = ', '.join([f"{column} = %s" for column in data.keys()])
         where_clause = ' AND '.join([f"{column} = %s" for column in condition.keys()])
         query = f"UPDATE {table} SET {set_clause} WHERE {where_clause}"
-        self.execute_non_query(query, tuple(data.values()) + tuple(condition.values()))
+        return self.execute_non_query(query, tuple(data.values()) + tuple(condition.values()))
 
     def delete(self, table, condition):
         """删除数据"""
         where_clause = ' AND '.join([f"{column} = %s" for column in condition.keys()])
         query = f"DELETE FROM {table} WHERE {where_clause}"
-        self.execute_non_query(query, tuple(condition.values()))
+        return self.execute_non_query(query, tuple(condition.values()))
 
     def select(self, table, columns='*', condition=None, order_by=None, limit=None):
         """查询数据"""

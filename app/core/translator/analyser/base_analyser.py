@@ -63,13 +63,18 @@ class BaseAnalyser:
             if not ok:
                 raise RuntimeError(f'process error:{en_obj}')
         # 最终从数据库里查job
-        query_en_list = [j.en_str for j in self.job_list if j.cn_str == None]
-        query_tag_list = [j.tag for j in self.job_list if j.cn_str == None]
-        query_res_list = self.dictionary.get_bunch(query_en_list, query_tag_list, self.rel_path, ignore_case=True, correct_tag_from_db=self.correct_tag_from_db)
-        for j in self.job_list:
-            if j.cn_str != None:
-                continue
-            db_res = self.dictionary.get(j.en_str, rel_f=self.rel_path, load_from_sql=False, ignore_case=True, tag=j.tag, correct_tag_from_db=self.correct_tag_from_db)
+        pending_jobs = [j for j in self.job_list if j.cn_str == None]
+        query_en_list = [j.en_str for j in pending_jobs]
+        query_tag_list = [j.tag for j in pending_jobs]
+        batch_res_map = self.dictionary.get_bunch(
+            query_en_list,
+            query_tag_list,
+            self.rel_path,
+            ignore_case=True,
+            correct_tag_from_db=self.correct_tag_from_db,
+        )
+        for j in pending_jobs:
+            db_res = batch_res_map.get((j.en_str, j.tag))
             if db_res:
                 j.cn_str = db_res['cn']
                 j.sql_id = db_res['sql_id']

@@ -168,6 +168,7 @@ class BatchChunker:
             return []
 
         units = []
+        matched_job_ids = set()
         current_jobs = []
         current_texts = []
         current_chars = 0
@@ -192,6 +193,7 @@ class BatchChunker:
                 current_chars = 0
                 chunk_index += 1
             current_jobs.extend([job for job in block_jobs if job not in current_jobs])
+            matched_job_ids.update(job.uid for job in block_jobs)
             current_texts.append(block_text)
             current_chars += block_chars
 
@@ -203,6 +205,22 @@ class BatchChunker:
                 known_translations,
                 "\n\n".join(current_texts),
             ))
+
+        unmatched_jobs = [job for job in pending_jobs if job.uid not in matched_job_ids]
+        if unmatched_jobs:
+            current_jobs = []
+            current_chars = 0
+            for job in unmatched_jobs:
+                job_chars = len(job.en_str or "")
+                if current_jobs and current_chars + job_chars > self.max_chars:
+                    units.append(self._build_chunk_unit(batch_id, chunk_index, current_jobs, known_translations))
+                    current_jobs = []
+                    current_chars = 0
+                    chunk_index += 1
+                current_jobs.append(job)
+                current_chars += job_chars
+            if current_jobs:
+                units.append(self._build_chunk_unit(batch_id, chunk_index, current_jobs, known_translations))
         return units
 
     def _split_large_unit_by_jobs(self, batch_id: str, pending_jobs: List[Job], known_translations: List[dict]) -> List[BatchUnit]:
@@ -310,7 +328,8 @@ class BatchChunker:
     def _is_structural_block(self, value: dict) -> bool:
         if "entries" in value or "items" in value or "rows" in value:
             return True
-        if value.get("type") in {"section", "entries", "inset", "table", "list", "quote"}:
+        block_type = value.get("type")
+        if isinstance(block_type, str) and block_type in {"section", "entries", "inset", "table", "list", "quote"}:
             return True
         return False
 

@@ -38,6 +38,7 @@ class BatchJobProcessor(JobProcessor):
             self.factory.reset()
             self._JobProcessor__load_temple_terms(res.job_list, res.out_path)  # type: ignore[attr-defined]
             units = self.chunker.build_units(res)
+            self.factory.set_progress_context(label=f"File {res.out_path}")
             if not units:
                 yield res
                 continue
@@ -75,7 +76,12 @@ class BatchJobProcessor(JobProcessor):
             f"批次开始: id={batch_unit.batch_id}, depth={batch_unit.retry_depth}, "
             f"jobs={len(batch_unit.jobs)}, context_chars={len(batch_unit.context_text)}"
         )
-        msg, status = self.adapter.sendText(request, PROMOT_BATCH, structured_output=False)
+        msg, status = self.adapter.sendText(
+            request,
+            PROMOT_BATCH,
+            structured_output=True,
+            response_mode="batch",
+        )
         batch_unit.last_response = "" if msg is None else str(msg)
         if status != TranslatorStatus.SUCCESS:
             batch_unit.failure_reason = f"adapter_status:{status.name}"

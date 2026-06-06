@@ -20,7 +20,13 @@ class MockAdapter:
         self.translation_by_text = payload.get("translations_by_text", {}) or {}
         self.translation_by_uid = payload.get("translations_by_uid", {}) or {}
 
-    def sendText(self, text, promot: str = "", structured_output: bool = True):
+    def sendText(
+        self,
+        text,
+        promot: str = "",
+        structured_output: bool = True,
+        response_mode: str = "single",
+    ):
         try:
             payload = json.loads(text)
         except Exception:
