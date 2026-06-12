@@ -3,6 +3,7 @@ from flask import request
 from .restful_utils import *
 from typing import Union
 from app.model import db, CRUDMixin
+from sqlalchemy import func
 
 import json
 
@@ -52,7 +53,13 @@ class BaseApi():
                 if v:
                     query = query.filter(getattr(self.model, f).notlike(f'%{v}%'))
             if sort_by:
-                if sort_by[0] == '+':
+                if sort_by == '+en_length' and hasattr(self.model, 'en'):
+                    query = query.order_by(
+                        func.char_length(self.model.en).asc(),
+                        self.model.en.asc(),
+                        self.model.id.asc()
+                    )
+                elif sort_by[0] == '+':
                     query = query.order_by(getattr(self.model, sort_by[1:]).asc())
                 elif sort_by[0] == '-':
                     query = query.order_by(getattr(self.model, sort_by[1:]).desc())

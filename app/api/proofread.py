@@ -117,18 +117,69 @@ class ProofreadApi(Resource, BaseApi):
         if request.is_json:
             data = request.get_json()
             current_file = data.pop('current_file', '').strip('/')
-            data['modified_by'] = user_id
-            data['accepted'] = 0
+            word_id = data.get('word_id')
+            cn = data.get('cn')
+            en_str = data.get('en_str')
+            uid = data.get('uid')
+            tag = data.get('tag')
+            if cn is None:
+                return error("新增失败：cn不能为空")
+
+            word = WordsModel.query.get(word_id) if word_id is not None else None
+            if word is None and word_id is not None:
+                return error("新增失败：没有找到相关词条")
+            if word is None:
+                if not current_file or not en_str:
+                    return error("新增失败：缺少创建词条所需的文件或英文原文")
+                word = (
+                    WordsModel.query
+                    .join(SourceModel, SourceModel.word_id == WordsModel.id)
+                    .filter(SourceModel.file == current_file)
+                    .filter(WordsModel.en == en_str)
+                    .first()
+                )
+
             # if ProofreadModel.query.filter_by(word_id = data['word_id']).filter_by(cn = data['cn']).first():
             #     return error("请勿重复提交已存在的翻译！")
-            
-            item = self.model.create(commit=True, **data, createFunc=self._create)
-            if item is None:
-                return error("新增失败：数据库新增失败")
-            
-            word = WordsModel.query.get(item.word_id)
-            if word.update(commit=True, is_key = True) is None:
-                return error("新增失败：数据库变更失败")
+
+            try:
+                if word is None:
+                    word = WordsModel(
+                        en=en_str,
+                        cn=en_str,
+                        json_file=current_file,
+                        modified_by=user_id,
+                        source="",
+                        version="0",
+                    )
+                    word.category = tag
+                    word.is_key = 0
+                    word.proofread = 0
+                    session.add(word)
+                    session.flush()
+                word_id = word.id
+                source = SourceModel.query.filter_by(
+                    word_id=word_id, file=current_file
+                ).first() if current_file else None
+                if current_file and source is None:
+                    session.add(SourceModel(word_id, current_file, word.version or "0"))
+                item = self.model(
+                    word_id=word_id,
+                    cn=cn,
+                    modified_by=user_id,
+                    accepted=0,
+                )
+                session.add(item)
+                word.cn = cn
+                word.proofread = 0
+                word.is_key = 1
+                word.modified_by = user_id
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                print(f"提交校对失败: {e}")
+                return error("新增失败：数据库更新失败")
+
             related_files = [
                 row[0] for row in session.query(SourceModel.file)
                 .filter(SourceModel.word_id == item.word_id)
@@ -136,7 +187,15 @@ class ProofreadApi(Resource, BaseApi):
                 .all()
             ]
             if current_file:
-                update_job_cache_word(current_file, item.word_id, is_key=1, is_proofread=0, cn_str=item.cn)
+                update_job_cache_word(
+                    current_file,
+                    item.word_id,
+                    uid=uid,
+                    en_str=en_str,
+                    is_key=1,
+                    is_proofread=0,
+                    cn_str=item.cn
+                )
                 clear_file_stale(current_file)
                 progress = _get_file_progress(current_file)
             else:
@@ -145,6 +204,8 @@ class ProofreadApi(Resource, BaseApi):
             mark_files_stale(stale_files)
             return success(message=f"新增成功", data={
                 'proofread': item.to_dict(),
+                'word': word.to_dict(),
+                'auto_accepted': False,
                 'progress': progress,
                 'stale_files': stale_files,
             })

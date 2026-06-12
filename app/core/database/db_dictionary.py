@@ -3,6 +3,7 @@ import time
 import datetime
 import json
 import os
+import re
 from .memory_db_dictionary import MemoryDBDictionary
 from .mysql_db import MySQLDatabase
 from config import DB_CONFIG, logger
@@ -54,6 +55,32 @@ class DBDictionary:
     def close(self):
         for db in self.db_list:
             db.close()
+
+    @staticmethod
+    def _should_skip_term_en(en: str) -> bool:
+        normalized = (en or "").strip()
+        if normalized.lower().startswith("area"):
+            return True
+        if normalized.startswith("+"):
+            return True
+        if normalized[:1].isdigit():
+            return True
+        if re.match(r"^\d+\.", normalized):
+            return True
+        if re.match(r"^\d+\s+\S+\.?$", normalized):
+            return True
+        if re.match(r"^[A-Za-z0-9]{1,3}[.:：。]", normalized):
+            return True
+        if re.match(r"^[\(\[（【]\d+[\)\]）】]", normalized):
+            return True
+        if len(normalized) >= 2 and (
+            (normalized.startswith("(") and normalized.endswith(")")) or
+            (normalized.startswith("（") and normalized.endswith("）")) or
+            (normalized.startswith("[") and normalized.endswith("]")) or
+            (normalized.startswith("【") and normalized.endswith("】"))
+        ):
+            return True
+        return False
 
     def __get_priority(self, r, k, tag):
         """获取翻译优先级
@@ -386,7 +413,7 @@ class DBDictionary:
         logger.debug(f"put函数执行时间：{time.time() - start_time} 秒")
         return True
 
-    def put_term(self, term):
+    def put_term(self, term, source="", modified_by=1, modified_reson=""):
         """写入Term表
 
         Args:
@@ -394,8 +421,62 @@ class DBDictionary:
         """
         db_index = self.__get_db_index()
         db = self.db_list[db_index]
-        db.insert('term', {'en': term.en, 'cn': term.cn, 'category': term.category})
-        self.__release_db(db_index)
+        try:
+            return db.insert('term', {
+                'en': term.en,
+                'cn': term.cn,
+                'category': term.category or '',
+                'source': source or '',
+                'modified_reson': modified_reson or '',
+                'modified_by': modified_by,
+            })
+        finally:
+            self.__release_db(db_index)
+
+    def get_term_entries(self, en: str):
+        """按英文查询 term 表记录。"""
+        db_index = self.__get_db_index()
+        db = self.db_list[db_index]
+        try:
+            res = db.select(
+                'term',
+                columns=['en', 'cn', 'category', 'source'],
+                condition={'en': en},
+                order_by='category asc'
+            )
+            return res or []
+        finally:
+            self.__release_db(db_index)
+
+    def get_all_term_entries(self):
+        """读取 term 表中的全部原始记录。"""
+        db_index = self.__get_db_index()
+        db = self.db_list[db_index]
+        try:
+            return db.select('term', columns=['en', 'cn', 'category']) or []
+        finally:
+            self.__release_db(db_index)
+
+    def update_term(self, en: str, old_cn: str, new_cn: str, category="", source=None, modified_by=1, modified_reson=""):
+        """更新 term 表中的单条记录。"""
+        db_index = self.__get_db_index()
+        db = self.db_list[db_index]
+        try:
+            params = [new_cn, modified_by, modified_reson or "", en, category or "", old_cn]
+            if source is None:
+                sql = (
+                    "UPDATE term SET cn = %s, modified_by = %s, modified_reson = %s "
+                    "WHERE en = %s AND category = %s AND cn = %s"
+                )
+            else:
+                sql = (
+                    "UPDATE term SET cn = %s, modified_by = %s, modified_reson = %s, source = %s "
+                    "WHERE en = %s AND category = %s AND cn = %s"
+                )
+                params = [new_cn, modified_by, modified_reson or "", source, en, category or "", old_cn]
+            return db.execute_non_query(sql, tuple(params))
+        finally:
+            self.__release_db(db_index)
     
     def get_all_term(self):
         """获取所有的Term，并按照一定规则格式化和筛选
@@ -409,11 +490,36 @@ class DBDictionary:
         words_res = db.execute_query("select en, cn, category from words where proofread = 1 and (LENGTH(en) - LENGTH(replace(en,' ','')) < 4 or en like '%{@recharge%}' or en like '%(Costs%Action%)') and en != cn and (category != 'no-term' or category is null)")
         res = set()
         for r in term_res:
+            if self._should_skip_term_en(r['en']):
+                continue
             res.add(Term(r['en'], r['category'], r['cn']))
         for r in words_res:
+            if self._should_skip_term_en(r['en']):
+                continue
             res.update(to_terms(r['en'], r['cn'], r['category']))
         self.__release_db(db_index)
         return res
+
+    def get_word_terms_for_sync(self):
+        """按 add 模式的来源规则，从 words 表生成候选术语。"""
+        db_index = self.__get_db_index()
+        db = self.db_list[db_index]
+        try:
+            words_res = db.execute_query(
+                "select en, cn, category from words "
+                "where proofread = 1 "
+                "and (LENGTH(en) - LENGTH(replace(en,' ','')) < 4 "
+                "or en like '%{@recharge%}' or en like '%(Costs%Action%)') "
+                "and en != cn and (category != 'no-term' or category is null)"
+            )
+            res = set()
+            for r in words_res or []:
+                if self._should_skip_term_en(r['en']):
+                    continue
+                res.update(to_terms(r['en'], r['cn'], r['category']))
+            return res
+        finally:
+            self.__release_db(db_index)
         
     def update(self, sql_id:int, cn:str, proofread=True, tag="") -> (bool):
         start_time = time.time()

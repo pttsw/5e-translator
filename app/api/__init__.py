@@ -19,3 +19,5 @@ from .file import api
 api.init_app(api_bp)
 from .chm import api
 api.init_app(api_bp)
+from .term import api
+api.init_app(api_bp)

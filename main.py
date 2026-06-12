@@ -24,9 +24,9 @@ from app.core.utils import find_json_files, write_translate_cache, Job, FileWork
 from app.core.utils import need_translate_str
 from app.core.translator import JsonAnalyser, JobProcessor, BatchJobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler, JsonGenerator
 from app.core.translator.batch_chunker import BatchChunker
-from app.cli import transform_proofread, search_knowledge, add_mysql_terms_to_redis, combine_temp_terms_to_csv, load_files_into_chroma_db, load_term_from_text
+from app.cli import transform_proofread, search_knowledge, add_mysql_terms_to_redis, add_confirmed_term, combine_temp_terms_to_csv, load_files_into_chroma_db, load_term_from_text, sync_terms_to_mysql
 from app.core.para import set_terms_to_para
-from app.core.file_progress_service import get_split_file_path, sync_source_file
+from app.core.file_progress_service import get_split_file_path, sync_source_path
 from app.core.utils.console_progress import console_progress
 from config import DB_CONFIG, EN_PATH
 from app.core.database import DBDictionary
@@ -173,9 +173,9 @@ def main():
     #
     term_parser = subparsers.add_parser('term')
     term_parser.add_argument('--en', default=EN_PATH, type=str,
-                                  help='Search term')
+                                  help='Term source path for analysis, supports txt/csv/docx, or use words for add-mode word source sync')
     term_parser.add_argument('--mode', default='add', type=str,
-                                  help='Mode to use, default to add, can be add, dump, analyze or para')
+                                  help='Mode to use, default to add, can be add, dump, analyze/analyse, sync or para')
     
     embed_parser = subparsers.add_parser('embed')
     embed_parser.add_argument('--dir', default='/data/DND5e_chm/艾伯伦：从终末战争中崛起', type=str,
@@ -196,7 +196,7 @@ def main():
 
     sync_parser = subparsers.add_parser('sync-splited')
     sync_parser.add_argument('--source-file', required=True, type=str,
-                             help='Relative source json path under configured source roots, e.g. 5etools or homebrew')
+                             help='Source JSON file or directory under configured source roots; directories are processed recursively')
     sync_parser.add_argument('--skip-jobs', action='store_true', default=False,
                              help='Only rebuild split files and file table, skip jobs cache')
 
@@ -285,37 +285,66 @@ def main():
             add_mysql_terms_to_redis()
         elif args.mode == 'dump':
             combine_temp_terms_to_csv()
-        elif args.mode == 'analyze':
-            dir_path = '/data/5e-translator/app/core/crawler/valda'
-            # dir_path = '/data/DND5e_chm/Generator/Generated/txt/第三方/瓦尔达的秘密尖塔'
-            for root, dirs, files in os.walk(dir_path):
-                for file in files:
-                    if not file.endswith('.txt'):
-                        continue
-                    terms = load_term_from_text(os.path.join(root, file))
-                    db = DBDictionary(conn_num=1)
-                    db.get_bunch(terms.keys(), ['' for _ in range(len(terms.keys()))], '')
-                    for en,cn in terms.items():
-                        db_bean = db.get(en,load_from_sql=False)
-                        if db_bean is None:
-                            print(f'{en} not found in db')
-                        else:
-                            if db_bean['proofread']:
-                                print(f'{en} proofread, skip. db: {db_bean["cn"]}, text: {cn}')
-                                continue
-                            print(f'{en} 没有校对： db: {db_bean["cn"]}, text: {cn}')
-                            if db_bean['cn'] == cn:
-                                print(f'{en} 没有校对，但是 db 中的 cn 与 text 中的 cn 相同，自动校对')
-                                db.update(db_bean['sql_id'], cn, proofread=True)
-                                continue
-                            resp = input(f'更新 {en} 为 {cn}? (Y/n): ')
-                            if resp.strip() == 'skip':
-                                continue
-                            new_cn = cn
-                            if resp.lower() != 'y' and resp.strip() != '':
-                                new_cn = input('New cn: ')
-                            db.update(db_bean['sql_id'], new_cn, proofread=True)
-                                # print(f'{en} cn not match, db: {db_bean["cn"]}, text: {cn}')
+        elif args.mode in ('analyze', 'analyse'):
+            input_path = args.en
+            if not input_path:
+                input_path = '/data/5e-translator/app/core/crawler/valda'
+
+            term_source = ''
+            while not term_source:
+                term_source = input('请输入术语来源简称（写入 term.source）: ').strip()
+                if not term_source:
+                    print('来源简称不能为空，请重新输入。')
+
+            file_paths = []
+            if os.path.isfile(input_path):
+                file_paths.append(input_path)
+            else:
+                for root, dirs, files in os.walk(input_path):
+                    for file in files:
+                        if not file.lower().endswith(('.txt', '.csv', '.docx')):
+                            continue
+                        file_paths.append(os.path.join(root, file))
+
+            db = DBDictionary(conn_num=1)
+            for file_path in file_paths:
+                print(f'analyzing {file_path}')
+                terms = load_term_from_text(file_path)
+                if not terms:
+                    continue
+                db.get_bunch(terms.keys(), ['' for _ in range(len(terms.keys()))], '')
+                for en, cn in terms.items():
+                    db_bean = db.get(en, load_from_sql=False)
+                    if db_bean is None:
+                        print(f'{en} not found in db')
+                    else:
+                        if db_bean['proofread']:
+                            print(f'{en} proofread, skip. db: {db_bean["cn"]}, text: {cn}')
+                            add_confirmed_term(
+                                db, en, db_bean['cn'], db_bean.get('category'), term_source
+                            )
+                            continue
+                        print(f'{en} 没有校对： db: {db_bean["cn"]}, text: {cn}')
+                        if db_bean['cn'] == cn:
+                            print(f'{en} 没有校对，但是 db 中的 cn 与 text 中的 cn 相同，自动校对')
+                            if db.update(db_bean['sql_id'], cn, proofread=True):
+                                add_confirmed_term(
+                                    db, en, cn, db_bean.get('category'), term_source
+                                )
+                            continue
+                        resp = input(f'更新 {en} 为 {cn}? (Y/n): ')
+                        if resp.strip() == 'skip':
+                            continue
+                        new_cn = cn
+                        if resp.lower() != 'y' and resp.strip() != '':
+                            new_cn = input('New cn: ')
+                        if db.update(db_bean['sql_id'], new_cn, proofread=True):
+                            add_confirmed_term(
+                                db, en, new_cn, db_bean.get('category'), term_source
+                            )
+                            # print(f'{en} cn not match, db: {db_bean["cn"]}, text: {cn}')
+        elif args.mode == 'sync':
+            sync_terms_to_mysql(args.en)
         elif args.mode == 'para':
             set_terms_to_para()
         else:
@@ -364,7 +393,7 @@ def main():
             print(len(r.job_list), getattr(r, 'json_path', ''))
     elif args.function == 'sync-splited':
         with cli_db_app_context():
-            res = sync_source_file(args.source_file, rebuild_jobs=not args.skip_jobs)
+            res = sync_source_path(args.source_file, rebuild_jobs=not args.skip_jobs)
         print(res)
         
 if __name__ == '__main__':

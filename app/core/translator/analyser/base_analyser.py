@@ -1,4 +1,5 @@
 import uuid
+import re
 from config import logger,KEY_MATCHED_TAG
 from typing import List, Optional
 from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path, replace_split_values, process_filter_split_values, process_post_filter_split_values
@@ -81,6 +82,24 @@ class BaseAnalyser:
                 j.is_proofread = db_res['proofread']
                 j.is_key = db_res['is_key']
         return res_dict, self.job_list
+
+    def get_translator_from_credits(self, default="机翻"):
+        credits = self.dictionary.get_credits(self.rel_path)
+        if not credits:
+            return default
+
+        preferred_job_types = ("翻译","翻译&校对", "translator", "translate")
+        for job_type in preferred_job_types:
+            for credit in credits:
+                if credit.get("job_type") == job_type and credit.get("names"):
+                    return self.format_translator_names(credit["names"])
+        return default
+
+    def format_translator_names(self, names: str):
+        parts = [part.strip() for part in re.split(r"[,，、]+", names) if part.strip()]
+        if len(parts) <= 1:
+            return names
+        return f"{parts[0]}等"
 
     def str_2_job(self, en_str: str, current_names: list = [], tag = "", key_path = ""):
         """根据字符串生成JOB对象

@@ -19,7 +19,7 @@ class WordsApi(Resource, BaseApi):
         # 根据文件名进行子查询
         # query = query.filter(getattr(self.model, 'category').is_(None))
         # query = query.filter()
-        source_file = request.args.get('source_file')
+        source_file = request.args.get('source_file', '').strip()
         has_proofread = request.args.get('has_proofread', None, int)
         if has_proofread:
             has_proofread_subquery = ProofreadModel.query \
@@ -32,8 +32,8 @@ class WordsApi(Resource, BaseApi):
         if source_file:
             source_subquery = SourceModel.query \
                 .with_entities(SourceModel.word_id) \
-                .filter(SourceModel.file == source_file) \
-                .subquery()
+                .filter(SourceModel.file.contains(source_file)) \
+                .distinct()
             query = query.filter(WordsModel.id.in_(source_subquery))
         return query
     
@@ -90,4 +90,3 @@ class ReplaceKeyApi(Resource):
             session.rollback()
             return error("更新失败")
         return success(data={'count':result.rowcount})
-        

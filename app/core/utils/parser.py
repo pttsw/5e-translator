@@ -103,6 +103,7 @@ soure_json_to_full["SAiS"] = "魔法船：冒险，于太空之中"
 soure_json_to_full["AAG"] = "星界冒险者指南"
 soure_json_to_full["BAM"] = "布布的星界怪兽展"
 soure_json_to_full["LoX"] = "萨里希斯之光"
+soure_json_to_full["RHW"] = "鸦阁魔域：魔障深藏";
 soure_json_to_full["DoSI"] = "风骸岛之龙"
 soure_json_to_full["DSotDQ"] = "龙枪：龙后之影"
 soure_json_to_full["KftGV"] = "黄金宝库之钥"

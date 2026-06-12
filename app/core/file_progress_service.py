@@ -38,6 +38,45 @@ def get_source_file_path(rel_path: str) -> str:
     return os.path.join(EN_PATH, rel_path)
 
 
+def normalize_source_file(source_file: str) -> str:
+    source_file = os.path.normpath(source_file)
+    if not os.path.isabs(source_file):
+        return source_file
+
+    for root_path in SOURCE_ROOTS:
+        if not root_path:
+            continue
+        root_path = os.path.abspath(root_path)
+        try:
+            if os.path.commonpath([source_file, root_path]) == root_path:
+                return os.path.relpath(source_file, root_path)
+        except ValueError:
+            continue
+
+    checked_roots = [root for root in SOURCE_ROOTS if root]
+    raise ValueError(f"{source_file} is not under a configured source root: {checked_roots}")
+
+
+def list_source_json_files(source_path: str) -> List[str]:
+    source_file = normalize_source_file(source_path)
+    resolved_path = get_source_file_path(source_file)
+    if not os.path.exists(resolved_path):
+        checked_roots = [root for root in SOURCE_ROOTS if root]
+        raise FileNotFoundError(f"{source_file} not found under source roots: {checked_roots}")
+    if os.path.isfile(resolved_path):
+        return [source_file]
+
+    source_files = []
+    for root, _, files in os.walk(resolved_path):
+        for file_name in files:
+            if not file_name.lower().endswith(".json"):
+                continue
+            file_path = os.path.join(root, file_name)
+            rel_path = os.path.relpath(file_path, resolved_path)
+            source_files.append(os.path.normpath(os.path.join(source_file, rel_path)))
+    return sorted(source_files)
+
+
 def get_job_cache_paths(rel_path: str):
     return (
         os.path.join(APP_TEMP_PATH, rel_path + ".jobs"),
@@ -45,7 +84,13 @@ def get_job_cache_paths(rel_path: str):
     )
 
 
-def update_job_cache_word(split_file: str, word_id: int, **updates) -> bool:
+def update_job_cache_word(
+    split_file: str,
+    word_id: int,
+    uid: Optional[str] = None,
+    en_str: Optional[str] = None,
+    **updates,
+) -> bool:
     if not split_file or not word_id:
         return False
     job_path, _ = get_job_cache_paths(split_file)
@@ -60,10 +105,19 @@ def update_job_cache_word(split_file: str, word_id: int, **updates) -> bool:
 
     changed = False
     for job in job_list:
-        if int(job.get("sql_id") or 0) != int(word_id):
+        has_word_id = int(job.get("sql_id") or 0) == int(word_id)
+        is_missing_word = not job.get("sql_id")
+        has_uid = bool(uid) and job.get("uid") == uid
+        has_en = not uid and bool(en_str) and job.get("en_str") == en_str
+        if not has_word_id and not (is_missing_word and (has_uid or has_en)):
             continue
+        if not job.get("sql_id"):
+            job["sql_id"] = word_id
+            changed = True
         for key, value in updates.items():
             if value is not None:
+                if job.get(key) == value:
+                    continue
                 job[key] = value
                 changed = True
 
@@ -262,6 +316,41 @@ def update_file_progress_from_jobs(split_file: str, job_list: List[dict]) -> Dic
     return progress
 
 
+def _replace_missing_job_placeholders(value, job_list: List[dict]):
+    replacements = {}
+    for job in job_list:
+        if job.get("sql_id") or not job.get("uid"):
+            continue
+        english_text = job.get("en_str")
+        if english_text is None:
+            continue
+        replacements[f"{{!@ {job['uid']}}}"] = english_text
+        job["cn_str"] = english_text
+
+    def replace(current):
+        if isinstance(current, str):
+            for placeholder, english_text in replacements.items():
+                current = current.replace(placeholder, english_text)
+            return current
+        if isinstance(current, list):
+            return [replace(item) for item in current]
+        if isinstance(current, dict):
+            return {key: replace(item) for key, item in current.items()}
+        return current
+
+    return replace(value)
+
+
+def _contains_job_placeholder(value) -> bool:
+    if isinstance(value, str):
+        return "{!@ " in value
+    if isinstance(value, list):
+        return any(_contains_job_placeholder(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_job_placeholder(item) for item in value.values())
+    return False
+
+
 def rebuild_split_file(split_file: str):
     split_path = get_split_file_path(split_file)
     if not os.path.exists(split_path):
@@ -273,7 +362,10 @@ def rebuild_split_file(split_file: str):
     job_list = []
     cn_obj = None
     for file_work_info in file_work_infos:
-        file_work_info.job_list = [j.__dict__ for j in file_work_info.job_list if j.sql_id]
+        file_work_info.job_list = [j.__dict__ for j in file_work_info.job_list]
+        file_work_info.cn_obj = _replace_missing_job_placeholders(
+            file_work_info.cn_obj, file_work_info.job_list
+        )
         write_file_work_infos(file_work_info, APP_TEMP_PATH)
         job_list = file_work_info.job_list
         cn_obj = file_work_info.cn_obj
@@ -288,6 +380,12 @@ def ensure_jobs_cache(split_file: str):
         job_list = json.load(job_file)
     with open(cn_path, "r") as cn_file:
         cn_obj = json.load(cn_file)
+    if _contains_job_placeholder(cn_obj):
+        rebuild_split_file(split_file)
+        with open(job_path, "r") as job_file:
+            job_list = json.load(job_file)
+        with open(cn_path, "r") as cn_file:
+            cn_obj = json.load(cn_file)
     return job_list, cn_obj
 
 
@@ -363,7 +461,7 @@ def sync_split_file(split_file: str, rebuild_jobs: bool = True) -> Dict[str, obj
             ))
             job_list = []
             for file_work_info in file_work_infos:
-                job_list = [j.__dict__ for j in file_work_info.job_list if j.sql_id]
+                job_list = [j.__dict__ for j in file_work_info.job_list]
             update_file_progress_from_jobs(split_file, job_list)
     except Exception as exc:
         logger.error(f"重建拆分文件缓存失败: {split_file}, {exc}")
@@ -385,6 +483,7 @@ def sync_split_file(split_file: str, rebuild_jobs: bool = True) -> Dict[str, obj
 
 
 def sync_source_file(source_file: str, rebuild_jobs: bool = True) -> Dict[str, List[str]]:
+    source_file = normalize_source_file(source_file)
     source_path = get_source_file_path(source_file)
     if not os.path.exists(source_path):
         checked_roots = [root for root in SOURCE_ROOTS if root]
@@ -432,6 +531,25 @@ def sync_source_file(source_file: str, rebuild_jobs: bool = True) -> Dict[str, L
     if not rebuild_jobs:
         refresh_progress_by_files(new_files)
     return {"source_file": source_file, "files": new_files, "removed_files": removed_files}
+
+
+def sync_source_path(source_path: str, rebuild_jobs: bool = True) -> Dict[str, object]:
+    source_files = list_source_json_files(source_path)
+    if not source_files:
+        raise FileNotFoundError(f"No JSON files found under source path: {source_path}")
+    if len(source_files) == 1 and not os.path.isdir(get_source_file_path(normalize_source_file(source_path))):
+        return sync_source_file(source_files[0], rebuild_jobs=rebuild_jobs)
+
+    results = []
+    for index, source_file in enumerate(source_files, 1):
+        logger.info(f"同步源文件目录进度: {index}/{len(source_files)} {source_file}")
+        results.append(sync_source_file(source_file, rebuild_jobs=rebuild_jobs))
+    return {
+        "source_path": normalize_source_file(source_path),
+        "source_files": source_files,
+        "synced": len(results),
+        "results": results,
+    }
 
 
 def _run_sync_task(task_id: str, flask_app, source_file: str):
