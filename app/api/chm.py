@@ -7,13 +7,14 @@ from urllib.parse import quote
 import json
 import mimetypes
 import re
-import subprocess
 
 from .restful_utils import success, error
+from app.core.chm_search_index import ChmSearchIndex
 
 api = Api()
 
 CHM_ROOT = Path('/data/DND5e_chm').resolve()
+CHM_SEARCH_INDEX = ChmSearchIndex(CHM_ROOT)
 HTML_SUFFIXES = {'.htm', '.html'}
 TEXT_EXTENSIONS = {'.css', '.js', '.txt', '.json', '.xml'}
 
@@ -51,10 +52,6 @@ def _build_page_url(relative_path: str, query: str = '') -> str:
     return url
 
 
-def _strip_html(text: str) -> str:
-    return re.sub(r'<[^>]+>', ' ', text or '')
-
-
 def _highlight_text(text: str, query: str) -> str:
     if not text:
         return ''
@@ -68,30 +65,6 @@ def _highlight_text(text: str, query: str) -> str:
         last_index = end
     parts.append(escape(text[last_index:]))
     return ''.join(parts)
-
-
-def _build_title_result(file_path: Path, query: str):
-    rel_path = _to_rel_path(file_path)
-    return {
-        'path': rel_path,
-        'title': file_path.stem,
-        'title_highlight': _highlight_text(file_path.stem, query),
-        'path_highlight': _highlight_text(rel_path, query)
-    }
-
-
-def _build_content_result(file_path: Path, query: str, snippet: str, line=''):
-    rel_path = _to_rel_path(file_path)
-    normalized_snippet = re.sub(r'\s+', ' ', _strip_html(snippet)).strip()
-    return {
-        'path': rel_path,
-        'title': file_path.stem,
-        'title_highlight': _highlight_text(file_path.stem, query),
-        'path_highlight': _highlight_text(rel_path, query),
-        'line': line,
-        'snippet': normalized_snippet,
-        'snippet_highlight': _highlight_text(normalized_snippet, query)
-    }
 
 
 def _rewrite_reference(match: re.Match, current_dir: Path, query: str = '') -> str:
@@ -215,62 +188,16 @@ def _rewrite_html(html: str, file_path: Path, query: str = '') -> str:
     if query:
         highlight_script = _build_highlight_script(query)
         if '</body>' in html.lower():
-            html = re.sub(r'</body>', f'{highlight_script}</body>', html, count=1, flags=re.IGNORECASE)
+            html = re.sub(
+                r'</body>',
+                lambda _: f'{highlight_script}</body>',
+                html,
+                count=1,
+                flags=re.IGNORECASE
+            )
         else:
             html = f'{html}{highlight_script}'
     return html
-
-
-def _search_with_rg(query: str):
-    command = [
-        'rg', '-i', '-n', '--no-heading', '--max-count', '1',
-        '--glob', '*.htm', '--glob', '*.html',
-        query, str(CHM_ROOT)
-    ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    if result.returncode not in (0, 1):
-        raise RuntimeError(result.stderr.strip() or '搜索失败')
-    items = []
-    for line in result.stdout.splitlines()[:60]:
-        parts = line.split(':', 2)
-        if len(parts) < 3:
-            continue
-        file_path = Path(parts[0])
-        items.append(_build_content_result(file_path, query, parts[2], parts[1]))
-    return items
-
-
-def _search_title_matches(query: str):
-    query_lower = query.lower()
-    items = []
-    for file_path in CHM_ROOT.rglob('*'):
-        if not file_path.is_file() or file_path.suffix.lower() not in HTML_SUFFIXES:
-            continue
-        rel_path = _to_rel_path(file_path)
-        if query_lower not in rel_path.lower() and query_lower not in file_path.stem.lower():
-            continue
-        items.append(_build_title_result(file_path, query))
-        if len(items) >= 30:
-            break
-    return items
-
-
-def _search_fallback(query: str):
-    query_lower = query.lower()
-    items = []
-    for file_path in CHM_ROOT.rglob('*'):
-        if not file_path.is_file() or file_path.suffix.lower() not in HTML_SUFFIXES:
-            continue
-        content = _decode_text(file_path)
-        index = content.lower().find(query_lower)
-        if index == -1:
-            continue
-        start = max(0, index - 40)
-        end = min(len(content), index + 120)
-        items.append(_build_content_result(file_path, query, content[start:end]))
-        if len(items) >= 60:
-            break
-    return items
 
 
 @api.resource('/chm/tree')
@@ -309,26 +236,27 @@ class ChmSearchApi(Resource):
         if not query:
             return success(data={'title_matches': [], 'content_matches': []})
         try:
-            title_matches = _search_title_matches(query)
-            try:
-                content_matches = _search_with_rg(query)
-            except Exception:
-                content_matches = _search_fallback(query)
-            title_paths = {item['path'] for item in title_matches}
-            deduped_content_matches = []
-            seen_paths = set()
-            for item in content_matches:
-                path = item['path']
-                if path in seen_paths:
-                    continue
-                seen_paths.add(path)
-                if path in title_paths:
-                    deduped_content_matches.append(item)
-                else:
-                    deduped_content_matches.append(item)
+            indexed_titles, indexed_contents = CHM_SEARCH_INDEX.search(query)
+            title_matches = [
+                {
+                    **item,
+                    'title_highlight': _highlight_text(item['title'], query),
+                    'path_highlight': _highlight_text(item['path'], query)
+                }
+                for item in indexed_titles
+            ]
+            content_matches = [
+                {
+                    **item,
+                    'title_highlight': _highlight_text(item['title'], query),
+                    'path_highlight': _highlight_text(item['path'], query),
+                    'snippet_highlight': _highlight_text(item['snippet'], query)
+                }
+                for item in indexed_contents
+            ]
             return success(data={
                 'title_matches': title_matches,
-                'content_matches': deduped_content_matches
+                'content_matches': content_matches
             })
         except Exception as exc:
             return error(str(exc))

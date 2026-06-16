@@ -11,11 +11,16 @@ from .job_processor import JobProcessor
 
 
 class BatchJobProcessor(JobProcessor):
-    def __init__(self, thread_num: int = 10, update: bool = False):
-        super().__init__(thread_num=thread_num, update=update)
+    def __init__(self, thread_num: int = 10, update: bool = False, use_ai: bool = True):
+        super().__init__(thread_num=thread_num, update=update, use_ai=use_ai)
         self.batch_max_chars = 12000
 
     def invoke(self, input, config=None, **kwargs):
+        config = config or {"metadata": {}}
+        if not config['metadata'].get('use_ai', self.use_ai):
+            yield from super().invoke(input, config=config, **kwargs)
+            return
+
         inputs = [input] if isinstance(input, str) else input
         self.config = config or {"metadata": {}}
         self.byhand = config['metadata'].get('byhand', False)
@@ -259,7 +264,11 @@ class BatchJobProcessor(JobProcessor):
 
         logger.warning(f"{res.json_path} 中有 {len(failed_jobs)} 个 batch Job 失败，回退到单 Job 流程")
         fallback_file = FileWorkInfo(failed_jobs, res.json_obj, res.json_path, res.out_path)
-        fallback_processor = JobProcessor(thread_num=self.thread_num, update=self.update)
+        fallback_processor = JobProcessor(
+            thread_num=self.thread_num,
+            update=self.update,
+            use_ai=self.use_ai,
+        )
         fallback_results = list(fallback_processor.invoke([fallback_file], config=self.config))
         if not fallback_results:
             return failed_jobs

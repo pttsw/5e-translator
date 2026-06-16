@@ -46,6 +46,7 @@ CREATE TABLE 5e.term (
   `en` varchar(255) NOT NULL,
   `category` char(50) NOT NULL,
   `cn` varchar(255) NOT NULL,
+  `modified_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`en`,`category`),
   KEY `en_category` (`en`,`category`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

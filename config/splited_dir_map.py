@@ -34,6 +34,7 @@ SPLITED_SOURCE_MAP = {
     "uthftlh": "小独与追寻失落之角",
     
     "ai": "艾奎兹玄有限责任公司",
+    "rhw": "鸦阁魔域：魔障深藏"
     # homebrew
 }
 

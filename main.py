@@ -22,7 +22,7 @@ import statistics
 from contextlib import contextmanager
 from app.core.utils import find_json_files, write_translate_cache, Job, FileWorkInfo, find_files
 from app.core.utils import need_translate_str
-from app.core.translator import JsonAnalyser, JobProcessor, BatchJobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler, JsonGenerator
+from app.core.translator import JsonAnalyser, JobProcessor, BatchJobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler, JsonGenerator, NonAiFallbackSetter
 from app.core.translator.batch_chunker import BatchChunker
 from app.cli import transform_proofread, search_knowledge, add_mysql_terms_to_redis, add_confirmed_term, combine_temp_terms_to_csv, load_files_into_chroma_db, load_term_from_text, sync_terms_to_mysql
 from app.core.para import set_terms_to_para
@@ -161,6 +161,10 @@ def main():
                                   help='Override LLM model (e.g. mimo-v2.5-pro, mimo-v2-flash). Sets base_url to xiaomimimo API automatically')
     translate_parser.add_argument('--mimo-api-key', default='', type=str,
                                   help='API key for xiaomimimo model (or set MIMO_API_KEY env)')
+    translate_parser.add_argument('--no-ai', dest='use_ai', action='store_false', default=True,
+                                  help='Do not use AI for entries missing from the database; keep English text and translate known tag values')
+    translate_parser.add_argument('--skip-file-name', default='', type=str,
+                                  help='Skip files whose file name contains this value')
     
     search_parser = subparsers.add_parser('search')
     search_parser.add_argument('--query', default='', type=str,
@@ -183,7 +187,8 @@ def main():
     
     chm_parser = subparsers.add_parser('chm')
     chm_parser.add_argument('--dir', default='/data/DND5e_chm/', type=str,
-                                  help='Path to the directory to embed')
+                                  help='Path to the CHM directory')
+    chm_parser.add_argument('--rebuild', action='store_true', help='Force rebuilding the local CHM search index')
 
     # 为 retry-failed 命令创建子解析器，用于从 failed_jobs.json 重试失败的 jobs
     retry_parser = subparsers.add_parser('retry-failed')
@@ -250,9 +255,12 @@ def main():
             else:
                 args.en = args.file
 
-        config = {'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache, 'batch': args.batch, 'batch_max_chars': args.batch_max_chars}
+        config = {'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache, 'batch': args.batch, 'batch_max_chars': args.batch_max_chars, 'use_ai': args.use_ai}
         if args.batch_preview:
-            res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()).invoke(args.en, config=config)
+            preview_pipeline = find_json_files|JsonAnalyser()|JobNeedTranslateSetter()
+            if args.use_ai:
+                preview_pipeline = preview_pipeline|KnowledgeSetter()|ByHandHandler()|TermSetter()
+            res = preview_pipeline.invoke((args.en, args.skip_file_name), config=config)
             preview_batch_units(
                 res,
                 args.batch_max_chars,
@@ -260,16 +268,20 @@ def main():
                 detail_limit=max(args.batch_preview_detail_limit, 0),
             )
             return
-        
-        processor = BatchJobProcessor(args.thread_num, update=True) if args.batch else JobProcessor(args.thread_num, update=True)
-        res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|processor|JsonGenerator(args.thread_num)|write_translate_cache).invoke(args.en, config=config)
+
+        if args.use_ai:
+            processor = BatchJobProcessor(args.thread_num, update=True) if args.batch else JobProcessor(args.thread_num, update=True)
+            pipeline = find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|processor|JsonGenerator(args.thread_num)|write_translate_cache
+        else:
+            pipeline = find_json_files|JsonAnalyser()|NonAiFallbackSetter()|write_translate_cache|JsonGenerator(args.thread_num)|write_translate_cache
+        res = pipeline.invoke((args.en, args.skip_file_name), config=config)
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()|JsonGenerator(args.thread_num)|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'splited': args.splited})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache|JobProcessor(args.thread_num, update=True)).invoke(args.en, config={'byhand': args.byhand, 'force': args.force})
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title})
-        total_files = sum(1 for _ in find_files(args.en))
+        total_files = sum(1 for _ in find_files(args.en, skip_file_name=args.skip_file_name))
         for _ in iter_with_total_progress(res, total_files):
             pass
     elif args.function == 'search':
@@ -354,6 +366,12 @@ def main():
     elif args.function == 'embed':
         # load_files_into_chroma_db(args.dir)
         load_files_into_chroma_db('/data/DND5e_chm/Generator/Generated/txt/小独与追寻失落之角')
+    elif args.function == 'chm':
+        from pathlib import Path
+        from app.core.chm_search_index import ChmSearchIndex
+
+        result = ChmSearchIndex(Path(args.dir)).sync(force=True, rebuild=args.rebuild)
+        print(result)
     elif args.function == 'retry-failed':
         # 从失败文件中读取 jobs 并重试
         import json

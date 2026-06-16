@@ -3,9 +3,10 @@ import json
 import os
 from flask import current_app
 from flask_restful import Resource, Api, request
-from sqlalchemy import func
+from flask_login import current_user
+from sqlalchemy import case, func
 from .restful_utils import *
-from app.model import FileModule
+from app.model import FileModule, UserModel
 from config import SPLITED_5ETOOLS_EN_PATH, logger
 from app.core.utils.parser import get_source_json_to_full
 from app.core.file_progress_service import (
@@ -20,7 +21,25 @@ from app.core.file_progress_service import (
 )
 api = Api()
 
-def list_json_entries(rel_dir: str):
+
+def _escape_like(value):
+    return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
+def _get_claim_user_map(user_ids):
+    if not user_ids:
+        return {}
+    users = UserModel.query.filter(UserModel.id.in_(user_ids)).all()
+    return {
+        user.id: {
+            'nickname': user.nickname or user.username,
+            'username': user.username,
+        }
+        for user in users
+    }
+
+
+def list_json_entries(rel_dir: str, current_user_id=None):
     rel_dir = rel_dir.strip('/')
     json_files = []
 
@@ -33,12 +52,17 @@ def list_json_entries(rel_dir: str):
             FileModule.proofread,
             FileModule.locked,
             FileModule.stale,
+            FileModule.user_id,
         )
         .filter(FileModule.parent_dir == rel_dir)
         .order_by(FileModule.file)
         .all()
     )
+    direct_user_map = _get_claim_user_map({
+        row.user_id for row in file_rows if row.user_id
+    })
     for row in file_rows:
+        claim_user = direct_user_map.get(row.user_id)
         json_files.append({
             'file': row.file,
             'display_name': row.file.split('/')[-1],
@@ -48,6 +72,13 @@ def list_json_entries(rel_dir: str):
             'proofread': row.proofread,
             'locked': row.locked,
             'stale': row.stale,
+            'user_id': row.user_id or None,
+            'claim_nickname': claim_user['nickname'] if claim_user else '',
+            'claim_username': claim_user['username'] if claim_user else '',
+            'claim_status': (
+                'mine' if row.user_id and str(row.user_id) == str(current_user_id)
+                else ('claimed' if row.user_id else 'unclaimed')
+            ),
         })
 
     prefix = f"{rel_dir}/" if rel_dir else ""
@@ -55,20 +86,50 @@ def list_json_entries(rel_dir: str):
     child_name_expr = func.substring_index(remainder_expr, '/', 1)
     dir_path_expr = child_name_expr if not rel_dir else func.concat(rel_dir, '/', child_name_expr)
 
-    dir_rows = (
+    dir_query = (
         FileModule.query.with_entities(
             dir_path_expr.label('file'),
             func.sum(FileModule.total).label('total'),
             func.sum(FileModule.translate).label('translate'),
             func.sum(FileModule.proofread).label('proofread'),
+            func.count(FileModule.file).label('file_count'),
+            func.sum(case((FileModule.user_id > 0, 1), else_=0)).label('claimed_count'),
+            func.min(case((FileModule.user_id > 0, FileModule.user_id))).label('min_user_id'),
+            func.max(case((FileModule.user_id > 0, FileModule.user_id))).label('max_user_id'),
         )
-        .filter(FileModule.file.like(f"{prefix}%"))
         .filter(remainder_expr.like('%/%'))
         .group_by(dir_path_expr)
         .order_by(dir_path_expr)
-        .all()
     )
+    if prefix:
+        dir_query = dir_query.filter(
+            FileModule.file.like(f"{_escape_like(prefix)}%", escape='\\')
+        )
+    dir_rows = dir_query.all()
+    folder_user_map = _get_claim_user_map({
+        row.min_user_id
+        for row in dir_rows
+        if row.min_user_id is not None
+        and row.min_user_id == row.max_user_id
+    })
     for row in dir_rows:
+        has_single_owner = (
+            row.min_user_id is not None
+            and row.min_user_id == row.max_user_id
+        )
+        is_uniform_claim = row.claimed_count == row.file_count and has_single_owner
+        owner_user_id = row.min_user_id if has_single_owner else None
+        claim_user = folder_user_map.get(owner_user_id)
+        has_mixed_claims = row.claimed_count > 0 and not has_single_owner
+        claim_status = 'mixed' if has_mixed_claims else 'unclaimed'
+        if is_uniform_claim:
+            claim_status = 'mine' if str(owner_user_id) == str(current_user_id) else 'claimed'
+        elif owner_user_id is not None:
+            claim_status = (
+                'partial_mine'
+                if str(owner_user_id) == str(current_user_id)
+                else 'partial_claimed'
+            )
         json_files.append({
             'file': row.file,
             'display_name': get_source_json_to_full(row.file.split('/')[-1]),
@@ -76,6 +137,14 @@ def list_json_entries(rel_dir: str):
             'total': int(row.total or 0),
             'translate': int(row.translate or 0),
             'proofread': int(row.proofread or 0),
+            'fileCount': int(row.file_count or 0),
+            'claimedCount': int(row.claimed_count or 0),
+            'user_id': owner_user_id,
+            'claim_nickname': (
+                claim_user['nickname'] if claim_user else ('多人占坑' if has_mixed_claims else '')
+            ),
+            'claim_username': claim_user['username'] if claim_user else '',
+            'claim_status': claim_status,
         })
     return json_files
 
@@ -123,7 +192,7 @@ class JsonApi(Resource):
                 file_path = os.path.join(SPLITED_5ETOOLS_EN_PATH, file_name)
 
             if os.path.isdir(file_path):
-                files = list_json_entries(file_name)
+                files = list_json_entries(file_name, current_user.get_id())
                 return success(data=files)
             elif os.path.isfile(file_path):
                 if db_file is None:
@@ -161,12 +230,12 @@ class JsonApi(Resource):
                     'cn_content': cn_obj,
                     'json_content': json_content,
                 }])
-            dir_entries = list_json_entries(file_name)
+            dir_entries = list_json_entries(file_name, current_user.get_id())
             if dir_entries:
                 return success(data=dir_entries)
             return error(f'{file_name}不存在')
         else:
-            files = list_json_entries('')
+            files = list_json_entries('', current_user.get_id())
             return success(data=files)
         return error('参数错误')
 

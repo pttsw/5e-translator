@@ -6,7 +6,7 @@ from .base import BaseApi
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from sqlalchemy import text
 from sqlalchemy.sql import func
-from app.core.file_progress_service import clear_file_stale, mark_files_stale, refresh_progress_by_files, update_job_cache_word
+from app.core.file_progress_service import clear_file_stale, mark_files_stale, refresh_file_runtime, refresh_progress_by_files, update_job_cache_word
 
 import json
 
@@ -142,6 +142,8 @@ class ProofreadApi(Resource, BaseApi):
             # if ProofreadModel.query.filter_by(word_id = data['word_id']).filter_by(cn = data['cn']).first():
             #     return error("请勿重复提交已存在的翻译！")
 
+            created_word = False
+            created_source = False
             try:
                 if word is None:
                     word = WordsModel(
@@ -157,12 +159,14 @@ class ProofreadApi(Resource, BaseApi):
                     word.proofread = 0
                     session.add(word)
                     session.flush()
+                    created_word = True
                 word_id = word.id
                 source = SourceModel.query.filter_by(
                     word_id=word_id, file=current_file
                 ).first() if current_file else None
                 if current_file and source is None:
                     session.add(SourceModel(word_id, current_file, word.version or "0"))
+                    created_source = True
                 item = self.model(
                     word_id=word_id,
                     cn=cn,
@@ -187,17 +191,24 @@ class ProofreadApi(Resource, BaseApi):
                 .all()
             ]
             if current_file:
-                update_job_cache_word(
-                    current_file,
-                    item.word_id,
-                    uid=uid,
-                    en_str=en_str,
-                    is_key=1,
-                    is_proofread=0,
-                    cn_str=item.cn
-                )
-                clear_file_stale(current_file)
-                progress = _get_file_progress(current_file)
+                try:
+                    if created_word or created_source:
+                        progress = refresh_file_runtime(current_file)
+                    else:
+                        update_job_cache_word(
+                            current_file,
+                            item.word_id,
+                            uid=uid,
+                            en_str=en_str,
+                            is_key=1,
+                            is_proofread=0,
+                            cn_str=item.cn
+                        )
+                        clear_file_stale(current_file)
+                        progress = _get_file_progress(current_file)
+                except Exception as exc:
+                    print(f"提交校对缓存重建失败: {exc}")
+                    return error("校对已写入数据库，但预览缓存重建失败，请刷新文件缓存")
             else:
                 progress = {}
             stale_files = [file_path for file_path in related_files if file_path and file_path != current_file]
@@ -224,7 +235,122 @@ class ProofreadApi(Resource, BaseApi):
     def _update(self,words):
         if words is None:
             raise Exception("words is none")            
-        
+
+
+@api.resource('/proofread/batch')
+class BatchProofreadApi(Resource, BaseApi):
+    @login_required
+    def post(self):
+        if not current_user.is_authenticated:
+            return error('请先登录！')
+        if not request.is_json:
+            return error("The request payload is not in JSON format")
+
+        params = request.get_json()
+        current_file = params.get('current_file', '').strip('/')
+        items = params.get('items') or []
+        if not current_file:
+            return error("批量校对失败：current_file不能为空")
+        if not items:
+            return error("批量校对失败：没有可提交条目")
+        if len(items) > 1000:
+            return error("批量校对失败：单次最多提交1000条")
+
+        user_id = current_user.get_id()
+        results = []
+        related_word_ids = []
+        try:
+            for data in items:
+                cn = str(data.get('cn') or '').strip()
+                en_str = data.get('en_str')
+                uid = data.get('uid')
+                tag = data.get('tag')
+                word_id = data.get('word_id')
+                if not cn or not en_str or not uid:
+                    raise ValueError("条目缺少cn、en_str或uid")
+
+                word = WordsModel.query.get(word_id) if word_id is not None else None
+                if word is None and word_id is not None:
+                    raise ValueError(f"没有找到词条：{word_id}")
+                if word is None:
+                    word = (
+                        WordsModel.query
+                        .join(SourceModel, SourceModel.word_id == WordsModel.id)
+                        .filter(SourceModel.file == current_file)
+                        .filter(WordsModel.en == en_str)
+                        .first()
+                    )
+                if word is None:
+                    word = WordsModel(
+                        en=en_str,
+                        cn=en_str,
+                        json_file=current_file,
+                        modified_by=user_id,
+                        source="",
+                        version="0",
+                    )
+                    word.category = tag
+                    word.is_key = 0
+                    word.proofread = 0
+                    session.add(word)
+                    session.flush()
+
+                source = SourceModel.query.filter_by(
+                    word_id=word.id,
+                    file=current_file,
+                ).first()
+                if source is None:
+                    session.add(SourceModel(word.id, current_file, word.version or "0"))
+
+                proofread = ProofreadModel(
+                    word_id=word.id,
+                    cn=cn,
+                    modified_by=user_id,
+                    accepted=0,
+                )
+                session.add(proofread)
+                word.cn = cn
+                word.proofread = 0
+                word.is_key = 1
+                word.modified_by = user_id
+                related_word_ids.append(word.id)
+                results.append({
+                    'uid': uid,
+                    'en_str': en_str,
+                    'cn_str': cn,
+                    'sql_id': word.id,
+                    'is_key': 1,
+                    'is_proofread': 0,
+                })
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            print(f"批量提交校对失败: {exc}")
+            return error(f"批量校对失败：{exc}")
+
+        try:
+            refresh_file_runtime(current_file)
+        except Exception as exc:
+            print(f"批量校对缓存重建失败: {exc}")
+            return error("批量校对已写入数据库，但预览缓存重建失败，请刷新文件缓存")
+        related_files = [
+            row[0] for row in session.query(SourceModel.file)
+            .filter(SourceModel.word_id.in_(related_word_ids))
+            .distinct()
+            .all()
+        ]
+        stale_files = [
+            file_path for file_path in related_files
+            if file_path and file_path != current_file
+        ]
+        mark_files_stale(stale_files)
+        return success(message="批量校对提交成功", data={
+            'items': results,
+            'progress': _get_file_progress(current_file),
+            'stale_files': stale_files,
+        })
+
+
 @api.resource('/accepted')
 class AcceptedApi(Resource, BaseApi):
     @login_required

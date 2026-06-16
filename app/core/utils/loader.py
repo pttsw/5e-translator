@@ -14,18 +14,34 @@ from langchain_core.runnables import RunnableLambda
 from .file_work_info import FileWorkInfo
 from typing import List
 
-find_json_files = RunnableLambda(lambda root_folder: find_files(root_folder))
+
+def _find_json_files(input_value):
+    if isinstance(input_value, (tuple, list)):
+        root_folder, skip_file_name = input_value
+    else:
+        root_folder, skip_file_name = input_value, ''
+    return find_files(root_folder, skip_file_name=skip_file_name)
+
+
+find_json_files = RunnableLambda(_find_json_files)
 write_translate_cache = RunnableLambda(lambda file_work_info: write_translate_cache_func(file_work_info))
-def find_files(root_folder:str, file_extension = '.json'):
+
+
+def find_files(root_folder: str, file_extension='.json', skip_file_name=''):
     # 判断root_folder是文件还是文件夹
     if os.path.isfile(root_folder):
+        file_name = os.path.basename(root_folder)
+        if skip_file_name and skip_file_name in file_name:
+            return
         # 如果是文件则直接返回
         if root_folder.endswith(file_extension):
             yield root_folder
     else:
         for root, _, files in os.walk(root_folder):
             for file in files:
-                if file.endswith(file_extension):
+                if file.endswith(file_extension) and not (
+                    skip_file_name and skip_file_name in file
+                ):
                     yield os.path.join(root, file)
 
 def read_file(json_file):

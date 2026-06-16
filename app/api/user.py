@@ -58,7 +58,60 @@ class UserApi(Resource, BaseApi):
     
     @login_required
     def put(self):
-        return error("禁止更新")
+        data = request.get_json()
+        if not data:
+            return error(message="请求体不能为空")
+
+        user = UserModel.query.get(current_user.get_id())
+        if user is None:
+            return error(message="当前用户不存在")
+
+        has_nickname = 'nickname' in data
+        nickname = (data.get('nickname') or '').strip()
+        if has_nickname:
+            if not nickname:
+                return error(message="昵称不能为空")
+            if len(nickname) > 255:
+                return error(message="昵称不能超过 255 个字符")
+
+        current_password = data.get('current_password') or ''
+        new_password = data.get('new_password') or ''
+        confirm_password = data.get('confirm_password') or ''
+        wants_password_change = bool(
+            current_password or new_password or confirm_password
+        )
+
+        if not has_nickname and not wants_password_change:
+            return error(message="没有需要更新的内容")
+
+        if wants_password_change:
+            if not current_password:
+                return error(message="请输入当前密码")
+            if not user.check_password(current_password):
+                return error(message="当前密码错误")
+            if len(new_password) < 6:
+                return error(message="新密码至少 6 位")
+            if new_password != confirm_password:
+                return error(message="两次输入的新密码不一致")
+            if user.check_password(new_password):
+                return error(message="新密码不能与当前密码相同")
+
+        if has_nickname:
+            user.nickname = nickname
+        if wants_password_change:
+            user.set_password(new_password)
+
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception(
+                "Update profile failed for user_id=%s",
+                current_user.get_id()
+            )
+            return error(message="个人信息更新失败")
+
+        return success(message="个人信息已更新", data=user.to_dict())
     # def delete(self, id):
     #     s = NewsModel.query.get(id)
     #     if s:

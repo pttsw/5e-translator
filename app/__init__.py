@@ -9,7 +9,7 @@ if os.getenv("SKIP_APP_BOOTSTRAP", "0").lower() not in ("1", "true", "yes", "on"
     from flask import Flask
     from flask_cors import CORS
     from .api import login_manager, api_bp as api_blueprint
-    from .model import db, migrate, ensure_file_table_schema, migrate_plaintext_passwords, ensure_user_table_schema, ensure_invite_code_table_schema
+    from .model import db, migrate, ensure_file_table_schema, ensure_term_table_schema, migrate_plaintext_passwords, ensure_user_table_schema, ensure_invite_code_table_schema
 
     from config import DB_CONFIG, swagger
 
@@ -39,4 +39,5 @@ if os.getenv("SKIP_APP_BOOTSTRAP", "0").lower() not in ("1", "true", "yes", "on"
         ensure_invite_code_table_schema()
         ensure_user_table_schema()
         ensure_file_table_schema()
+        ensure_term_table_schema()
         migrate_plaintext_passwords()

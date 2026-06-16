@@ -3,6 +3,7 @@ from flask_restful import Resource, Api, request
 from .restful_utils import *
 from app.model import WordsModel, SourceModel, ProofreadModel, session
 from .base import BaseApi
+from app.core.file_progress_service import refresh_file_runtime
 import json
 from sqlalchemy import text
 
@@ -50,6 +51,102 @@ class WordsApi(Resource, BaseApi):
     def _update(self,words):
         if words is None:
             raise Exception("words is none")
+
+
+@api.resource('/words/independent-translation')
+class IndependentTranslationApi(Resource):
+    @login_required
+    def post(self):
+        if not current_user.is_authenticated:
+            return error("请先登录！")
+        if current_user.roles != 'admin':
+            return error("无权限！")
+        if not request.is_json:
+            return error("请求参数必须为JSON")
+
+        data = request.get_json()
+        current_file = str(data.get('current_file') or '').strip('/')
+        word_id = data.get('word_id')
+        en_str = str(data.get('en_str') or '')
+        cn = str(data.get('cn') or '').strip()
+        tag = data.get('tag')
+        if not current_file or not word_id or not en_str or not cn:
+            return error("新增独立翻译失败：缺少current_file、word_id、en_str或cn")
+
+        current_word = WordsModel.query.get(word_id)
+        if current_word is None:
+            return error("新增独立翻译失败：当前词条不存在")
+        if current_word.en != en_str:
+            return error("新增独立翻译失败：英文原文与当前词条不一致")
+
+        current_source = SourceModel.query.filter_by(
+            word_id=current_word.id,
+            file=current_file,
+        ).first()
+        if current_source is None:
+            return error("新增独立翻译失败：当前文件未关联此词条")
+
+        target_word = (
+            WordsModel.query
+            .filter(WordsModel.en == en_str)
+            .filter(WordsModel.cn == cn)
+            .filter(WordsModel.id != current_word.id)
+            .order_by(WordsModel.id.asc())
+            .first()
+        )
+        reused = target_word is not None
+
+        try:
+            if target_word is None:
+                target_word = WordsModel(
+                    en=en_str,
+                    cn=cn,
+                    json_file=current_file,
+                    modified_by=current_user.get_id(),
+                    source=current_word.source or "",
+                    version=current_word.version or "0",
+                )
+                target_word.category = tag if tag is not None else current_word.category
+                target_word.is_key = int(current_word.is_key or 0)
+                target_word.proofread = int(current_word.proofread or 0)
+                session.add(target_word)
+                session.flush()
+
+            target_source = SourceModel.query.filter_by(
+                word_id=target_word.id,
+                file=current_file,
+            ).first()
+            if target_source is None:
+                session.add(SourceModel(
+                    target_word.id,
+                    current_file,
+                    current_source.version or target_word.version or "0",
+                ))
+            session.delete(current_source)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            print(f"新增独立翻译失败: {exc}")
+            return error("新增独立翻译失败：数据库更新失败")
+
+        try:
+            progress = refresh_file_runtime(current_file)
+        except Exception as exc:
+            print(f"新增独立翻译缓存重建失败: {exc}")
+            return error("独立翻译已写入数据库，但预览缓存重建失败，请同步当前文件")
+
+        return success(data={
+            'reused': reused,
+            'word': {
+                'id': target_word.id,
+                'en': target_word.en,
+                'cn': target_word.cn,
+                'is_key': int(target_word.is_key or 0),
+                'proofread': int(target_word.proofread or 0),
+                'category': target_word.category,
+            },
+            'progress': progress,
+        })
 
 # @api.resource('/relations')
 # class RelationApi(Resource, BaseApi):

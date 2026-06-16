@@ -29,17 +29,19 @@ class JobProcessor(Runnable):
         Runnable (_type_): _description_
     """
 
-    def __init__(self, thread_num: int = 10, update: bool = False):
+    def __init__(self, thread_num: int = 10, update: bool = False, use_ai: bool = True):
         self.thread_num = thread_num
         self.update = update
+        self.use_ai = use_ai
         self.ok = self.__init_dictionary()
         if not self.ok:
             logger.error(f"初始化字典失败")
             return
-        self.ok = self.__init_adapter()
-        if not self.ok:
-            logger.error(f"加载LLM中间件失败")
-            return
+        if self.use_ai:
+            self.ok = self.__init_adapter()
+            if not self.ok:
+                logger.error(f"加载LLM中间件失败")
+                return
 
         self.byhand = False
         self.force = False
@@ -56,6 +58,7 @@ class JobProcessor(Runnable):
         self.force = config['metadata'].get('force', False)
         self.mode = config['metadata'].get('mode', '5et')
         self.cache = config['metadata'].get('cache', True)
+        self.use_ai = config['metadata'].get('use_ai', self.use_ai)
         if self.byhand:
             # 手动模式，串行执行
             self.thread_num = 1
@@ -192,6 +195,10 @@ class JobProcessor(Runnable):
             # 检测是否需要翻译
             if not job.need_translate:
                 return job, TranslatorStatus.SUCCESS
+            if not self.use_ai:
+                if job.sql_id is None:
+                    self._apply_non_ai_fallback(job)
+                return job, TranslatorStatus.SUCCESS
             if self.force and job.sql_id == None:
                 # force模式下，只更新有的
                 return job, TranslatorStatus.SUCCESS
@@ -277,7 +284,7 @@ class JobProcessor(Runnable):
             处理完成任务
             """
             if job is not None and job.cn_str is not None:
-                if self.update and job.need_translate:
+                if self.update and job.need_translate and self.use_ai:
                     # 写入数据库,如果手动模式，则默认就是校对过得
                     if job.sql_id is None:
                         logger.info(f"处理完成任务:{job.en_str}, 中文:{job.cn_str}")
@@ -297,6 +304,13 @@ class JobProcessor(Runnable):
             done_func=put_done_job,
         )
         return True
+
+    def _apply_non_ai_fallback(self, job: Job) -> Job:
+        cn_str, ok = self.__replace_sub_jobs(job.en_str, job.en_str, job.tag)
+        job.cn_str = cn_str if ok and isinstance(cn_str, str) else job.en_str
+        logger.info(f"AI已关闭，使用英文原文回退: {job.en_str} -> {job.cn_str}")
+        return job
+
     def __response_msg_to_data(self, msg):
         # 对回调信息进行解析
         kimi_data, ok = format_llm_msg(msg)

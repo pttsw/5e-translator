@@ -196,6 +196,8 @@ soure_json_to_full["AATM"] = f"{Parser['AA_PREFIX']}葬仪社"
 
 soure_json_to_full["avantris; crooked moon"] = "歪曲之月"
 soure_json_to_full["chaosium inc.; cthulhu by torchlight"] = "火炬光下的克苏鲁"
+soure_json_to_full["1985 games; obojima - tales from the tall grass"] = "胧忆岛：蒿草传说"
+soure_json_to_full["mcdm productions; flee, mortals!"] = "凡人 快逃！"
 
 
 soure_json_to_full["action"] = "动作"

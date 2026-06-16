@@ -13,6 +13,7 @@ class UserModel(db.Model, CRUDMixin):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(length=255), unique=True)
+    nickname = Column(String(length=255))
     password = Column(String(length=255))
     roles = Column(String(length=255))
     created_at = Column(
@@ -66,6 +67,7 @@ class UserModel(db.Model, CRUDMixin):
         data = {
             "id": self.id,
             "username": self.username,
+            "nickname": self.nickname,
             "roles":self.roles,
             "created_at": str(self.created_at),
             "modified_at": str(self.modified_at),

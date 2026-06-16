@@ -24,6 +24,7 @@ class FileModule(db.Model, CRUDMixin):
     cn_json = Column(String)
     locked = Column(TINYINT, default=0)
     stale = Column(TINYINT, default=0)
+    user_id = Column(Integer)
     modified_at = Column(
         TIMESTAMP, server_default="CURRENT_TIMESTAMP()", onupdate=datetime.datetime.now)
     modified_by = Column(Integer)
@@ -52,6 +53,7 @@ class FileModule(db.Model, CRUDMixin):
             "en_json": self.en_json,
             "cn_json": self.cn_json,
             "stale": self.stale,
+            "user_id": self.user_id,
             "modified_at": str(self.modified_at),
             "modified_by": self.modified_by,
         }
