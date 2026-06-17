@@ -1,7 +1,7 @@
 from langchain_core.runnables import Runnable
 from ..utils.file_work_info import FileWorkInfo
 from config import logger
-from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, reset_tags_index, format_llm_msg, parse_foundry_items_uuid_format
+from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, reset_tags_index, format_llm_msg, parse_foundry_items_uuid_format, get_tag_display_text
 from datetime import datetime
 from typing import Optional
 
@@ -17,6 +17,7 @@ class JobNeedTranslateSetter(Runnable):
         self.force = config['metadata'].get('force', False)
         self.force_title = config['metadata'].get('force_title', False)
         for res in input:
+            self.done_jobs = res.job_list
             for job in res.job_list:
                 if self.__need_translate_job(job):
                     job.need_translate = True
@@ -27,6 +28,8 @@ class JobNeedTranslateSetter(Runnable):
         检查是否需要翻译
         """
         # cn_str = job.cn_str if job.cn_str else ""
+        if getattr(job, "tag_sync_required", False) and job.cn_str is not None and job.sql_id is not None:
+            return not self.__can_sync_tag_only_job(job)
         # 1.已经校对过的肯定不需要翻译了
         if job.is_proofread:
             return False
@@ -74,6 +77,65 @@ class JobNeedTranslateSetter(Runnable):
         
         # print(job.en_str)
         return True
+
+    def __can_sync_tag_only_job(self, job: Job) -> bool:
+        old_tags, old_values, old_valid = parse_custom_format(
+            getattr(job, "old_en_str", "") or "", False)
+        new_tags, new_values, new_valid = parse_custom_format(job.en_str, False)
+        cn_tags, cn_values, cn_valid = parse_custom_format(job.cn_str, False)
+        if not old_valid or not new_valid or not cn_valid:
+            return False
+
+        old_cn_links = []
+        if len(cn_values) == len(old_values):
+            old_cn_links = [
+                {
+                    "old_display": get_tag_display_text(old_value, old_tag),
+                    "cn_display": get_tag_display_text(cn_value, cn_tag),
+                }
+                for old_tag, old_value, cn_tag, cn_value in zip(
+                    old_tags, old_values, cn_tags, cn_values)
+            ]
+
+        old_pairs = list(zip(old_tags, old_values))
+        checked = False
+        for new_tag, new_value in zip(new_tags, new_values):
+            if (new_tag, new_value) in old_pairs:
+                old_pairs.remove((new_tag, new_value))
+                continue
+            checked = True
+            display_text = get_tag_display_text(new_value, new_tag)
+            if any(link["old_display"] == display_text for link in old_cn_links):
+                continue
+            if display_text and display_text in job.cn_str:
+                continue
+            known_cn = self.__get_known_translation(display_text, new_tag)
+            if known_cn and known_cn in job.cn_str:
+                continue
+            logger.info(
+                f"仅标签变化条目无法安全同步，降级为LLM翻译: "
+                f"sql_id={job.sql_id}, display={display_text}, en={job.en_str}"
+            )
+            return False
+        return checked
+
+    def __get_known_translation(self, en: str, tag: str = "") -> Optional[str]:
+        if not en:
+            return None
+        en_key = en.strip().lower()
+        fallback = None
+        for job in self.done_jobs:
+            if not isinstance(job.en_str, str) or not isinstance(job.cn_str, str):
+                continue
+            if job.en_str.strip().lower() != en_key:
+                continue
+            if job.cn_str == job.en_str:
+                continue
+            if job.tag == tag:
+                return job.cn_str
+            if fallback is None:
+                fallback = job.cn_str
+        return fallback
     
     def __replace_sub_jobs(self, cn_str: str, en_str: Optional[str] = None):
         """

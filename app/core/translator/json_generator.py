@@ -10,7 +10,7 @@ from app.core.utils import Job, TranslatorStatus
 from app.core.database import DatabaseAdapter
 from .siliconflow_adapter import SiliconFlowAdapter
 from .llm_factory import LLMFactory
-from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format, split_string, process_filter_split_values, process_post_filter_split_values
+from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format, split_string, process_filter_split_values, process_post_filter_split_values, get_tag_display_text
 from typing import List, Tuple, Optional
 from app.core.bean.term import Term, to_terms
 
@@ -277,6 +277,150 @@ class JsonGenerator(Runnable):
                 cn_str = p_v
         return cn_str, True
 
+    def __sync_tag_only_cn(self, cn_str: str, old_en_str: Optional[str], new_en_str: str, tag=""):
+        """Best-effort update of existing CN when English only gained tag wrappers."""
+        if not isinstance(cn_str, str) or not isinstance(new_en_str, str):
+            return cn_str
+        old_tags, old_values, old_valid = parse_custom_format(old_en_str or "", False)
+        new_tags, new_values, new_valid = parse_custom_format(new_en_str, False)
+        if not old_valid or not new_valid:
+            return cn_str
+
+        cn_tags, cn_values, cn_valid = parse_custom_format(cn_str, False)
+        old_cn_links = []
+        if cn_valid and len(cn_values) == len(old_values):
+            old_cn_links = [
+                {
+                    "old_tag": old_tag,
+                    "old_value": old_value,
+                    "old_display": get_tag_display_text(old_value, old_tag),
+                    "cn_tag": cn_tag,
+                    "cn_value": cn_value,
+                    "cn_display": get_tag_display_text(cn_value, cn_tag),
+                }
+                for old_tag, old_value, cn_tag, cn_value in zip(
+                    old_tags, old_values, cn_tags, cn_values)
+            ]
+
+        old_pairs = list(zip(old_tags, old_values))
+        replaced_existing_tag = False
+        inserted_plain_tag = False
+        for new_tag, new_value in zip(new_tags, new_values):
+            if (new_tag, new_value) in old_pairs:
+                old_pairs.remove((new_tag, new_value))
+                continue
+            display_text = get_tag_display_text(new_value, new_tag)
+            old_cn_link = self.__find_old_cn_link(old_cn_links, display_text)
+            if old_cn_link is not None:
+                old_cn_tag = f"{{@{old_cn_link['cn_tag']} {old_cn_link['cn_value']}}}"
+                new_cn_value = self.__build_cn_tag_value(
+                    new_value, new_tag, old_cn_link["cn_display"])
+                cn_str = cn_str.replace(old_cn_tag, f"{{@{new_tag} {new_cn_value}}}", 1)
+                replaced_existing_tag = True
+                continue
+            if not display_text or display_text not in cn_str:
+                known_cn = self.__get_known_translation(display_text, new_tag)
+                if not known_cn or known_cn not in cn_str:
+                    continue
+                display_text = known_cn
+            cn_str, replaced = self.__replace_plain_outside_tags(
+                cn_str,
+                display_text,
+                f"{{@{new_tag} {self.__build_cn_tag_value(new_value, new_tag, display_text)}}}",
+            )
+            if not replaced:
+                continue
+            inserted_plain_tag = True
+
+        if replaced_existing_tag and not inserted_plain_tag:
+            return cn_str
+        synced, ok = self.__replace_sub_jobs(cn_str, new_en_str, tag=tag)
+        return synced if ok else cn_str
+
+    def __find_old_cn_link(self, old_cn_links: List[dict], display_text: str):
+        for link in old_cn_links:
+            if link["old_display"] == display_text:
+                return link
+        return None
+
+    def __get_known_translation(self, en: str, tag: str = "") -> Optional[str]:
+        if not en:
+            return None
+        en_key = en.strip().lower()
+        fallback = None
+        for job in self.done_jobs:
+            if not isinstance(job.en_str, str) or not isinstance(job.cn_str, str):
+                continue
+            if job.en_str.strip().lower() != en_key:
+                continue
+            if job.cn_str == job.en_str:
+                continue
+            if job.tag == tag:
+                return job.cn_str
+            if fallback is None:
+                fallback = job.cn_str
+        if self.dictionary is not None:
+            cn, ok = self.dictionary.get(en, tag=tag)
+            if ok and cn is not None and cn != en:
+                return cn
+        return fallback
+
+    def __build_cn_tag_value(self, new_value: str, new_tag: str, cn_display: str):
+        parts = new_value.split("|")
+        if not parts:
+            return new_value
+        if new_tag in ("adventure", "area", "book", "filter"):
+            display_index = 0
+        elif len(parts) >= 3 and parts[-1] != "":
+            display_index = len(parts) - 1
+        else:
+            display_index = 0
+        parts[display_index] = cn_display
+        return "|".join(parts)
+
+    def __format_tag(self, tag: str, value: str):
+        return f"{{@{tag}}}" if value == "" else f"{{@{tag} {value}}}"
+
+    def __align_cn_tags_to_en_by_position(self, cn_str: str, en_str: str):
+        en_tags, en_values, en_valid = parse_custom_format(en_str, False)
+        cn_tags, cn_values, cn_valid = parse_custom_format(cn_str, False)
+        if (
+            not en_valid
+            or not cn_valid
+            or len(en_values) == 0
+            or len(en_values) != len(cn_values)
+        ):
+            return cn_str, False
+
+        changed = False
+        for en_tag, en_value, cn_tag, cn_value in zip(en_tags, en_values, cn_tags, cn_values):
+            cn_display = get_tag_display_text(cn_value, cn_tag)
+            aligned_value = self.__build_cn_tag_value(en_value, en_tag, cn_display)
+            old_tag = self.__format_tag(cn_tag, cn_value)
+            new_tag = self.__format_tag(en_tag, aligned_value)
+            if old_tag == new_tag:
+                continue
+            cn_str = cn_str.replace(old_tag, new_tag, 1)
+            changed = True
+        return cn_str, changed
+
+    def __replace_plain_outside_tags(self, text: str, old: str, new: str):
+        if not old:
+            return text, False
+        index = 0
+        while index < len(text):
+            tag_index = text.find("{@", index)
+            match_index = text.find(old, index)
+            if match_index == -1:
+                return text, False
+            if tag_index == -1 or match_index < tag_index:
+                return text[:match_index] + new + text[match_index + len(old):], True
+            end_index = text.find("}", tag_index + 2)
+            if end_index == -1:
+                return text, False
+            index = end_index + 1
+        return text, False
+
     def write_2_json(self, json_path: str, obj: object):
         """
         将处理后的作业信息写入JSON文件。
@@ -333,6 +477,39 @@ class JsonGenerator(Runnable):
                 for job_id in matches:
                     for j in self.done_jobs:
                         if j.uid == job_id and j.cn_str is not None:
+                            if getattr(j, "tag_sync_required", False):
+                                j.cn_str = self.__sync_tag_only_cn(
+                                    j.cn_str,
+                                    getattr(j, "old_en_str", None),
+                                    j.en_str,
+                                    tag=j.tag,
+                                )
+                                if j.sql_id is not None and self.dictionary is not None:
+                                    self.dictionary.update(
+                                        j.sql_id,
+                                        j.en_str,
+                                        j.cn_str,
+                                        proofread=bool(j.is_proofread),
+                                        tag=j.tag,
+                                    )
+                                    j.tag_sync_required = False
+                            else:
+                                aligned_cn, aligned = self.__align_cn_tags_to_en_by_position(
+                                    j.cn_str,
+                                    j.en_str,
+                                )
+                                if aligned:
+                                    j.cn_str = aligned_cn
+                                    if j.sql_id is not None and self.dictionary is not None:
+                                        self.dictionary.update(
+                                            j.sql_id,
+                                            j.en_str,
+                                            j.cn_str,
+                                            proofread=bool(j.is_proofread),
+                                            tag=j.tag,
+                                        )
+                                    obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)
+                                    break
                             j.cn_str, ok = self.__replace_sub_jobs(
                                 j.cn_str, j.en_str, tag=j.tag)
                             obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)

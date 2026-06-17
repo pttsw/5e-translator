@@ -221,6 +221,66 @@ def only_has_format(text):
     return not bool(re.search(r'[a-zA-Z]', text))
 
 
+def get_tag_display_text(value: str, tag: str = "") -> str:
+    """Return the visible 5etools tag text for a tag value."""
+    if not isinstance(value, str):
+        return ""
+    parts = value.split("|")
+    if tag in ("adventure", "area", "book", "filter"):
+        return parts[0] if parts else value
+    if len(parts) >= 3 and parts[-1] != "":
+        return parts[-1]
+    return parts[0] if parts else value
+
+
+def strip_5etools_tags(text: str) -> str:
+    """Replace 5etools {@tag ...} markers with their visible text."""
+    if not isinstance(text, str) or "{@" not in text:
+        return text
+    result = []
+    index = 0
+    while index < len(text):
+        start_index = text.find("{@", index)
+        if start_index == -1:
+            result.append(text[index:])
+            break
+        result.append(text[index:start_index])
+        start_tag = start_index + 2
+        end_tag = text.find(" ", start_tag)
+        end_brace = text.find("}", start_tag)
+        if end_brace == -1:
+            result.append(text[start_index:])
+            break
+        if end_tag == -1 or end_tag > end_brace:
+            index = end_brace + 1
+            continue
+
+        brace_count = 1
+        current_index = end_tag + 1
+        while current_index < len(text):
+            if text[current_index] == "{":
+                brace_count += 1
+            elif text[current_index] == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    break
+            current_index += 1
+        if brace_count != 0:
+            result.append(text[start_index:])
+            break
+
+        tag = text[start_tag:end_tag]
+        value = text[end_tag + 1:current_index]
+        result.append(strip_5etools_tags(get_tag_display_text(value, tag)))
+        index = current_index + 1
+    return "".join(result)
+
+
+def normalize_tagless_text(text: str) -> str:
+    """Normalize text for detecting entries whose only source change is tags."""
+    return re.sub(r"\s+", " ", strip_5etools_tags(text or "")).strip()
+
+
 def split_string(text):
     result = []
     current_part = ""

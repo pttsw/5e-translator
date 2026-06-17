@@ -4,6 +4,7 @@ import threading
 from typing import Dict, List, Optional
 
 from config import logger
+from app.core.utils import normalize_tagless_text
 
 
 class MemoryDBDictionary:
@@ -200,19 +201,51 @@ class MemoryDBDictionary:
                 res[(key, tag)] = bean
         return res
 
+    def get_tag_only_update_match(self, en: str, tag: str = ""):
+        target_tag = tag if tag not in ("", None) else None
+        target_text = normalize_tagless_text(en)
+        if target_text == "":
+            return None
+        candidates = []
+        seen_ids = set()
+        for cached_en, beans in self.dictionary.items():
+            if normalize_tagless_text(cached_en) != target_text:
+                continue
+            for bean in beans:
+                sql_id = bean.get("sql_id")
+                if sql_id in seen_ids:
+                    continue
+                if bean.get("en") == en and bean.get("category") == target_tag:
+                    continue
+                seen_ids.add(sql_id)
+                candidate = dict(bean)
+                candidate["old_en"] = bean.get("en") or cached_en
+                candidate["old_category"] = bean.get("category")
+                candidates.append(candidate)
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
     def put(self, key: str, value: str, rel_f: str, proofread=False, tag=""):
         self._insert_record(key, value, rel_f, proofread=proofread, tag=tag)
         return True
 
-    def update(self, sql_id: int, cn: str, proofread: bool = False, tag=""):
+    def update(self, sql_id: int, en_or_cn: str, cn=None, proofread: bool = False, tag=""):
         record = self.store_by_id.get(sql_id)
         if record is None:
             return False
+        old_en = record["en"]
+        if cn is None:
+            cn = en_or_cn
+        else:
+            record["en"] = en_or_cn
         record["cn"] = cn
         if proofread:
             record["proofread"] = 1
         if tag not in ("", None):
             record["category"] = tag
+        if old_en != record["en"]:
+            self._refresh_cache_for_en(old_en)
         self._refresh_cache_for_en(record["en"])
         return True
 

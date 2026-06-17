@@ -2,7 +2,7 @@
 import unittest
 from app.core.utils.utils import only_has_format
 import pytest
-from app.core.utils.utils import parse_foundry_items_uuid_format
+from app.core.utils.utils import normalize_tagless_text, parse_foundry_items_uuid_format
 
 class TestOnlyHasFormat(unittest.TestCase):
     def test_only_format_no_english(self):
@@ -78,6 +78,24 @@ def test_parse_foundry_items_uuid_format(input_text, expected_tags, expected_val
     assert tags == expected_tags
     assert values == expected_values
     assert is_valid == expected_valid
+
+
+@pytest.mark.parametrize("old_text, new_text", [
+    (
+        "Auril's decision to live among mortals is explained in {@adventure appendix C|IDRotF|21}.",
+        "{@filter Auril's|bestiary|source=IDRotF|search=Auril} decision to live among mortals is explained in {@adventure appendix C|IDRotF|21}.",
+    ),
+    (
+        "Rules for extreme cold appear in the {@book Dungeon Master's Guide|DMG} but are repeated here.",
+        "Rules for {@hazard extreme cold} appear in the {@book Dungeon Master's Guide|DMG|5|Wilderness Survival} but are repeated here.",
+    ),
+    (
+        "Ythryn",
+        "{@adventure Ythryn|IDRotF|17}",
+    ),
+])
+def test_normalize_tagless_text_handles_5etools_link_metadata(old_text, new_text):
+    assert normalize_tagless_text(old_text) == normalize_tagless_text(new_text)
     
 if __name__ == '__main__':
     unittest.main()

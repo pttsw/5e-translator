@@ -8,6 +8,7 @@ from .memory_db_dictionary import MemoryDBDictionary
 from .mysql_db import MySQLDatabase
 from config import DB_CONFIG, logger
 from app.core.utils import find_reference
+from app.core.utils import normalize_tagless_text
 from app.core.bean.term import Term, to_terms
 
 
@@ -329,6 +330,33 @@ class DBDictionary:
             self.__release_db(db_index)
         return res_beans
 
+    def get_tag_only_update_match(self, en: str, tag: str = ""):
+        """Find a unique cached record whose visible text matches despite tag changes."""
+        target_tag = tag if tag not in ("", None) else None
+        target_text = normalize_tagless_text(en)
+        if target_text == "":
+            return None
+
+        candidates = []
+        seen_ids = set()
+        for cached_en, beans in self.dictionary.items():
+            if normalize_tagless_text(cached_en) != target_text:
+                continue
+            for bean in beans:
+                sql_id = bean.get("sql_id")
+                if sql_id in seen_ids:
+                    continue
+                if bean.get("en") == en and bean.get("category") == target_tag:
+                    continue
+                seen_ids.add(sql_id)
+                candidate = dict(bean)
+                candidate["old_en"] = bean.get("en") or cached_en
+                candidate["old_category"] = bean.get("category")
+                candidates.append(candidate)
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
     def put2(self, key: str, value, rel_f: str) -> (bool):
         self.lock.acquire()
         # TODO 这里会导致json_file字段无法更新，但是为了快，暂时先这样
@@ -521,7 +549,7 @@ class DBDictionary:
         finally:
             self.__release_db(db_index)
         
-    def update(self, sql_id:int, cn:str, proofread=True, tag="") -> (bool):
+    def update(self, sql_id:int, en_or_cn:str, cn=None, proofread=True, tag="") -> (bool):
         start_time = time.time()
         db_index = self.__get_db_index()
         db = self.db_list[db_index]
@@ -530,6 +558,12 @@ class DBDictionary:
         else:
             p = 0
             
+        en = None
+        if cn is None:
+            cn = en_or_cn
+        else:
+            en = en_or_cn
+
         res = db.select('words', columns=['id', 'json_file', 'version', 'source'], condition={
                         'id': sql_id})
         if res == None:
@@ -540,8 +574,13 @@ class DBDictionary:
                     sql_id+"\n" + cn)
         #     db.insert('words', {'en': key, 'cn': value, 'json_file': rel_f, 'source': self.source, 'version': self.version, 'modified_by':1})
         for r in res:
-            db.update('words', { 'cn': cn, 'source': self.source, 'proofread': p,
-                        'version': self.version, 'modified_by': 1 ,'modified_at': datetime.datetime.now()}, {'id': r['id']})
+            update_data = {'cn': cn, 'source': self.source, 'proofread': p,
+                        'version': self.version, 'modified_by': 1 ,'modified_at': datetime.datetime.now()}
+            if en is not None:
+                update_data['en'] = en
+            if tag not in ("", None):
+                update_data['category'] = tag
+            db.update('words', update_data, {'id': r['id']})
         # db.execute_non_query("""insert into source (file, word_id, version) 
         #                           SELECT %s, id, %s FROM words 
         #                           WHERE BINARY en = %s AND cn = %s 

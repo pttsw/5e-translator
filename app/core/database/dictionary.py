@@ -52,7 +52,7 @@ class DatabaseAdapter:
             ok = self.redis_db.put(en, cn, tag=tag)
             if not ok:
                 return ok
-        return self.db_d.update(sql_id, cn, proofread, tag=tag)
+        return self.db_d.update(sql_id, en, cn, proofread=proofread, tag=tag)
     # def update(self, key: str, value: str, old_value, rel_f:str, proofread=False) -> (bool):
     #     return False
         # ok = True

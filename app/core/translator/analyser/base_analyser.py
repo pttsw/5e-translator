@@ -76,6 +76,16 @@ class BaseAnalyser:
         )
         for j in pending_jobs:
             db_res = batch_res_map.get((j.en_str, j.tag))
+            if not db_res:
+                db_res = self.dictionary.get_tag_only_update_match(j.en_str, j.tag)
+                if db_res:
+                    j.tag_sync_required = True
+                    j.old_en_str = db_res.get('old_en')
+                    j.old_tag = db_res.get('old_category')
+                    logger.info(
+                        f"识别到仅标签变化的条目: sql_id={db_res['sql_id']}, "
+                        f"old_tag={j.old_tag}, new_tag={j.tag}"
+                    )
             if db_res:
                 j.cn_str = db_res['cn']
                 j.sql_id = db_res['sql_id']

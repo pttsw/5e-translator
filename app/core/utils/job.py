@@ -3,7 +3,7 @@ from config import *
 from typing import Tuple
 
 class Job:
-    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, is_key=False, sql_id=None, modified_at=0, source="", key_path="", entry_path="", batch_id="", batch_seq=-1) -> (None):
+    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, is_key=False, sql_id=None, modified_at=0, source="", key_path="", entry_path="", batch_id="", batch_seq=-1, tag_sync_required=False, old_en_str=None, old_tag=None) -> (None):
         self.uid = str(uid)
         self.en_str = en_str # 英文原文
         self.cn_str = cn_str # 中文译文
@@ -27,6 +27,9 @@ class Job:
         self.entry_path = entry_path
         self.batch_id = batch_id
         self.batch_seq = batch_seq
+        self.tag_sync_required = tag_sync_required
+        self.old_en_str = old_en_str
+        self.old_tag = old_tag
         
     def __str__(self):
         return f'en_str:{self.en_str} \ncn_str:{self.cn_str}'
