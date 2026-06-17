@@ -42,6 +42,7 @@ class BatchJobProcessor(JobProcessor):
             self.done_jobs = []
             self.factory.reset()
             self._JobProcessor__load_temple_terms(res.job_list, res.out_path)  # type: ignore[attr-defined]
+            res.batch_pending_jobs = self._dedupe_translation_jobs(res.job_list)
             units = self.chunker.build_units(res)
             self.factory.set_progress_context(label=f"File {res.out_path}")
             if not units:
@@ -65,6 +66,7 @@ class BatchJobProcessor(JobProcessor):
                 if fallback_jobs:
                     self._dump_failed_jobs(res.out_path, fallback_jobs)
                     continue
+            self._propagate_translation_aliases()
             yield res
 
     def _build_batch_work_func(self):
@@ -81,6 +83,9 @@ class BatchJobProcessor(JobProcessor):
             f"批次开始: id={batch_unit.batch_id}, depth={batch_unit.retry_depth}, "
             f"jobs={len(batch_unit.jobs)}, context_chars={len(batch_unit.context_text)}"
         )
+        if not self._ensure_adapter():
+            batch_unit.failure_reason = "adapter_init_failed"
+            return None, TranslatorStatus.FAILURE
         msg, status = self.adapter.sendText(
             request,
             PROMOT_BATCH,
@@ -121,16 +126,8 @@ class BatchJobProcessor(JobProcessor):
                 logger.error("处理完成批次错误: None")
                 return
             for job in batch_unit.jobs:
-                if job.cn_str is None:
-                    continue
-                if self.update and job.need_translate:
-                    if job.sql_id is None:
-                        ok = self.dictionary.put(job.en_str, job.cn_str, job.rel_path, proofread=self.byhand, tag=job.tag)
-                        if not ok:
-                            logger.error(f"写入字典失败:{job}")
-                    else:
-                        self.dictionary.update(job.sql_id, job.en_str, job.cn_str, proofread=self.byhand, tag=job.tag)
-                self.done_jobs.append(job)
+                if not self._store_completed_job(job):
+                    logger.error(f"处理完成批次Job错误: {job}")
         return done_func
 
     def _build_batch_request(self, batch_unit: BatchUnit) -> str:

@@ -24,27 +24,27 @@ class DBDictionary:
                     DBDictionary._instance = object.__new__(cls)
         return DBDictionary._instance
     
-    def __init__(self, source="", version='2.0.0', d_dict={}, conn_num=30
+    def __init__(self, source="", version='2.0.0', d_dict={}, conn_num=None
                  ) -> None:
+        conn_num = conn_num or int(os.getenv("TRANSLATOR_DB_CONN_NUM", "1"))
+        if getattr(self, "_initialized", False):
+            self.source = source or self.source
+            self.version = version or self.version
+            self.__ensure_connection_count(conn_num)
+            return
+
+        self._initialized = True
+        self.source = source
+        self.version = version
+        self.lock = threading.Lock()
         self.db_list: list[MySQLDatabase] = []
         self.available_list = []
         self.ok = True
-        for i in range(conn_num):
-            self.db_list.append(MySQLDatabase(host=DB_CONFIG['HOST'],
-                                              port=DB_CONFIG['PORT'],
-                                              user=DB_CONFIG['USER'],
-                                              password=DB_CONFIG['PASSWORD'],
-                                              database=DB_CONFIG['DATABASE']))
-            self.available_list.append(True)
-            if not self.db_list[i].ok:
-                self.ok = False
-        self.source = source
-        self.version = version
+        self.__ensure_connection_count(conn_num)
         if not self.ok:
             logger.info("初始化数据库字典出错")
             return
 
-        self.lock = threading.Lock()
         # self.dictionary = d_dict
         self.dictionary = {}
         self.lower_dictionary = {}
@@ -54,8 +54,21 @@ class DBDictionary:
         self.close()
 
     def close(self):
-        for db in self.db_list:
+        for db in getattr(self, "db_list", []):
             db.close()
+
+    def __ensure_connection_count(self, conn_num: int):
+        conn_num = max(int(conn_num or 1), 1)
+        while len(self.db_list) < conn_num:
+            db = MySQLDatabase(host=DB_CONFIG['HOST'],
+                               port=DB_CONFIG['PORT'],
+                               user=DB_CONFIG['USER'],
+                               password=DB_CONFIG['PASSWORD'],
+                               database=DB_CONFIG['DATABASE'])
+            self.db_list.append(db)
+            self.available_list.append(True)
+            if not db.ok:
+                self.ok = False
 
     @staticmethod
     def _should_skip_term_en(en: str) -> bool:
@@ -104,6 +117,221 @@ class DBDictionary:
             if cond:
                 priority += 2 ** (2 - i)
         return priority
+
+    @staticmethod
+    def __job_usage_context(job):
+        if job is None:
+            return {
+                "uid": "",
+                "key_path": "",
+                "context_key": "",
+                "context_label": "",
+            }
+        return {
+            "uid": getattr(job, "uid", "") or "",
+            "key_path": getattr(job, "key_path", "") or "",
+            "context_key": getattr(job, "context_key", "") or "",
+            "context_label": getattr(job, "context_label", "") or "",
+        }
+
+    def __row_to_bean(self, row: dict):
+        return {
+            'en': row['en'],
+            'cn': row['cn'],
+            'category': row['category'],
+            'proofread': row['proofread'],
+            'is_key': row['is_key'],
+            'sql_id': row['id'],
+            'modified_at': row['modified_at'],
+        }
+
+    def __get_usage_match(self, db, k: str, tag: str, rel_f: str, job=None):
+        if not rel_f or job is None:
+            return None
+        context = self.__job_usage_context(job)
+        target_tag = tag if tag not in ("", None) else None
+        base_select = (
+            "SELECT w.id, w.en, w.cn, w.json_file, w.proofread, w.category, "
+            "w.modified_at, w.is_key "
+            "FROM word_usage wu JOIN words w ON w.id = wu.word_id "
+            "WHERE wu.file = %s AND w.en = %s AND "
+        )
+        lookups = []
+        if context["uid"]:
+            lookups.append(("wu.uid = %s", context["uid"]))
+        if context["key_path"]:
+            lookups.append(("wu.key_path = %s", context["key_path"]))
+        if context["context_key"]:
+            lookups.append(("wu.context_key = %s", context["context_key"]))
+        for usage_sql, usage_value in lookups:
+            rows = db.execute_query(
+                base_select + usage_sql + " "
+                "ORDER BY w.proofread DESC, w.modified_at DESC LIMIT 1",
+                (rel_f, k, usage_value),
+            )
+            if rows:
+                if usage_sql == "wu.uid = %s" and rows[0]['category'] != target_tag:
+                    logger.info(
+                        "word_usage按uid命中但category不同，优先使用已绑定记录: "
+                        f"file={rel_f}, uid={usage_value}, word_id={rows[0]['id']}, "
+                        f"word_category={rows[0]['category']}, job_category={target_tag}"
+                    )
+                    return self.__row_to_bean(rows[0])
+                if rows[0]['category'] != target_tag:
+                    continue
+                return self.__row_to_bean(rows[0])
+        return None
+
+    def __put_word_usage(self, db, word_id: int, rel_f: str, job=None):
+        if not word_id or not rel_f:
+            return True
+        context = self.__job_usage_context(job)
+        uid = context["uid"] or f"legacy:{word_id}"
+        return db.execute_non_query(
+            """
+            INSERT INTO word_usage
+                (word_id, file, uid, key_path, context_key, context_label, version)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                word_id = VALUES(word_id),
+                key_path = VALUES(key_path),
+                context_key = VALUES(context_key),
+                context_label = VALUES(context_label),
+                version = VALUES(version)
+            """,
+            (
+                word_id,
+                rel_f,
+                uid,
+                context["key_path"],
+                context["context_key"],
+                context["context_label"],
+                self.version,
+            ),
+        )
+
+    def __get_usage_matches_by_uid(self, db, keys: list, tags: list, rel_f: str, contexts: list):
+        uid_requests = {}
+        for index, (k, t) in enumerate(zip(keys, tags)):
+            if index >= len(contexts):
+                continue
+            job_context = contexts[index]
+            uid = getattr(job_context, "uid", "") or ""
+            if not uid:
+                continue
+            uid_requests[uid] = (k, t, job_context)
+        if not uid_requests:
+            return {}
+
+        result = {}
+        uids = list(uid_requests.keys())
+        chunk_size = 500
+        for start in range(0, len(uids), chunk_size):
+            chunk = uids[start:start + chunk_size]
+            placeholders = ','.join(['%s'] * len(chunk))
+            rows = db.execute_query(
+                "SELECT wu.uid, w.id, w.en, w.cn, w.json_file, w.proofread, "
+                "w.category, w.modified_at, w.is_key "
+                "FROM word_usage wu JOIN words w ON w.id = wu.word_id "
+                f"WHERE wu.file = %s AND wu.uid IN ({placeholders})",
+                (rel_f, *chunk),
+            ) or []
+            for row in rows:
+                uid = row.get('uid') or ""
+                request = uid_requests.get(uid)
+                if request is None:
+                    continue
+                k, t, _job_context = request
+                target_tag = t if t not in ("", None) else None
+                if row['en'] != k:
+                    continue
+                if row['category'] != target_tag:
+                    logger.debug(
+                        "word_usage按uid命中但category不同，优先使用已绑定记录: "
+                        f"file={rel_f}, uid={uid}, word_id={row['id']}, "
+                        f"word_category={row['category']}, job_category={target_tag}"
+                    )
+                result[uid] = self.__row_to_bean(row)
+        return result
+
+    def __put_word_usages_if_needed(self, db, usage_items: list):
+        desired = {}
+        for word_id, rel_f, job_context in usage_items:
+            if not word_id or not rel_f:
+                continue
+            context = self.__job_usage_context(job_context)
+            uid = context["uid"] or f"legacy:{word_id}"
+            desired[(rel_f, uid)] = {
+                "word_id": word_id,
+                "file": rel_f,
+                "uid": uid,
+                "key_path": context["key_path"],
+                "context_key": context["context_key"],
+                "context_label": context["context_label"],
+            }
+        if not desired:
+            return True
+
+        existing = {}
+        files_to_uids = {}
+        for file_name, uid in desired.keys():
+            files_to_uids.setdefault(file_name, []).append(uid)
+        chunk_size = 500
+        for file_name, uids in files_to_uids.items():
+            for start in range(0, len(uids), chunk_size):
+                chunk = uids[start:start + chunk_size]
+                placeholders = ','.join(['%s'] * len(chunk))
+                rows = db.execute_query(
+                    "SELECT file, uid, word_id, key_path, context_key, context_label "
+                    "FROM word_usage "
+                    f"WHERE file = %s AND uid IN ({placeholders})",
+                    (file_name, *chunk),
+                ) or []
+                for row in rows:
+                    existing[(row['file'], row['uid'])] = row
+
+        pending = []
+        for key, item in desired.items():
+            current = existing.get(key)
+            if current and (
+                int(current.get('word_id') or 0) == int(item["word_id"])
+                and (current.get('key_path') or "") == item["key_path"]
+                and (current.get('context_key') or "") == item["context_key"]
+                and (current.get('context_label') or "") == item["context_label"]
+            ):
+                continue
+            pending.append(item)
+        if not pending:
+            return True
+
+        ok = True
+        for start in range(0, len(pending), chunk_size):
+            chunk = pending[start:start + chunk_size]
+            values_sql = ','.join(['(%s, %s, %s, %s, %s, %s, %s)'] * len(chunk))
+            params = []
+            for item in chunk:
+                params.extend([
+                    item["word_id"],
+                    item["file"],
+                    item["uid"],
+                    item["key_path"],
+                    item["context_key"],
+                    item["context_label"],
+                    self.version,
+                ])
+            ok = db.execute_non_query(
+                "INSERT INTO word_usage "
+                "(word_id, file, uid, key_path, context_key, context_label, version) "
+                f"VALUES {values_sql} "
+                "ON DUPLICATE KEY UPDATE "
+                "word_id = VALUES(word_id), "
+                "key_path = VALUES(key_path), "
+                "context_key = VALUES(context_key), "
+                "context_label = VALUES(context_label), "
+                "version = VALUES(version)",
+                tuple(params),
+            ) and ok
+        return ok
     
     def update_by_hand(self, k: str, v: str, tag=""):
         """手动更新数据库
@@ -160,7 +388,7 @@ class DBDictionary:
             db.update('words', {'cn': input_str, 'proofread': 1,'modified_at': datetime.datetime.now()}, {'id': selected_id})
         self.__release_db(db_index)
     
-    def get(self, k: str, rel_f="", load_from_sql=False, ignore_case=False, tag="", correct_tag_from_db=False):
+    def get(self, k: str, rel_f="", load_from_sql=False, ignore_case=False, tag="", correct_tag_from_db=False, job_context=None):
         """从数据库读取翻译
 
         Args:
@@ -175,9 +403,18 @@ class DBDictionary:
             bool: 若翻译成功，则返回True， 否则返回False
         """
         v_bean = None # 翻译结果   
+        if rel_f and job_context is not None and load_from_sql:
+            db_index = self.__get_db_index()
+            db = self.db_list[db_index]
+            try:
+                v_bean = self.__get_usage_match(db, k, tag, rel_f, job_context)
+            finally:
+                self.__release_db(db_index)
         redis_bean = self.__get_redis(k, tag, ignore_case, correct_tag_from_db)
-        if redis_bean != None:
+        if v_bean is None and redis_bean != None:
             v_bean = redis_bean
+            if rel_f != "" and job_context is not None:
+                self.__put_usage_by_word_id(v_bean['sql_id'], rel_f, job_context)
         # elif ignore_case:
         #     # tempd = list(map(lambda dk: {dk.lower():self.dictionary[dk]},self.dictionary.keys()))
         #     matched = False # 是否匹配到大小写不一致，且tag不匹配的值。
@@ -206,12 +443,12 @@ class DBDictionary:
                     if correct_tag_from_db:
                         redis_bean = self.__get_redis(k, tag, ignore_case, False)
                         if redis_bean == None or redis_bean['category'] != v_bean['category']:
-                            self.__put_source_by_word_id(v_bean['sql_id'], rel_f)
-                            logger.info(f"插入source表成功，word_id: {v_bean['sql_id']}, en: {k}, cn: {v_bean['cn']}")
+                            self.__put_usage_by_word_id(v_bean['sql_id'], rel_f, job_context)
+                            logger.info(f"插入word_usage表成功，word_id: {v_bean['sql_id']}, en: {k}, cn: {v_bean['cn']}")
                     else:
                         # 尝试插入source表
-                        self.__put_source_by_word_id(v_bean['sql_id'], rel_f)
-                        logger.info(f"插入source表成功，word_id: {v_bean['sql_id']}, en: {k}, cn: {v_bean['cn']}")
+                        self.__put_usage_by_word_id(v_bean['sql_id'], rel_f, job_context)
+                        logger.info(f"插入word_usage表成功，word_id: {v_bean['sql_id']}, en: {k}, cn: {v_bean['cn']}")
  
                 self.__put_redis(k, v_bean['cn'], v_bean['category'], v_bean['proofread'], v_bean['is_key'], v_bean['sql_id'], v_bean['modified_at'])
         # self.__release_db(db_index)
@@ -264,7 +501,7 @@ class DBDictionary:
             }
         return v_bean
     
-    def get_bunch(self, keys: list, tags: list, rel_f:str, ignore_case: bool = False, correct_tag_from_db: bool = False) -> (dict):
+    def get_bunch(self, keys: list, tags: list, rel_f:str, ignore_case: bool = False, correct_tag_from_db: bool = False, job_contexts=None) -> (dict):
         """批量获取翻译
 
         Args:
@@ -281,16 +518,53 @@ class DBDictionary:
         query_keys = []
         seen_query_keys = set()
         query_beans = []
-        for k, t in zip(keys, tags):
+        cached_usage_items = []
+        contexts = list(job_contexts or [])
+        if contexts and rel_f:
+            db_index = self.__get_db_index()
+            db = self.db_list[db_index]
+            try:
+                usage_matches = self.__get_usage_matches_by_uid(db, keys, tags, rel_f, contexts)
+                for k, t, job_context in zip(keys, tags, contexts):
+                    uid = getattr(job_context, "uid", "") or ""
+                    usage_bean = usage_matches.get(uid) if uid else self.__get_usage_match(db, k, t, rel_f, job_context)
+                    if usage_bean is not None:
+                        if uid:
+                            res_beans[(k, t, uid)] = usage_bean
+                        else:
+                            res_beans[(k, t)] = usage_bean
+                        self.__put_redis(k, usage_bean['cn'], usage_bean['category'], usage_bean['proofread'], usage_bean['is_key'], usage_bean['sql_id'], usage_bean['modified_at'])
+            finally:
+                self.__release_db(db_index)
+        for index, (k, t) in enumerate(zip(keys, tags)):
+            uid = getattr(contexts[index], "uid", "") if index < len(contexts) else ""
+            if (k, t) in res_beans or (uid and (k, t, uid) in res_beans):
+                continue
             redis_bean = self.__get_redis(k, t, ignore_case, correct_tag_from_db)
             if redis_bean != None:
-                res_beans[(k, t)] = redis_bean
+                if uid:
+                    res_beans[(k, t, uid)] = redis_bean
+                else:
+                    res_beans[(k, t)] = redis_bean
+                if rel_f and index < len(contexts):
+                    job_context = contexts[index] if index < len(contexts) else None
+                    cached_usage_items.append((redis_bean['sql_id'], rel_f, job_context))
             else:
-                query_requests.append((k, t))
+                job_context = contexts[index] if index < len(contexts) else None
+                query_requests.append((k, t, job_context))
                 if k not in seen_query_keys:
                     query_keys.append(k)
                     seen_query_keys.add(k)
         if len(query_keys) == 0:
+            if cached_usage_items:
+                db_index = self.__get_db_index()
+                db = self.db_list[db_index]
+                try:
+                    ok = self.__put_word_usages_if_needed(db, cached_usage_items)
+                    if not ok:
+                        logger.error(f"批量回填word_usage失败，file: {rel_f}")
+                finally:
+                    self.__release_db(db_index)
             return res_beans
         db_index = self.__get_db_index()
         db = self.db_list[db_index]
@@ -302,13 +576,42 @@ class DBDictionary:
             res = db.execute_query(query_sql, params)
             if res is None:
                 return res_beans
+            if ignore_case:
+                returned_lower_keys = {
+                    row['en'].lower()
+                    for row in res
+                    if isinstance(row.get('en'), str)
+                }
+                missing_lower_keys = []
+                seen_lower_keys = set()
+                for query_k in query_keys:
+                    lower_key = query_k.lower()
+                    if lower_key in returned_lower_keys or lower_key in seen_lower_keys:
+                        continue
+                    missing_lower_keys.append(lower_key)
+                    seen_lower_keys.add(lower_key)
+                if missing_lower_keys:
+                    lower_placeholders = ','.join(['%s'] * len(missing_lower_keys))
+                    lower_query_sql = (
+                        "select id, en, cn, json_file, proofread, category, modified_at, is_key "
+                        f"from words where LOWER(en) in ({lower_placeholders}) order by version desc"
+                    )
+                    lower_res = db.execute_query(lower_query_sql, tuple(missing_lower_keys))
+                    if lower_res:
+                        seen_ids = {row['id'] for row in res}
+                        res.extend(row for row in lower_res if row['id'] not in seen_ids)
             logger.debug(f"从数据库中查询到结果，keys数量: {len(query_keys)}, res数量: {len(res)}")
             grouped_res = {}
+            grouped_lower_res = {}
             for row in res:
                 grouped_res.setdefault(row['en'], []).append(row)
+                if ignore_case and isinstance(row.get('en'), str):
+                    grouped_lower_res.setdefault(row['en'].lower(), []).append(row)
 
-            for query_k, query_t in query_requests:
+            for query_k, query_t, job_context in query_requests:
                 res_k = grouped_res.get(query_k, [])
+                if len(res_k) == 0 and ignore_case:
+                    res_k = grouped_lower_res.get(query_k.lower(), [])
                 if len(res_k) == 0:
                     logger.info(f"数据库中不包含此项，en: {query_k}, tag: {query_t}")
                     continue
@@ -316,16 +619,17 @@ class DBDictionary:
                 if v_bean == None:
                     continue
                 res_beans[(query_k, query_t)] = v_bean
-                query_beans.append(v_bean)
+                query_beans.append((v_bean, job_context))
                 self.__put_redis(query_k, v_bean['cn'], v_bean['category'], v_bean['proofread'], v_bean['is_key'], v_bean['sql_id'], v_bean['modified_at'])
             if rel_f != "":
-                insert_values = [f"(\"{rel_f}\", {v_bean['sql_id']}, \"{self.version}\")" for v_bean in query_beans]
-                if len(insert_values) != 0:
-                    insert_sql = f"insert into source (file, word_id, version) values {','.join(insert_values)} ON DUPLICATE KEY UPDATE version = VALUES(version);"
-                    logger.debug(f"插入source表，sql: {insert_sql}")
-                    ok = db.execute_non_query(insert_sql)
+                usage_items = cached_usage_items + [
+                    (v_bean['sql_id'], rel_f, job_context)
+                    for v_bean, job_context in query_beans
+                ]
+                if usage_items:
+                    ok = self.__put_word_usages_if_needed(db, usage_items)
                     if not ok:
-                        logger.error(f"插入source表失败，values: {insert_values}")
+                        logger.error(f"插入word_usage表失败，file: {rel_f}")
         finally:
             self.__release_db(db_index)
         return res_beans
@@ -372,25 +676,27 @@ class DBDictionary:
         if len(res) == 0:
             self.db.insert('words', {'en': key, 'cn': value, 'json_file': rel_f,
                            'source': self.source, 'version': self.version, 'modified_by': 1})
-            self.db.execute_non_query(
-                "insert into source (file, word_id, version) values (%s, select id from words where en = %s and cn = %s, %s);", (rel_f, key, value, self.version))
+            rows = self.db.execute_query(
+                "SELECT id FROM words WHERE en = %s AND cn = %s",
+                (key, value),
+            ) or []
+            for row in rows:
+                self.__put_word_usage(self.db, row['id'], rel_f)
             self.lock.release()
             return True
         for r in res:
-            self.db.execute_non_query(
-                "insert into source (file, word_id, version) values (%s, %s, %s);", (rel_f, r['id'], self.version))
+            self.__put_word_usage(self.db, r['id'], rel_f)
         self.lock.release()
         return True
 
-    def __put_source_by_word_id(self, word_id: int, rel_f: str):
+    def __put_usage_by_word_id(self, word_id: int, rel_f: str, job_context=None):
         db_index = self.__get_db_index()
         db = self.db_list[db_index]
-        db.execute_non_query(
-            "insert into source (file, word_id, version) values (%s, %s, %s) ON DUPLICATE KEY UPDATE version = VALUES(version);", (rel_f, word_id, self.version))
+        self.__put_word_usage(db, word_id, rel_f, job_context)
         self.__release_db(db_index)
-        # logger.info(f"插入source表成功，file: {rel_f}, word_id: {word_id}, version: {self.version}")
+        # logger.info(f"插入word_usage表成功，file: {rel_f}, word_id: {word_id}, version: {self.version}")
         
-    def put(self, key: str, value, rel_f: str, insert_word=True, proofread=False, tag="") -> (bool):
+    def put(self, key: str, value, rel_f: str, insert_word=True, proofread=False, tag="", job_context=None) -> (bool):
         """
         插入翻译结果
 
@@ -426,20 +732,25 @@ class DBDictionary:
                 if not ok:
                     logger.error(f"插入words表失败，en: {key}, cn: {value}, file: {rel_f}, version: {self.version}, proofread: {p}, category: {tag}")
                     return False
-        # 更新source表
+        word_rows = []
         if tag != "":
-            db.execute_non_query("""insert into source (file, word_id, version) 
-                                    SELECT %s, id, %s FROM words 
-                                    WHERE BINARY en = %s AND cn = %s AND category = %s
-                                    ON DUPLICATE KEY UPDATE version = VALUES(version);""", (rel_f, self.version, key, value, tag))
+            word_rows = db.execute_query(
+                "SELECT id FROM words WHERE BINARY en = %s AND cn = %s AND category = %s",
+                (key, value, tag),
+            ) or []
         else:
-            db.execute_non_query("""insert into source (file, word_id, version) 
-                        SELECT %s, id, %s FROM words 
-                        WHERE BINARY en = %s AND cn = %s AND category is null
-                        ON DUPLICATE KEY UPDATE version = VALUES(version);""", (rel_f, self.version, key, value))
+            word_rows = db.execute_query(
+                "SELECT id FROM words WHERE BINARY en = %s AND cn = %s AND (category is null OR category = '')",
+                (key, value),
+            ) or []
+        word_id = None
+        for row in word_rows:
+            if word_id is None:
+                word_id = row['id']
+            self.__put_word_usage(db, row['id'], rel_f, job_context)
         self.__release_db(db_index)
         logger.debug(f"put函数执行时间：{time.time() - start_time} 秒")
-        return True
+        return word_id or True
 
     def put_term(self, term, source="", modified_by=1, modified_reson=""):
         """写入Term表
@@ -549,7 +860,7 @@ class DBDictionary:
         finally:
             self.__release_db(db_index)
         
-    def update(self, sql_id:int, en_or_cn:str, cn=None, proofread=True, tag="") -> (bool):
+    def update(self, sql_id:int, en_or_cn:str, cn=None, proofread=True, tag="", rel_f="", job_context=None) -> (bool):
         start_time = time.time()
         db_index = self.__get_db_index()
         db = self.db_list[db_index]
@@ -581,6 +892,8 @@ class DBDictionary:
             if tag not in ("", None):
                 update_data['category'] = tag
             db.update('words', update_data, {'id': r['id']})
+            if rel_f:
+                self.__put_word_usage(db, r['id'], rel_f, job_context)
         # db.execute_non_query("""insert into source (file, word_id, version) 
         #                           SELECT %s, id, %s FROM words 
         #                           WHERE BINARY en = %s AND cn = %s 
@@ -592,10 +905,12 @@ class DBDictionary:
     def putSource(self, key: str, value, rel_f: str):
         db_index = self.__get_db_index()
         db = self.db_list[db_index]
-        db.execute_non_query("""insert into source (file, word_id, version) 
-                            SELECT %s, id, %s FROM words 
-                            WHERE BINARY en = %s AND cn = %s 
-                            ON DUPLICATE KEY UPDATE version = VALUES(version);""", (rel_f, self.version, key, value))
+        rows = db.execute_query(
+            "SELECT id FROM words WHERE BINARY en = %s AND cn = %s",
+            (key, value),
+        ) or []
+        for row in rows:
+            self.__put_word_usage(db, row['id'], rel_f)
         self.__release_db(db_index)
         return True
 
@@ -634,7 +949,7 @@ class DBDictionary:
         }
         if en in self.dictionary:
             if any(c['cn'] == cn and c['category'] == category for c in self.dictionary[en]):
-                logger.warning(f"重复插入{en}->{cn}")
+                logger.debug(f"重复插入{en}->{cn}")
                 return
             self.dictionary[en].append(bean)
         else:
@@ -657,6 +972,8 @@ class DBDictionary:
                 cn_bean = c
             if cn_bean != None:
                 return cn_bean
+            if tag not in (None, ""):
+                return None
             if not correct_tag_from_db:
                 for c in self.dictionary[en]:
                     if c['proofread'] == 1:
@@ -677,6 +994,8 @@ class DBDictionary:
                 return cn_bean
             if correct_tag_from_db:
                 return None
+            if tag not in (None, ""):
+                return None
             for c in self.lower_dictionary[en]:
                 if c['proofread'] == 1:
                     return c
@@ -693,7 +1012,7 @@ class DBDictionary:
                 'words', columns=['cn', 'en', 'version', 'proofread', 'category', 'modified_at', 'is_key'])
         else:
             placeholders = ','.join(['%s'] * len(file_names))
-            sql = f"select id, cn, en, version, proofread, category, modified_at, is_key from words where id in (select word_id from source where file in ({placeholders}))"
+            sql = f"select id, cn, en, version, proofread, category, modified_at, is_key from words where id in (select word_id from word_usage where file in ({placeholders}))"
             params = tuple(file_names)
             records = self.db_list[0].execute_query(sql, params)
         self.lock.release()

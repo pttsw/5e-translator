@@ -8,6 +8,8 @@ def reset_memory_db(db):
     db.store_records = []
     db.store_by_id = {}
     db.source_index = {}
+    db.word_usage = []
+    db.usage_by_file_uid = {}
     db.file_table = {}
     db.locked_entries = {}
     db.credits_table = {}
@@ -79,3 +81,14 @@ def test_memory_db_matches_idrotf_filter_and_adventure_metadata_changes():
 
     assert match["sql_id"] == 21
     assert match["old_en"] == old_en
+
+
+def test_memory_db_cache_requires_exact_tag_when_tag_is_requested():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+    db._insert_record("Light", "光亮术", "", proofread=True, tag="spell", sql_id=979)
+    db._insert_record("Light", "轻型", "", proofread=True, tag="itemProperty", sql_id=1856)
+
+    assert db.get("Light", tag="spell")["sql_id"] == 979
+    assert db.get("Light", tag="itemProperty")["sql_id"] == 1856
+    assert db.get("Light", tag="class") is None

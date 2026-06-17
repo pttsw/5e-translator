@@ -20,23 +20,14 @@ import argparse
 import copy
 import statistics
 from contextlib import contextmanager
-from app.core.utils import find_json_files, write_translate_cache, Job, FileWorkInfo, find_files
-from app.core.utils import need_translate_str
-from app.core.translator import JsonAnalyser, JobProcessor, BatchJobProcessor, KnowledgeSetter, TermSetter, JobNeedTranslateSetter, ByHandHandler, JsonGenerator, NonAiFallbackSetter
-from app.core.translator.batch_chunker import BatchChunker
-from app.cli import transform_proofread, search_knowledge, add_mysql_terms_to_redis, add_confirmed_term, combine_temp_terms_to_csv, load_files_into_chroma_db, load_term_from_text, sync_terms_to_mysql
-from app.core.para import set_terms_to_para
-from app.core.file_progress_service import get_split_file_path, sync_source_path
-from app.core.utils.console_progress import console_progress
-from config import DB_CONFIG, EN_PATH
-from app.core.database import DBDictionary
-from flask import Flask
-from app.model import db
 
 
 @contextmanager
 def cli_db_app_context():
     import pymysql
+    from flask import Flask
+    from app.model import db
+    from config.settings import DB_CONFIG
 
     pymysql.install_as_MySQLdb()
     app = Flask(__name__)
@@ -51,6 +42,9 @@ def cli_db_app_context():
 
 
 def preview_batch_units(file_infos, batch_max_chars: int, include_all_jobs: bool = False, detail_limit: int = 5):
+    from app.core.translator.batch_chunker import BatchChunker
+    from app.core.utils import FileWorkInfo, need_translate_str
+
     chunker = BatchChunker(max_chars=batch_max_chars)
     for res in file_infos:
         if include_all_jobs:
@@ -104,6 +98,8 @@ def preview_batch_units(file_infos, batch_max_chars: int, include_all_jobs: bool
 
 
 def iter_with_total_progress(results, total_files: int):
+    from app.core.utils.console_progress import console_progress
+
     console_progress.set_total(total_files, label="Total")
     try:
         for file_work_info in results:
@@ -171,12 +167,12 @@ def main():
                                   help='Search query')
     
     clean_parser = subparsers.add_parser('clean')
-    clean_parser.add_argument('--en', default=EN_PATH,
+    clean_parser.add_argument('--en', default='',
                                 help='Path to the English data, default to the value in config')
     
     #
     term_parser = subparsers.add_parser('term')
-    term_parser.add_argument('--en', default=EN_PATH, type=str,
+    term_parser.add_argument('--en', default='', type=str,
                                   help='Term source path for analysis, supports txt/csv/docx, or use words for add-mode word source sync')
     term_parser.add_argument('--mode', default='add', type=str,
                                   help='Mode to use, default to add, can be add, dump, analyze/analyse, sync or para')
@@ -203,17 +199,32 @@ def main():
     sync_parser.add_argument('--source-file', required=True, type=str,
                              help='Source JSON file or directory under configured source roots; directories are processed recursively')
     sync_parser.add_argument('--skip-jobs', action='store_true', default=False,
-                             help='Only rebuild split files and file table, skip jobs cache')
+                            help='Only rebuild split files and file table, skip jobs cache')
 
     
     args = parser.parse_args()
     
     # 从数据库中编码
     if args.function == 'transform':
+        from app.cli import transform_proofread
+
         transform_proofread()
         
     # 数据解析流程
     elif args.function == 'translate':
+        from app.core.utils import find_files, find_json_files, write_translate_cache
+        from app.core.translator import (
+            BatchJobProcessor,
+            ByHandHandler,
+            JobNeedTranslateSetter,
+            JobProcessor,
+            JsonAnalyser,
+            JsonGenerator,
+            KnowledgeSetter,
+            NonAiFallbackSetter,
+            TermSetter,
+        )
+
         if args.mock_db:
             os.environ['TRANSLATOR_DB_BACKEND'] = 'memory'
             os.environ['TRANSLATOR_DISABLE_REDIS'] = '1'
@@ -236,21 +247,25 @@ def main():
                     os.environ['MIMO_API_KEY'] = args.mimo_api_key
         if args.en == '':
             if args.mode == '5et':
+                from config.settings import EN_PATH
+
                 args.en = EN_PATH
             elif args.mode == 'splited':
-                from config import SPLITED_5ETOOLS_EN_PATH
+                from config.settings import SPLITED_5ETOOLS_EN_PATH
                 args.en = SPLITED_5ETOOLS_EN_PATH
             elif args.mode == 'homebrew':
-                from config import HOMEBREW_EN_PATH
+                from config.settings import HOMEBREW_EN_PATH
                 args.en = HOMEBREW_EN_PATH
             elif args.mode == 'plu':
-                from config import PLU_EN_PATH
+                from config.settings import PLU_EN_PATH
                 args.en = PLU_EN_PATH
             elif args.mode == 'ua':
-                from config import UA_EN_PATH
+                from config.settings import UA_EN_PATH
                 args.en = UA_EN_PATH
         if args.file:
             if args.mode == 'splited':
+                from app.core.file_progress_service import get_split_file_path
+
                 args.en = get_split_file_path(args.file.strip('/'))
             else:
                 args.en = args.file
@@ -285,11 +300,32 @@ def main():
         for _ in iter_with_total_progress(res, total_files):
             pass
     elif args.function == 'search':
+        from app.cli import search_knowledge
+
         res = search_knowledge()
         print(res)
     elif args.function == 'clean':
+        from app.core.utils import find_json_files
+        from app.core.translator import JsonAnalyser
+        if args.en == '':
+            from config.settings import EN_PATH
+
+            args.en = EN_PATH
+
         res = (find_json_files|JsonAnalyser()).invoke(args.en)
     elif args.function == 'term':
+        from app.cli import (
+            add_confirmed_term,
+            add_mysql_terms_to_redis,
+            combine_temp_terms_to_csv,
+            load_term_from_text,
+            sync_terms_to_mysql,
+        )
+        if args.en == '':
+            from config.settings import EN_PATH
+
+            args.en = EN_PATH
+
         if args.mode == 'add':
         # res = (find_json_files|TermFromJson()|AddTermCnFromDB()).invoke(args.en)
         # for t in res:
@@ -298,6 +334,8 @@ def main():
         elif args.mode == 'dump':
             combine_temp_terms_to_csv()
         elif args.mode in ('analyze', 'analyse'):
+            from app.core.database import DBDictionary
+
             input_path = args.en
             if not input_path:
                 input_path = '/data/5e-translator/app/core/crawler/valda'
@@ -358,12 +396,16 @@ def main():
         elif args.mode == 'sync':
             sync_terms_to_mysql(args.en)
         elif args.mode == 'para':
+            from app.core.para import set_terms_to_para
+
             set_terms_to_para()
         else:
             print('Unknown mode')
         # 输出术语
         # combine_temp_terms_to_csv()
     elif args.function == 'embed':
+        from app.cli import load_files_into_chroma_db
+
         # load_files_into_chroma_db(args.dir)
         load_files_into_chroma_db('/data/DND5e_chm/Generator/Generated/txt/小独与追寻失落之角')
     elif args.function == 'chm':
@@ -375,6 +417,9 @@ def main():
     elif args.function == 'retry-failed':
         # 从失败文件中读取 jobs 并重试
         import json
+        from app.core.translator import JobProcessor
+        from app.core.utils import FileWorkInfo, Job
+
         failed_file = args.file
         try:
             with open(failed_file, 'r') as fh:
@@ -410,6 +455,8 @@ def main():
         for r in iter_with_total_progress(res, 1):
             print(len(r.job_list), getattr(r, 'json_path', ''))
     elif args.function == 'sync-splited':
+        from app.core.file_progress_service import sync_source_path
+
         with cli_db_app_context():
             res = sync_source_path(args.source_file, rebuild_jobs=not args.skip_jobs)
         print(res)

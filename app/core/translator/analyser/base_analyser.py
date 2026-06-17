@@ -1,5 +1,6 @@
 import uuid
 import re
+import hashlib
 from config import logger,KEY_MATCHED_TAG
 from typing import List, Optional
 from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path, replace_split_values, process_filter_split_values, process_post_filter_split_values
@@ -19,13 +20,69 @@ class BaseAnalyser:
         self.source = get_source_from_rel_path(self.rel_path)
         self.byhand = False
         self.load_from_sql = True
+        self.usage_rel_path = rel_path
         self.name_should_proofread = False # 对于Job的Parent是否只添加校对过得
         self.correct_tag_from_db = False # 是否根据标签从数据库中准确抽取？(影响性能)
         self.locked_entries = {} # 已锁定的条目
         self.force_title = force_title
+
+    @staticmethod
+    def _stable_path_token(value) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s+", "-", text)
+        text = re.sub(r"[^0-9A-Za-z_.@|:-]+", "-", text)
+        text = text.strip("-")
+        if len(text) > 80:
+            digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+            text = f"{text[:70]}-{digest}"
+        return text
+
+    def _list_item_key_path(self, parent_path: str, index: int, value) -> str:
+        if isinstance(value, dict):
+            for field in ("id", "name", "ENG_name"):
+                token = self._stable_path_token(value.get(field))
+                if token:
+                    qualifiers = [f"{field}={token}"]
+                    source = self._stable_path_token(value.get("source"))
+                    page = self._stable_path_token(value.get("page"))
+                    if source:
+                        qualifiers.append(f"source={source}")
+                    if page:
+                        qualifiers.append(f"page={page}")
+                    return f"{parent_path}[{';'.join(qualifiers)}]"
+            source = self._stable_path_token(value.get("source"))
+            page = self._stable_path_token(value.get("page"))
+            if source and page:
+                return f"{parent_path}[source={source};page={page}]"
+        return f"{parent_path}[{index}]"
+
+    def _job_uid_from_key_path(self, key_path: str, fallback_text: str, value_index=None) -> str:
+        if key_path:
+            uid = "$" + key_path.replace("/", ".")
+            if value_index is not None:
+                uid = f"{uid}.{value_index}"
+            return uid
+        digest = hashlib.sha1(str(fallback_text).encode("utf-8")).hexdigest()[:16]
+        return f"$._dynamic.{digest}"
+
+    def _context_from_key_path(self, key_path: str, current_names: list):
+        if not key_path:
+            context_key = self.rel_path
+        else:
+            context_key = key_path.rsplit("/", 1)[0] if "/" in key_path else key_path
+        labels = []
+        for name in current_names or []:
+            if isinstance(name, tuple):
+                labels.append(str(name[0]))
+            else:
+                labels.append(str(name))
+        return context_key, " > ".join([label for label in labels if label])
         
     def process(self,  en_obj: dict, byhand: bool = False):
         self.byhand = byhand
+        self.usage_rel_path = self._get_usage_rel_path(en_obj)
         
         self.locked_entries = self.dictionary.dumpLockedEntries([self.rel_path])
         if (isinstance(en_obj, dict)):
@@ -42,7 +99,7 @@ class BaseAnalyser:
             if "data" in res_dict.keys() and isinstance(res_dict["data"], list):
                 credit_section = res_dict["data"][-1]
                 if credit_section["type"] == "section" and "ENG_name" in credit_section.keys() and "credit" in credit_section["ENG_name"].lower():
-                    credits = self.dictionary.get_credits(self.rel_path)
+                    credits = self.dictionary.get_credits(self.usage_rel_path)
 
                     if credits:
                         current_credits = {							
@@ -70,12 +127,15 @@ class BaseAnalyser:
         batch_res_map = self.dictionary.get_bunch(
             query_en_list,
             query_tag_list,
-            self.rel_path,
+            self.usage_rel_path,
             ignore_case=True,
             correct_tag_from_db=self.correct_tag_from_db,
+            job_contexts=pending_jobs,
         )
         for j in pending_jobs:
-            db_res = batch_res_map.get((j.en_str, j.tag))
+            db_res = batch_res_map.get((j.en_str, j.tag, j.uid))
+            if not db_res:
+                db_res = batch_res_map.get((j.en_str, j.tag))
             if not db_res:
                 db_res = self.dictionary.get_tag_only_update_match(j.en_str, j.tag)
                 if db_res:
@@ -93,8 +153,15 @@ class BaseAnalyser:
                 j.is_key = db_res['is_key']
         return res_dict, self.job_list
 
+    def _get_usage_rel_path(self, en_obj) -> str:
+        if isinstance(en_obj, dict):
+            origin_file = en_obj.get("_meta", {}).get("origin_file", "")
+            if isinstance(origin_file, str) and origin_file.strip():
+                return origin_file.strip("/")
+        return self.rel_path
+
     def get_translator_from_credits(self, default="机翻"):
-        credits = self.dictionary.get_credits(self.rel_path)
+        credits = self.dictionary.get_credits(self.usage_rel_path)
         if not credits:
             return default
 
@@ -133,16 +200,14 @@ class BaseAnalyser:
             # 如果有key_path，使用它生成jsonpath表达式
             if key_path:
                 # 转换key_path格式为标准jsonpath
-                jsonpath_expr = f'$' + key_path.replace('/', '.')
-                uid = jsonpath_expr
+                uid = self._job_uid_from_key_path(key_path, en_str)
             else:
-                # 如果没有key_path，使用字符串内容生成一个唯一标识
-                uid = f'$._dynamic.{hash(en_str)}'
+                uid = self._job_uid_from_key_path("", en_str)
             
             cn_str = None
             if only_has_format(en_str):
                 cn_str = en_str
-            j = self.get_job(en_str, tag=tag)
+            j = self.get_job(en_str, tag=tag, uid=uid, key_path=key_path)
             if j is not None:
                 uid = j.uid
             else:
@@ -154,7 +219,7 @@ class BaseAnalyser:
             index=0
             for m, t in zip(match_v, match_k):
                 # 为tag的value内容生成子路径
-                sub_key_path = f"{key_path}/{t}/{index}" if key_path else f"/{t}/{index}"
+                sub_key_path = f"{key_path}/{t}[{index}]" if key_path else f"/{t}[{index}]"
                 self.__split_and_append_job(m, t, current_names=current_names, key_path=sub_key_path)
                 index+=1
             return en_str
@@ -210,8 +275,9 @@ class BaseAnalyser:
                 names_in_job.append((name,name_job.cn_str))
             else:
                 names_in_job.append((name, ""))
+        context_key, context_label = self._context_from_key_path(entry_path or key_path, current_names)
         self.job_list.append(Job(uid, en, cn, rel_path=self.rel_path, tag=tag, knowledge=[
-        ], current_names=names_in_job, is_proofread=is_proofread, is_key=is_key, sql_id=sql_id, modified_at=modified_at, key_path=key_path, entry_path=entry_path or key_path))
+        ], current_names=names_in_job, is_proofread=is_proofread, is_key=is_key, sql_id=sql_id, modified_at=modified_at, key_path=key_path, entry_path=entry_path or key_path, context_key=context_key, context_label=context_label))
 
     def process_first_level(self, obj: dict, source = None):
         """处理dict的第一级，将其中的每个元素添加到Job列表中
@@ -237,7 +303,8 @@ class BaseAnalyser:
             if isinstance(v, dict):
                 cn_json, is_ok = self.process_locked_entry(v, k, source)
                 if not is_ok:
-                    tmp_dict, ok = self.process_base_item(v, f"/{k}", current_names=[], tag=self.name_tag)
+                    key_path = self._top_level_key_path(k, v)
+                    tmp_dict, ok = self.process_base_item(v, key_path, current_names=[], tag=self.name_tag)
                     if not ok:
                         raise Exception(f"处理dict {k} 失败")
                     res_dict[k] = tmp_dict
@@ -251,12 +318,17 @@ class BaseAnalyser:
                         if is_ok:
                             res_dict[k].append(cn_json)
                             continue
-                    list_item_key_path = f"/{k}[{index}]"
+                    list_item_key_path = self._list_item_key_path(f"/{k}", index, entry)
                     tmp_dict, ok = self.process_base_item(entry,  list_item_key_path, current_names=[], tag=self.name_tag)
                     if not ok:
                         raise Exception(f"处理list {k} 失败")
                     res_dict[k].append(tmp_dict)
         return res_dict, True
+
+    def _top_level_key_path(self, key: str, value) -> str:
+        if self.usage_rel_path != self.rel_path and isinstance(value, dict):
+            return self._list_item_key_path(f"/{key}", 0, value)
+        return f"/{key}"
 
 
 
@@ -316,7 +388,9 @@ class BaseAnalyser:
                 eng_name = eng_name[start_idx+1:end_idx]
             
             res_dict['ENG_name'] = eng_name
-            name_job = self.get_job(en_dict["name"],tag=tag)
+            name_key_path = key_path + '/name'
+            name_uid = self._job_uid_from_key_path(name_key_path, en_dict["name"])
+            name_job = self.get_job(en_dict["name"], tag=tag, uid=name_uid, key_path=name_key_path)
             if name_job is None:
                 cn_bean = self.dictionary.get(
                     en_dict["name"], load_from_sql=False, ignore_case=True, tag=tag)
@@ -334,9 +408,10 @@ class BaseAnalyser:
                             names_in_job.append((name, ""))
                     names_in_job.append((en_dict["name"], cn_bean['cn'] if cn_bean['proofread'] else ""))
                     # 使用jsonpath作为唯一标识
-                    name_jsonpath = f'$' + (key_path + '/name').replace('/', '.')
+                    name_jsonpath = name_uid
+                    context_key, context_label = self._context_from_key_path(key_path, current_names)
                     self.job_list.append(Job(name_jsonpath, en_dict["name"], cn_bean['cn'], rel_path=self.rel_path, tag=tag, knowledge=[
-                    ], current_names=names_in_job, is_proofread=cn_bean['proofread'], is_key=cn_bean['is_key'], sql_id=cn_bean['sql_id'], modified_at=cn_bean['modified_at']))
+                    ], current_names=names_in_job, is_proofread=cn_bean['proofread'], is_key=cn_bean['is_key'], sql_id=cn_bean['sql_id'], modified_at=cn_bean['modified_at'], key_path=key_path + '/name', entry_path=key_path, context_key=context_key, context_label=context_label))
                     skip_name = True
             elif "{@" not in en_dict["name"] and name_job.cn_str != None:
                 res_dict['name'] = name_job.cn_str
@@ -395,7 +470,7 @@ class BaseAnalyser:
         res_list = []
         for index, v in enumerate(en_list):
             # 对于列表项，我们需要在key_path后添加索引以确保唯一性
-            list_item_key_path = f"{key_path}[{index}]"
+            list_item_key_path = self._list_item_key_path(key_path, index, v)
             tmp_list, ok = self.process_base_item(v, list_item_key_path, current_names, tag=tag)
             if not ok:
                 logger.error(f"{self.rel_path}解析{v}时出错")
@@ -423,27 +498,21 @@ class BaseAnalyser:
             if need_translate_str(v):
                 # 使用jsonpath_ng风格的路径作为唯一标识
                 if key_path:
-                    # 转换为标准jsonpath格式，并添加值索引以确保唯一性
-                    jsonpath_expr = f'$' + key_path.replace('/', '.')
-                    if '/' in key_path:
-                        # 如果是复杂路径，添加值索引作为额外标识
-                        jsonpath_expr = f"{jsonpath_expr}.{value_index}"
-                    uid = jsonpath_expr
+                    uid = self._job_uid_from_key_path(key_path, v, value_index)
                 else:
-                    # 如果没有key_path，使用动态路径+哈希值
-                    uid = f'$._dynamic.{hash(v)}'
+                    uid = self._job_uid_from_key_path("", v)
                 
                 # 去除前缀后缀
                 sk_without_prefix, prefix = check_prefix(v)
                 sk_pure, suffix = check_suffix(sk_without_prefix)
                 # 生成Job 如果已经有相同的Job，则更新uuid
-                j = self.get_job(sk_pure, tag=tag)
+                j = self.get_job(sk_pure, tag=tag, uid=uid, key_path=key_path)
                 if j is not None:
                     uid = j.uid
                 else:
                     # 如果是新的Job，则添加到Job列表
                     self.set_job(uid, sk_pure, None, tag=tag,
-                                   current_names=current_names)
+                                   current_names=current_names, key_path=key_path)
 
                 return f'{prefix}{{!@ {uid}}}{suffix}'
             else:
@@ -462,11 +531,17 @@ class BaseAnalyser:
             return res_str
         return replace_split_values(str_list, _process_value, tag=tag)
 
-    def get_job(self, en, tag=""):
+    def get_job(self, en, tag="", uid="", key_path=""):
         # first_match = None
         for j in self.job_list:
             if j.en_str == en:
                 if j.tag == tag:
+                    if uid or key_path:
+                        if uid and j.uid == uid:
+                            return j
+                        if key_path and j.key_path == key_path:
+                            return j
+                        continue
                     # 优先匹配tag和en都相同的
                     return j
         if self.dictionary.get(en, load_from_sql=False, tag=tag) is not None:

@@ -163,6 +163,104 @@ def test_tag_only_sync_replaces_changed_tag_type_using_old_cn_display():
     )
 
 
+def test_tag_only_sync_keeps_quickref_metadata_index():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = [
+        Job(uid="term", en_str="difficult terrain", cn_str="困难地形", tag="quickref")
+    ]
+    generator.dictionary = type(
+        "FakeDictionary",
+        (),
+        {"get": lambda self, en, tag="": (None, False)},
+    )()
+
+    result = generator._JsonGenerator__sync_tag_only_cn(
+        "视该空间为困难地形。",
+        "The space is difficult terrain.",
+        "The space is {@quickref difficult terrain||3}.",
+        tag="entries",
+    )
+
+    assert result == "视该空间为{@quickref 困难地形||3}。"
+
+
+def test_replace_jobs_keeps_context_specific_plain_translation():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = [
+        Job(
+            uid="light-domain",
+            en_str="Light",
+            cn_str="光明",
+            tag="book",
+            sql_id=8444,
+            is_proofread=True,
+        )
+    ]
+    generator.dictionary = type(
+        "FakeDictionary",
+        (),
+        {
+            "get": lambda self, en, tag="": ("轻型", True),
+            "update": lambda self, *args, **kwargs: True,
+        },
+    )()
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entries": ["{!@ light-domain}"]}
+    )
+
+    assert ok is True
+    assert cn_obj == {"entries": ["光明"]}
+    assert generator.done_jobs[0].cn_str == "光明"
+
+
+def test_replace_sub_jobs_restores_quickref_numeric_metadata():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("difficult terrain", "quickref"): "困难地形",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@quickref 困难地形||困难地形}",
+        "{@quickref difficult terrain||3}",
+    )
+
+    assert success is True
+    assert result == "{@quickref 困难地形||3}"
+
+
+def test_replace_sub_jobs_restores_subclass_feature_level_metadata():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    translations = {
+        ("Fast Hands", "subclassFeature"): "快手",
+        ("Rogue", "subclassFeature"): "游荡者",
+        ("Thief", "subclassFeature"): "盗贼",
+    }
+
+    def fake_process_value(value, tag=""):
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@subclassFeature 快手|游荡者||盗贼||快手}",
+        "{@subclassFeature Fast Hands|Rogue||Thief||3}",
+    )
+
+    assert success is True
+    assert result == "{@subclassFeature 快手|游荡者||盗贼||3}"
+
+
 def test_json_generator_aligns_stale_cn_tags_when_en_was_already_updated():
     class FakeDictionary:
         def __init__(self):
@@ -171,6 +269,14 @@ def test_json_generator_aligns_stale_cn_tags_when_en_was_already_updated():
         def update(self, *args, **kwargs):
             self.calls.append((args, kwargs))
             return True
+
+        def get(self, en, tag=""):
+            translations = {
+                ("Passive Perception", "variantrule"): "被动察觉",
+                ("Surprised", "status"): "突袭",
+            }
+            value = translations.get((en, tag))
+            return (value, True) if value is not None else (None, False)
 
     generator = JsonGenerator.__new__(JsonGenerator)
     generator.dictionary = FakeDictionary()
@@ -218,6 +324,156 @@ def test_json_generator_aligns_stale_cn_tags_when_en_was_already_updated():
             {"proofread": True, "tag": "adventure"},
         )
     ]
+
+
+def test_replace_jobs_continues_sub_tag_replacement_after_alignment():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = type(
+        "FakeDictionary",
+        (),
+        {"update": lambda self, *args, **kwargs: True},
+    )()
+    generator.done_jobs = [
+        Job(
+            uid="sentence",
+            en_str="They are not {@status Surprised|XPHB}.",
+            cn_str="他们不会被{@table 突袭|RMR|突袭}。",
+            tag="entries",
+            sql_id=1,
+            is_proofread=True,
+        )
+    ]
+
+    calls = []
+
+    def fake_replace_sub_jobs(cn_str, en_str=None, tag=""):
+        calls.append(cn_str)
+        if len(calls) == 1:
+            assert cn_str == "他们不会被{@table 突袭|RMR|突袭}。"
+            return cn_str, False
+        assert cn_str == "他们不会被{@status 突袭|XPHB}。"
+        assert en_str == "They are not {@status Surprised|XPHB}."
+        return "他们不会被{@status 突袭|XPHB}。OK", True
+
+    generator._JsonGenerator__replace_sub_jobs = fake_replace_sub_jobs
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entries": ["{!@ sentence}"]}
+    )
+
+    assert ok is True
+    assert cn_obj == {"entries": ["他们不会被{@status 突袭|XPHB}。OK"]}
+    assert calls == [
+        "他们不会被{@table 突袭|RMR|突袭}。",
+        "他们不会被{@status 突袭|XPHB}。",
+    ]
+
+
+def test_replace_jobs_prefers_value_matching_over_position_alignment():
+    class FakeDictionary:
+        def get(self, en, tag=""):
+            translations = {
+                ("Condition", "variantrule"): "状态",
+                ("Incapacitated", "condition"): "失能",
+            }
+            value = translations.get((en, tag))
+            return (value, True) if value is not None else (None, False)
+
+        def update(self, *args, **kwargs):
+            raise AssertionError("position alignment should not run first")
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = FakeDictionary()
+    generator.done_jobs = [
+        Job(
+            uid="sentence",
+            en_str=(
+                "The {@variantrule Condition|XPHB|condition} ends if the grappler "
+                "has the {@condition Incapacitated|XPHB} condition."
+            ),
+            cn_str=(
+                "若擒抱者陷入{@condition 失能|XPHB}，"
+                "受擒{@variantrule 状态|XPHB|状态}将结束。"
+            ),
+            tag="entries",
+            sql_id=1,
+            is_proofread=True,
+        )
+    ]
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entries": ["{!@ sentence}"]}
+    )
+
+    assert ok is True
+    assert cn_obj == {
+        "entries": [
+            "若擒抱者陷入{@condition 失能|XPHB}，"
+            "受擒{@variantrule 状态|XPHB|状态}将结束。"
+        ]
+    }
+
+
+def test_replace_jobs_recovers_tag_type_from_polluted_position_alignment():
+    class FakeDictionary:
+        def get(self, en, tag=""):
+            translations = {
+                ("Athletics", "skill"): "运动",
+                ("Acrobatics", "skill"): "特技",
+                ("Condition", "variantrule"): "状态",
+                ("Incapacitated", "condition"): "失能",
+            }
+            value = translations.get((en, tag))
+            return (value, True) if value is not None else (None, False)
+
+        def update(self, *args, **kwargs):
+            return True
+
+    en_str = (
+        "A Grappled creature can use its action to make a Strength "
+        "({@skill Athletics|XPHB}) or Dexterity ({@skill Acrobatics|XPHB}) check "
+        "against the grapple's escape DC, ending the "
+        "{@variantrule Condition|XPHB|condition} on itself on a success. The "
+        "{@variantrule Condition|XPHB|condition} also ends if the grappler has "
+        "the {@condition Incapacitated|XPHB} condition or if the distance between "
+        "the Grappled target and the grappler exceeds the grapple's range."
+    )
+    polluted_cn = (
+        "受擒生物可以用其动作进行一次力量（{@skill Athletics|XPHB}）或敏捷"
+        "（{@skill Acrobatics|XPHB}）检定，对抗此次擒抱的逃脱DC，检定成功时，"
+        "受擒{@condition condition|XPHB}将结束。若擒抱者陷入"
+        "{@variantrule Condition|XPHB|Incapacitated}，或是擒抱者与受擒者之间的"
+        "距离超出了此次擒抱的范围，受擒{@variantrule Condition|XPHB|condition}"
+        "也会提前结束。"
+    )
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = FakeDictionary()
+    generator.done_jobs = [
+        Job(
+            uid="sentence",
+            en_str=en_str,
+            cn_str=polluted_cn,
+            tag="action",
+            sql_id=336458,
+            is_proofread=True,
+        )
+    ]
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entries": ["{!@ sentence}"]}
+    )
+
+    assert ok is True
+    assert cn_obj == {
+        "entries": [
+            "受擒生物可以用其动作进行一次力量（{@skill 运动|XPHB}）或敏捷"
+            "（{@skill 特技|XPHB}）检定，对抗此次擒抱的逃脱DC，检定成功时，"
+            "受擒{@variantrule 状态|XPHB|状态}将结束。若擒抱者陷入"
+            "{@condition 失能|XPHB}，或是擒抱者与受擒者之间的距离超出了"
+            "此次擒抱的范围，受擒{@variantrule 状态|XPHB|状态}也会提前结束。"
+        ]
+    }
 
 
 def test_tag_only_sync_wraps_known_translated_phrase_from_other_job():

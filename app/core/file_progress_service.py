@@ -238,7 +238,7 @@ def refresh_progress_by_files(file_paths: List[str], clear_stale: bool = True) -
     rows = (
         session.query(
             SourceModel.file.label("file"),
-            func.count(func.distinct(SourceModel.word_id)).label("total"),
+            func.count(SourceModel.id).label("total"),
             func.sum(
                 case(
                     ((WordsModel.proofread == 1) | (WordsModel.is_key == 1), 1),

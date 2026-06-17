@@ -37,11 +37,9 @@ class JobProcessor(Runnable):
         if not self.ok:
             logger.error(f"初始化字典失败")
             return
-        if self.use_ai:
-            self.ok = self.__init_adapter()
-            if not self.ok:
-                logger.error(f"加载LLM中间件失败")
-                return
+        self.adapter = None
+        self.adapter_lock = threading.Lock()
+        self.adapter_ready = False
 
         self.byhand = False
         self.force = False
@@ -50,6 +48,7 @@ class JobProcessor(Runnable):
         self.cache = True
         self.cache_lock = threading.Lock()
         self.terms_file_path = '/tmp/terms.csv'
+        self.translation_aliases = {}
 
         
     def invoke(self, input, config=None, **kwargs):
@@ -81,7 +80,8 @@ class JobProcessor(Runnable):
                 # 贪心，按照job的en_str长度从短到长排序。
                 # 这样短文本中的术语先处理。加速
                 res.job_list.sort(key=lambda x: len(x.en_str))
-            self.factory.add_jobs(res.job_list)
+            work_jobs = self._dedupe_translation_jobs(res.job_list)
+            self.factory.add_jobs(work_jobs)
             self.factory.set_finish(True)
             # 加载临时术语
             self.__load_temple_terms(res.job_list, res.out_path)
@@ -118,6 +118,7 @@ class JobProcessor(Runnable):
                 else:
                     logger.info('没有记录到被丢弃的失败 Job。')
                 continue
+            self._propagate_translation_aliases()
             yield res
 
     def __load_temple_terms(self, job_list, out_path):
@@ -166,7 +167,7 @@ class JobProcessor(Runnable):
         """
         初始化字典
         """
-        self.dictionary = DatabaseAdapter(source="GPT")
+        self.dictionary = DatabaseAdapter(source="GPT", conn_num=1)
         return self.dictionary.ok
 
     def __init_adapter(self):
@@ -188,7 +189,22 @@ class JobProcessor(Runnable):
             )
             return False
         self.adapter = SiliconFlowAdapter(api_key)
+        self.adapter_ready = True
         return True
+
+    def _ensure_adapter(self) -> bool:
+        if not self.use_ai:
+            return True
+        if self.adapter_ready and self.adapter is not None:
+            return True
+        with self.adapter_lock:
+            if self.adapter_ready and self.adapter is not None:
+                return True
+            ok = self.__init_adapter()
+            if not ok:
+                logger.error(f"加载LLM中间件失败")
+                return False
+            return True
 
     def __init_factory(self):
         def work_func(job: Job, worker_id: int) -> (tuple[Job, TranslatorStatus]):
@@ -202,6 +218,8 @@ class JobProcessor(Runnable):
             if self.force and job.sql_id == None:
                 # force模式下，只更新有的
                 return job, TranslatorStatus.SUCCESS
+            if not self._ensure_adapter():
+                return None, TranslatorStatus.FAILURE
             # 添加缓存中的术语
             if self.cache and self.temple_terms:
                 for temp in self.__search_temple_terms(job.en_str):
@@ -283,19 +301,7 @@ class JobProcessor(Runnable):
             """
             处理完成任务
             """
-            if job is not None and job.cn_str is not None:
-                if self.update and job.need_translate and self.use_ai:
-                    # 写入数据库,如果手动模式，则默认就是校对过得
-                    if job.sql_id is None:
-                        logger.info(f"处理完成任务:{job.en_str}, 中文:{job.cn_str}")
-                        ok = self.dictionary.put(
-                            job.en_str, job.cn_str, job.rel_path, proofread=self.byhand, tag=job.tag)
-                        if not ok:
-                            logger.error(f"写入字典失败:{job}")
-                    else:
-                        self.dictionary.update(job.sql_id, job.en_str, job.cn_str, proofread=self.byhand, tag=job.tag)
-                self.done_jobs.append(job)
-            else:
+            if not self._store_completed_job(job):
                 logger.error(f"处理完成任务错误:{job}")
 
         self.factory = LLMFactory(
@@ -303,6 +309,93 @@ class JobProcessor(Runnable):
             work_func=work_func,
             done_func=put_done_job,
         )
+        return True
+
+    def _dedupe_translation_jobs(self, job_list: List[Job]) -> List[Job]:
+        self.translation_aliases = {}
+        representatives = {}
+        work_jobs = []
+        for job in job_list:
+            group_key = self._translation_share_key(job)
+            if group_key is None:
+                work_jobs.append(job)
+                continue
+            representative = representatives.get(group_key)
+            if representative is None:
+                representatives[group_key] = job
+                work_jobs.append(job)
+                continue
+            self.translation_aliases.setdefault(representative.uid, []).append(job)
+            logger.info(
+                f"合并重复翻译Job: representative={representative.uid}, "
+                f"alias={job.uid}, en={job.en_str}"
+            )
+        return work_jobs
+
+    def _translation_share_key(self, job: Job):
+        if self.byhand or not self.use_ai:
+            return None
+        if not job.need_translate or job.sql_id is not None:
+            return None
+        if not isinstance(job.en_str, str) or job.en_str == "":
+            return None
+        terms = tuple(sorted(
+            (term.en, term.category or "", term.cn)
+            for term in getattr(job, "terms", []) or []
+        ))
+        knowledge = tuple(getattr(job, "knowledge", []) or [])
+        return (job.en_str, job.tag or "", terms, knowledge)
+
+    def _propagate_translation_aliases(self):
+        if not self.translation_aliases:
+            return
+        done_by_uid = {job.uid: job for job in self.done_jobs if job is not None}
+        for representative_uid, aliases in self.translation_aliases.items():
+            representative = done_by_uid.get(representative_uid)
+            if representative is None or representative.cn_str is None:
+                continue
+            for alias in aliases:
+                alias.cn_str = representative.cn_str
+                alias.sql_id = representative.sql_id
+                alias.is_proofread = representative.is_proofread
+                alias.is_key = representative.is_key
+                alias.need_translate = representative.need_translate
+                self._store_completed_job(alias)
+
+    def _store_completed_job(self, job: Job) -> bool:
+        if job is None or job.cn_str is None:
+            return False
+        if self.update and job.need_translate and self.use_ai:
+            if job.sql_id is None:
+                logger.info(f"处理完成任务:{job.en_str}, 中文:{job.cn_str}")
+                ok = self.dictionary.put(
+                    job.en_str,
+                    job.cn_str,
+                    job.rel_path,
+                    proofread=self.byhand,
+                    tag=job.tag,
+                    job_context=job,
+                )
+                if not ok:
+                    logger.error(f"写入字典失败:{job}")
+                    return False
+                if isinstance(ok, int) and not isinstance(ok, bool):
+                    job.sql_id = ok
+            else:
+                ok = self.dictionary.update(
+                    job.sql_id,
+                    job.en_str,
+                    job.cn_str,
+                    proofread=self.byhand,
+                    tag=job.tag,
+                    rel_f=job.rel_path,
+                    job_context=job,
+                )
+                if not ok:
+                    logger.error(f"更新字典失败:{job}")
+                    return False
+        if job not in self.done_jobs:
+            self.done_jobs.append(job)
         return True
 
     def _apply_non_ai_fallback(self, job: Job) -> Job:

@@ -1,6 +1,10 @@
 #!/usr/bin/python3
 # -*- coding: UTF-8 -*-
 
+import os
+
+os.environ["SKIP_APP_BOOTSTRAP"] = "0"
+
 from app import app
 
 if __name__ == '__main__':

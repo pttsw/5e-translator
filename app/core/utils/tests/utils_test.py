@@ -2,7 +2,7 @@
 import unittest
 from app.core.utils.utils import only_has_format
 import pytest
-from app.core.utils.utils import normalize_tagless_text, parse_foundry_items_uuid_format
+from app.core.utils.utils import check_skip_key, get_tag_display_text, normalize_tagless_text, parse_foundry_items_uuid_format
 
 class TestOnlyHasFormat(unittest.TestCase):
     def test_only_format_no_english(self):
@@ -96,6 +96,28 @@ def test_parse_foundry_items_uuid_format(input_text, expected_tags, expected_val
 ])
 def test_normalize_tagless_text_handles_5etools_link_metadata(old_text, new_text):
     assert normalize_tagless_text(old_text) == normalize_tagless_text(new_text)
+
+
+def test_quickref_uses_first_value_unless_explicit_display_exists():
+    assert get_tag_display_text("difficult terrain||3", "quickref") == "difficult terrain"
+    assert normalize_tagless_text("{@quickref difficult terrain||3}") == "difficult terrain"
+    assert get_tag_display_text("cover||3||total cover", "quickref") == "total cover"
+
+
+def test_subclass_feature_uses_name_not_level_as_display_text():
+    value = "Fast Hands|Rogue||Thief||3"
+
+    assert get_tag_display_text(value, "subclassFeature") == "Fast Hands"
+    assert normalize_tagless_text(f"{{@subclassFeature {value}}}") == "Fast Hands"
+
+
+def test_skip_key_path_ignores_list_qualifiers():
+    assert check_skip_key("group", "supplement", "/adventure[0]")
+    assert check_skip_key("group", "supplement", "/adventure[id=NRH-ASS;source=NRH-ASS]")
+
+
+def test_no_skip_path_still_overrides_skip_key_path_with_qualifiers():
+    assert not check_skip_key("tags", "tag value", "/type[id=abc]")
     
 if __name__ == '__main__':
     unittest.main()

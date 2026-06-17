@@ -11,9 +11,8 @@ try:
 except ImportError:
     docx2txt = None
 
-db = DBDictionary()
-
 def compare_term(term_path: str):
+    db = DBDictionary()
     with open(term_path, 'r') as f:
         lines = f.readlines()
         res:dict[str, str] = {}

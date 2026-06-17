@@ -5,7 +5,6 @@ from app.model import SourceModel, session
 from .base import BaseApi
 import json
 from flask_login import login_required
-from sqlalchemy import text
 
 api = Api()
 
@@ -23,12 +22,20 @@ class SourceApi(Resource, BaseApi):
         if params['file'] is None or params['word_id'] is None or params['new_word_id'] is None:
             return error("更新失败：file、word_id、new_word_id不能为空")
         try:
-            procedure = text("CALL replacesource(:old_file, :old_word_id, :new_word_id)")
-            result = session.execute(procedure, {
-                'old_file': params['file'],
-                'old_word_id': params['word_id'],
-                'new_word_id': params['new_word_id']
-            })
+            query = SourceModel.query.filter_by(
+                file=params['file'],
+                word_id=params['word_id'],
+            )
+            uid = params.get('uid')
+            if uid:
+                query = query.filter_by(uid=uid)
+            updated = query.update(
+                {'word_id': params['new_word_id']},
+                synchronize_session=False,
+            )
+            if updated == 0:
+                session.rollback()
+                return error("替换失败：没有找到相关使用记录")
             session.commit()
         except Exception as e:
             session.rollback()

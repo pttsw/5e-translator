@@ -6,6 +6,7 @@ from config import logger
 from app.core.bean import Term
 import re  # 添加正则表达式模块
 import concurrent.futures
+import threading
 from typing import List, Dict, Any
 
 class TermSetter(Runnable):
@@ -14,6 +15,29 @@ class TermSetter(Runnable):
         self.terms = []
         self.term_map_remaining = {}
         self.exact_pattern = None
+        self.loaded = False
+        self.load_lock = threading.Lock()
+        self.max_workers = 8  # 设置线程池大小，可根据实际情况调整
+
+    def _ensure_loaded(self):
+        if self.loaded:
+            return
+        with self.load_lock:
+            if self.loaded:
+                return
+            self.loaded = True
+            if self.term_db is not None or self.exact_pattern is not None:
+                return
+            if not self._should_use_redis_terms():
+                logger.info("术语 Redis 已禁用，跳过术语缓存加载")
+                return
+            self._load_terms_from_redis()
+
+    def _should_use_redis_terms(self):
+        import os
+        return os.getenv("TRANSLATOR_DISABLE_REDIS", "").lower() not in ("1", "true", "yes", "on")
+
+    def _load_terms_from_redis(self):
         try:
             self.term_db = RedisDB(db=1)
             term_set = self.term_db.keys()
@@ -25,7 +49,6 @@ class TermSetter(Runnable):
                 self.term_map_remaining = {term.lower(): term for term in self.terms}
         except Exception as exc:
             logger.warning(f"术语 Redis 不可用，跳过术语缓存加载: {exc}")
-        self.max_workers = 8  # 设置线程池大小，可根据实际情况调整
 
     def _process_job(self, job: Any) -> (Any):
         """处理单个job的术语匹配"""
@@ -94,6 +117,13 @@ class TermSetter(Runnable):
         #         yield res
         #     return
         for res in input:
+            if not any(job.need_translate for job in res.job_list):
+                yield res
+                continue
+            self._ensure_loaded()
+            if self.term_db is None or self.exact_pattern is None:
+                yield res
+                continue
             # 使用线程池并发处理job_list中的每个job
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 # 提交所有任务到线程池

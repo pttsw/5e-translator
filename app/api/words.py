@@ -70,6 +70,7 @@ class IndependentTranslationApi(Resource):
         en_str = str(data.get('en_str') or '')
         cn = str(data.get('cn') or '').strip()
         tag = data.get('tag')
+        uid = str(data.get('uid') or '').strip()
         if not current_file or not word_id or not en_str or not cn:
             return error("新增独立翻译失败：缺少current_file、word_id、en_str或cn")
 
@@ -79,10 +80,12 @@ class IndependentTranslationApi(Resource):
         if current_word.en != en_str:
             return error("新增独立翻译失败：英文原文与当前词条不一致")
 
-        current_source = SourceModel.query.filter_by(
-            word_id=current_word.id,
-            file=current_file,
-        ).first()
+        current_source = SourceModel.query.filter_by(file=current_file, uid=uid).first() if uid else None
+        if current_source is None:
+            current_source = SourceModel.query.filter_by(
+                word_id=current_word.id,
+                file=current_file,
+            ).first()
         if current_source is None:
             return error("新增独立翻译失败：当前文件未关联此词条")
 
@@ -112,17 +115,28 @@ class IndependentTranslationApi(Resource):
                 session.add(target_word)
                 session.flush()
 
-            target_source = SourceModel.query.filter_by(
-                word_id=target_word.id,
-                file=current_file,
-            ).first()
-            if target_source is None:
+            target_source = None
+            if not uid:
+                target_source = SourceModel.query.filter_by(
+                    word_id=target_word.id,
+                    file=current_file,
+                ).first()
+            if uid:
+                current_source.word_id = target_word.id
+                current_source.version = current_source.version or target_word.version or "0"
+            elif target_source is None:
                 session.add(SourceModel(
                     target_word.id,
                     current_file,
                     current_source.version or target_word.version or "0",
+                    uid=uid or current_source.uid or "",
+                    key_path=current_source.key_path or "",
+                    context_key=current_source.context_key or "",
+                    context_label=current_source.context_label or "",
                 ))
-            session.delete(current_source)
+                session.delete(current_source)
+            else:
+                session.delete(current_source)
             session.commit()
         except Exception as exc:
             session.rollback()

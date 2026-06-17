@@ -2,16 +2,20 @@
 # -*- coding: UTF-8 -*-
 
 import os
+import sys
 
 app = None
 
-if os.getenv("SKIP_APP_BOOTSTRAP", "0").lower() not in ("1", "true", "yes", "on"):
+_default_skip_bootstrap = "0" if os.path.basename(sys.argv[0]).startswith("gunicorn") else "1"
+
+if os.getenv("SKIP_APP_BOOTSTRAP", _default_skip_bootstrap).lower() not in ("1", "true", "yes", "on"):
     from flask import Flask
     from flask_cors import CORS
     from .api import login_manager, api_bp as api_blueprint
-    from .model import db, migrate, ensure_file_table_schema, ensure_term_table_schema, migrate_plaintext_passwords, ensure_user_table_schema, ensure_invite_code_table_schema
+    from .model import db, migrate, ensure_file_table_schema, ensure_term_table_schema, ensure_word_usage_table_schema, migrate_plaintext_passwords, ensure_user_table_schema, ensure_invite_code_table_schema
 
-    from config import DB_CONFIG, swagger
+    from config.settings import DB_CONFIG
+    from config.swagger import swagger
 
     # 导入并安装pymysql作为MySQLdb的替代品
     import pymysql
@@ -24,6 +28,13 @@ if os.getenv("SKIP_APP_BOOTSTRAP", "0").lower() not in ("1", "true", "yes", "on"
     app.config['SQLALCHEMY_DATABASE_URI'] = f"mysql://{DB_CONFIG['USER']}:{DB_CONFIG['PASSWORD']}@{DB_CONFIG['HOST']}:{DB_CONFIG['PORT']}/{DB_CONFIG['DATABASE']}"
     app.config['JSON_AS_ASCII'] = False 
     app.config['SECRET_KEY'] = 'your-secret-key'
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        "connect_args": {
+            "connect_timeout": int(os.getenv("TRANSLATOR_DB_CONNECT_TIMEOUT", "5")),
+            "read_timeout": int(os.getenv("TRANSLATOR_DB_READ_TIMEOUT", "10")),
+            "write_timeout": int(os.getenv("TRANSLATOR_DB_WRITE_TIMEOUT", "10")),
+        }
+    }
 
     # 初始化扩展
     CORS(app)
@@ -35,9 +46,11 @@ if os.getenv("SKIP_APP_BOOTSTRAP", "0").lower() not in ("1", "true", "yes", "on"
     # 注册蓝图
     app.register_blueprint(api_blueprint, url_prefix='/api/v1')
 
-    with app.app_context():
-        ensure_invite_code_table_schema()
-        ensure_user_table_schema()
-        ensure_file_table_schema()
-        ensure_term_table_schema()
-        migrate_plaintext_passwords()
+    if os.getenv("TRANSLATOR_APP_AUTO_MIGRATE", "0").lower() in ("1", "true", "yes", "on"):
+        with app.app_context():
+            ensure_invite_code_table_schema()
+            ensure_user_table_schema()
+            ensure_file_table_schema()
+            ensure_term_table_schema()
+            ensure_word_usage_table_schema()
+            migrate_plaintext_passwords()

@@ -42,7 +42,10 @@ class BatchChunker:
     def build_units(self, file_info: FileWorkInfo) -> List[BatchUnit]:
         batch_id = file_info.out_path or file_info.json_path
         self._assign_batch_metadata(file_info, batch_id)
-        pending_jobs = [job for job in file_info.job_list if job.need_translate]
+        pending_source = getattr(file_info, "batch_pending_jobs", None)
+        if pending_source is None:
+            pending_source = file_info.job_list
+        pending_jobs = [job for job in pending_source if job.need_translate]
         if not pending_jobs:
             return []
 

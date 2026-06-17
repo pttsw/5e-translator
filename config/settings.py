@@ -98,7 +98,7 @@ SKIP_KEY_PATH=[
   'entryData/resources/count',
   'target/affects/count',
   # spells/foundry.json
-  'activities/profiles/count'
+  'activities/profiles/count',
   'facility/prerequisite/spellcastingFocus',
 
   #class

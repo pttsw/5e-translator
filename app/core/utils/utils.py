@@ -21,8 +21,8 @@ def check_skip_key(key: str, value: str, prefix_key_path: str):
         return True
     if key in SKIP_ONLY_PURE_STR_KEYS and ((isinstance(value, str) and '@{' not in value) or isinstance(value, int)):
         return True
-    # 去掉key_with_prefix中的[0]、[1]等
-    key_with_prefix = re.sub(r'\[\d+\]', '', key_with_prefix)
+    # 去掉key_with_prefix中的[0]、[id=...;source=...]等列表定位信息
+    key_with_prefix = re.sub(r'\[[^\]]*\]', '', key_with_prefix)
     return any(hk in key_with_prefix for hk in SKIP_KEY_PATH) or \
         any(si['key'] == key and si['value'] == value for si in SKIP_ITEMS)
 
@@ -227,6 +227,12 @@ def get_tag_display_text(value: str, tag: str = "") -> str:
         return ""
     parts = value.split("|")
     if tag in ("adventure", "area", "book", "filter"):
+        return parts[0] if parts else value
+    if tag == "quickref":
+        if len(parts) >= 5 and parts[-1] != "":
+            return parts[-1]
+        return parts[0] if parts else value
+    if tag == "subclassFeature":
         return parts[0] if parts else value
     if len(parts) >= 3 and parts[-1] != "":
         return parts[-1]

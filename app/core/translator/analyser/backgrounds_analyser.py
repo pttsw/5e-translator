@@ -39,7 +39,7 @@ class BackgroundsAnalyser(BaseAnalyser):
                         new_dict["|".join(split_k)] = value
                     res_list.append(new_dict)
                 else:
-                    list_item_key_path = f"{key_path}[{index}]"
+                    list_item_key_path = self._list_item_key_path(key_path, index, v)
                     tmp_list, ok = self.process_base_item(v, list_item_key_path, current_names, tag="feat")
                     if not ok:
                         logger.error(f"{self.rel_path}解析{v}时出错")

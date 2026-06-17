@@ -161,11 +161,16 @@ class ProofreadApi(Resource, BaseApi):
                     session.flush()
                     created_word = True
                 word_id = word.id
-                source = SourceModel.query.filter_by(
-                    word_id=word_id, file=current_file
-                ).first() if current_file else None
+                source = None
+                if current_file:
+                    if uid:
+                        source = SourceModel.query.filter_by(file=current_file, uid=uid).first()
+                    if source is None:
+                        source = SourceModel.query.filter_by(
+                            word_id=word_id, file=current_file
+                        ).first()
                 if current_file and source is None:
-                    session.add(SourceModel(word_id, current_file, word.version or "0"))
+                    session.add(SourceModel(word_id, current_file, word.version or "0", uid=uid or ""))
                     created_source = True
                 item = self.model(
                     word_id=word_id,
@@ -295,12 +300,14 @@ class BatchProofreadApi(Resource, BaseApi):
                     session.add(word)
                     session.flush()
 
-                source = SourceModel.query.filter_by(
-                    word_id=word.id,
-                    file=current_file,
-                ).first()
+                source = SourceModel.query.filter_by(file=current_file, uid=uid).first()
                 if source is None:
-                    session.add(SourceModel(word.id, current_file, word.version or "0"))
+                    source = SourceModel.query.filter_by(
+                        word_id=word.id,
+                        file=current_file,
+                    ).first()
+                if source is None:
+                    session.add(SourceModel(word.id, current_file, word.version or "0", uid=uid or ""))
 
                 proofread = ProofreadModel(
                     word_id=word.id,

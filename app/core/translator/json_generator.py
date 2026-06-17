@@ -110,7 +110,44 @@ class JsonGenerator(Runnable):
                     used_en.add(en_item["idx"])
                     break
 
-        # 2) tag一致，且英文value替换后的结果与当前中文value一致
+        # 2) 可见文本完全一致。用于修复之前按位置对齐导致tag类型被污染的旧数据。
+        for cn_item in cn_items:
+            if cn_item["idx"] in matches:
+                continue
+            cn_display = get_tag_display_text(cn_item["value"], cn_item["tag"]).strip().lower()
+            if not cn_display:
+                continue
+            for en_item in en_items:
+                if en_item["idx"] in used_en:
+                    continue
+                en_display = get_tag_display_text(en_item["value"], en_item["tag"]).strip().lower()
+                if cn_display == en_display:
+                    matches[cn_item["idx"]] = en_item["idx"]
+                    used_en.add(en_item["idx"])
+                    break
+
+        # 3) 可见文本是英文value替换后的结果，即使tag类型已被污染也尽量匹配回来
+        for cn_item in cn_items:
+            if cn_item["idx"] in matches:
+                continue
+            cn_display = get_tag_display_text(cn_item["value"], cn_item["tag"])
+            if not cn_display:
+                continue
+            for en_item in en_items:
+                if en_item["idx"] in used_en:
+                    continue
+                en_display = get_tag_display_text(en_item["value"], en_item["tag"])
+                cache_key = ("display", cn_item["idx"], en_item["idx"])
+                if cache_key not in translated_match_cache:
+                    replaced_value, ok = self.__process_value(
+                        en_display, tag=en_item["tag"])
+                    translated_match_cache[cache_key] = ok and replaced_value == cn_display
+                if translated_match_cache[cache_key]:
+                    matches[cn_item["idx"]] = en_item["idx"]
+                    used_en.add(en_item["idx"])
+                    break
+
+        # 4) tag一致，且英文value替换后的结果与当前中文value一致
         for cn_item in cn_items:
             if cn_item["idx"] in matches:
                 continue
@@ -127,7 +164,7 @@ class JsonGenerator(Runnable):
                     used_en.add(en_item["idx"])
                     break
 
-        # 3) tag一致时，按value的|分段位置相似度匹配
+        # 5) tag一致时，按value的|分段位置相似度匹配
         for cn_item in cn_items:
             if cn_item["idx"] in matches:
                 continue
@@ -150,7 +187,7 @@ class JsonGenerator(Runnable):
                 matches[cn_item["idx"]] = best_en_idx
                 used_en.add(best_en_idx)
 
-        # 4) fallback: 仅按tag顺序匹配
+        # 6) fallback: 仅按tag顺序匹配
         for cn_item in cn_items:
             if cn_item["idx"] in matches:
                 continue
@@ -247,13 +284,31 @@ class JsonGenerator(Runnable):
                         cv_conditions.append(ccv)
                     cn_str = f"{cv_name}|{cv_source}|{'|'.join(cv_conditions)}"
                     return cn_str, True
-            cn_str, handled = process_post_filter_split_values(
+            processed_pipe, handled = process_post_filter_split_values(
                 str_list, _process_pipe_value, tag=tag)
             if handled:
-                return cn_str, True
+                return processed_pipe, True
             en_split = split_string(en_str)
             cn_split = split_string(cn_str)
             res_split = []
+
+            def _looks_like_source_code(value: str):
+                return isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9]{1,12}", value) is not None
+
+            def _looks_like_metadata_value(value: str):
+                return isinstance(value, str) and re.fullmatch(r"\d+(?:-\d+)?", value.strip()) is not None
+
+            display_index = None
+            if tag == "quickref":
+                if len(en_split) >= 5 and en_split[-1] != "":
+                    display_index = len(en_split) - 1
+                else:
+                    display_index = 0
+            elif tag == "subclassFeature":
+                display_index = 0
+            elif tag not in ("adventure", "area", "book", "filter") and len(en_split) >= 3 and en_split[-1] != "":
+                display_index = len(en_split) - 1
+
             for i, eev in enumerate(en_split):
                 if len(cn_split) > i:
                     ccv = cn_split[i]
@@ -266,12 +321,30 @@ class JsonGenerator(Runnable):
                     res_split.append(p_v)
                 else:
                     p_v, ok = self.__process_value(eev, tag=tag)
-                    if ok or ccv is None:
+                    if ok and p_v != eev:
                         res_split.append(p_v)
+                    elif (
+                        display_index == i
+                        and res_split
+                        and res_split[0] != en_split[0]
+                        and (ccv is None or ccv == eev)
+                    ):
+                        res_split.append(res_split[0])
+                    elif ccv is not None:
+                        if (
+                            display_index != i
+                            and (
+                                (_looks_like_source_code(eev) and _looks_like_source_code(ccv))
+                                or _looks_like_metadata_value(eev)
+                            )
+                        ):
+                            res_split.append(eev)
+                        else:
+                            res_split.append(ccv)
                     else:
-                        res_split.append(ccv)
+                        res_split.append(p_v)
             cn_str = '|'.join(res_split)
-        elif processed == False:
+        elif processed == False and cn_str == en_str:
             p_v, ok = self.__process_value(en_str, tag = tag)
             if ok:
                 cn_str = p_v
@@ -370,6 +443,13 @@ class JsonGenerator(Runnable):
         if not parts:
             return new_value
         if new_tag in ("adventure", "area", "book", "filter"):
+            display_index = 0
+        elif new_tag == "quickref":
+            if len(parts) >= 5 and parts[-1] != "":
+                display_index = len(parts) - 1
+            else:
+                display_index = 0
+        elif new_tag == "subclassFeature":
             display_index = 0
         elif len(parts) >= 3 and parts[-1] != "":
             display_index = len(parts) - 1
@@ -494,13 +574,33 @@ class JsonGenerator(Runnable):
                                     )
                                     j.tag_sync_required = False
                             else:
-                                aligned_cn, aligned = self.__align_cn_tags_to_en_by_position(
-                                    j.cn_str,
-                                    j.en_str,
-                                )
-                                if aligned:
-                                    j.cn_str = aligned_cn
-                                    if j.sql_id is not None and self.dictionary is not None:
+                                original_cn = j.cn_str
+                                replaced_cn, ok = self.__replace_sub_jobs(
+                                    j.cn_str, j.en_str, tag=j.tag)
+                                if not ok:
+                                    aligned_cn, aligned = self.__align_cn_tags_to_en_by_position(
+                                        j.cn_str,
+                                        j.en_str,
+                                    )
+                                    if aligned:
+                                        j.cn_str = aligned_cn
+                                        if j.sql_id is not None and self.dictionary is not None:
+                                            self.dictionary.update(
+                                                j.sql_id,
+                                                j.en_str,
+                                                j.cn_str,
+                                                proofread=bool(j.is_proofread),
+                                                tag=j.tag,
+                                            )
+                                        replaced_cn, ok = self.__replace_sub_jobs(
+                                            j.cn_str, j.en_str, tag=j.tag)
+                                if ok:
+                                    j.cn_str = replaced_cn
+                                    if (
+                                        j.cn_str != original_cn
+                                        and j.sql_id is not None
+                                        and self.dictionary is not None
+                                    ):
                                         self.dictionary.update(
                                             j.sql_id,
                                             j.en_str,
@@ -508,8 +608,8 @@ class JsonGenerator(Runnable):
                                             proofread=bool(j.is_proofread),
                                             tag=j.tag,
                                         )
-                                    obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)
-                                    break
+                                obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)
+                                break
                             j.cn_str, ok = self.__replace_sub_jobs(
                                 j.cn_str, j.en_str, tag=j.tag)
                             obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)

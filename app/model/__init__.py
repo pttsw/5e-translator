@@ -3,6 +3,7 @@ from .user import *
 from .invite_code import *
 from .proofread import *
 from .source import *
+from .source import ensure_word_usage_table_schema
 from .file import *
 from .file import ensure_file_table_schema
 from .term import ensure_term_table_schema

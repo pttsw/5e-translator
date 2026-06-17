@@ -38,6 +38,8 @@ class MemoryDBDictionary:
         self.store_records: List[dict] = []
         self.store_by_id: Dict[int, dict] = {}
         self.source_index: Dict[str, set] = {}
+        self.word_usage: List[dict] = []
+        self.usage_by_file_uid: Dict[tuple, dict] = {}
         self.file_table: Dict[str, dict] = {}
         self.locked_entries: Dict[str, dict] = {}
         self.credits_table: Dict[str, List[dict]] = {}
@@ -99,7 +101,7 @@ class MemoryDBDictionary:
         self.store_records.append(record)
         self.store_by_id[sql_id] = record
         if rel_f:
-            self.source_index.setdefault(rel_f, set()).add(sql_id)
+            self._put_word_usage(sql_id, rel_f)
         self._put_cache(record)
         return record
 
@@ -134,6 +136,74 @@ class MemoryDBDictionary:
             "modified_at": record["modified_at"],
         }
 
+    @staticmethod
+    def _job_usage_context(job):
+        if job is None:
+            return {
+                "uid": "",
+                "key_path": "",
+                "context_key": "",
+                "context_label": "",
+            }
+        return {
+            "uid": getattr(job, "uid", "") or "",
+            "key_path": getattr(job, "key_path", "") or "",
+            "context_key": getattr(job, "context_key", "") or "",
+            "context_label": getattr(job, "context_label", "") or "",
+        }
+
+    def _put_word_usage(self, word_id: int, rel_f: str, job_context=None):
+        if not word_id or not rel_f:
+            return True
+        context = self._job_usage_context(job_context)
+        uid = context["uid"] or f"legacy:{word_id}"
+        usage = {
+            "word_id": word_id,
+            "file": rel_f,
+            "uid": uid,
+            "key_path": context["key_path"],
+            "context_key": context["context_key"],
+            "context_label": context["context_label"],
+            "version": self.version,
+        }
+        existing = self.usage_by_file_uid.get((rel_f, uid))
+        if existing:
+            existing.update(usage)
+        else:
+            self.word_usage.append(usage)
+            self.usage_by_file_uid[(rel_f, uid)] = usage
+        self.source_index.setdefault(rel_f, set()).add(word_id)
+        return True
+
+    def _get_usage_match(self, en: str, tag: str, rel_f: str, job_context=None):
+        if not rel_f or job_context is None:
+            return None
+        context = self._job_usage_context(job_context)
+        lookups = []
+        if context["uid"]:
+            lookups.append(("uid", context["uid"]))
+        if context["key_path"]:
+            lookups.append(("key_path", context["key_path"]))
+        if context["context_key"]:
+            lookups.append(("context_key", context["context_key"]))
+        target_tag = tag if tag not in ("", None) else None
+        for field, value in lookups:
+            matches = []
+            for usage in self.word_usage:
+                if usage["file"] != rel_f or usage.get(field) != value:
+                    continue
+                record = self.store_by_id.get(usage["word_id"])
+                if not record:
+                    continue
+                if record["en"] != en:
+                    continue
+                if record["category"] == target_tag or field == "uid":
+                    matches.append(record)
+            if matches:
+                proofread = [record for record in matches if record["proofread"] == 1]
+                return self._to_bean(proofread[0] if proofread else matches[0])
+        return None
+
     def _pick_best_match(self, records: List[dict], en: str, tag: str):
         if not records:
             return None
@@ -155,40 +225,61 @@ class MemoryDBDictionary:
             return [record for record in self.store_records if record["en"].lower() == lower_en]
         return [record for record in self.store_records if record["en"] == en]
 
-    def get(self, k: str, rel_f="", load_from_sql=False, ignore_case=False, tag="", correct_tag_from_db=False):
+    def get(self, k: str, rel_f="", load_from_sql=False, ignore_case=False, tag="", correct_tag_from_db=False, job_context=None):
+        usage_match = self._get_usage_match(k, tag, rel_f, job_context) if load_from_sql else None
+        if usage_match is not None:
+            return usage_match
         target_tag = tag if tag not in ("", None) else None
         if k in self.dictionary:
             cached = [bean for bean in self.dictionary[k] if bean["category"] == target_tag]
             if cached:
                 proofread = [bean for bean in cached if bean["proofread"] == 1]
-                return proofread[0] if proofread else cached[0]
+                bean = proofread[0] if proofread else cached[0]
+                if rel_f:
+                    self._put_word_usage(bean["sql_id"], rel_f, job_context)
+                return bean
+            if target_tag is not None:
+                return None
             if not correct_tag_from_db and self.dictionary[k]:
                 proofread = [bean for bean in self.dictionary[k] if bean["proofread"] == 1]
-                return proofread[0] if proofread else self.dictionary[k][0]
+                bean = proofread[0] if proofread else self.dictionary[k][0]
+                if rel_f:
+                    self._put_word_usage(bean["sql_id"], rel_f, job_context)
+                return bean
         if ignore_case and k.lower() in self.lower_dictionary:
             cached = self.lower_dictionary[k.lower()]
             if target_tag is not None:
                 tag_matches = [bean for bean in cached if bean["category"] == target_tag]
                 if tag_matches:
                     proofread = [bean for bean in tag_matches if bean["proofread"] == 1]
-                    return proofread[0] if proofread else tag_matches[0]
+                    bean = proofread[0] if proofread else tag_matches[0]
+                    if rel_f:
+                        self._put_word_usage(bean["sql_id"], rel_f, job_context)
+                    return bean
                 if correct_tag_from_db:
                     return None
+                if target_tag is not None:
+                    return None
             proofread = [bean for bean in cached if bean["proofread"] == 1]
-            return proofread[0] if proofread else cached[0]
+            bean = proofread[0] if proofread else cached[0]
+            if rel_f:
+                self._put_word_usage(bean["sql_id"], rel_f, job_context)
+            return bean
         if not load_from_sql:
             return None
         records = self._query_store(k, ignore_case=ignore_case)
         bean = self._pick_best_match(records, k, tag)
         if bean and rel_f and bean["sql_id"] in self.store_by_id:
-            self.source_index.setdefault(rel_f, set()).add(bean["sql_id"])
+            self._put_word_usage(bean["sql_id"], rel_f, job_context)
         if bean:
             self._put_cache(self.store_by_id[bean["sql_id"]])
         return bean
 
-    def get_bunch(self, keys: list, tags: list, rel_f: str, ignore_case=False, correct_tag_from_db=False):
+    def get_bunch(self, keys: list, tags: list, rel_f: str, ignore_case=False, correct_tag_from_db=False, job_contexts=None):
         res = {}
-        for key, tag in zip(keys, tags):
+        contexts = list(job_contexts or [])
+        for index, (key, tag) in enumerate(zip(keys, tags)):
+            job_context = contexts[index] if index < len(contexts) else None
             bean = self.get(
                 key,
                 rel_f=rel_f,
@@ -196,9 +287,14 @@ class MemoryDBDictionary:
                 ignore_case=ignore_case,
                 tag=tag,
                 correct_tag_from_db=correct_tag_from_db,
+                job_context=job_context,
             )
             if bean is not None:
-                res[(key, tag)] = bean
+                uid = getattr(job_context, "uid", "") if job_context is not None else ""
+                if uid:
+                    res[(key, tag, uid)] = bean
+                else:
+                    res[(key, tag)] = bean
         return res
 
     def get_tag_only_update_match(self, en: str, tag: str = ""):
@@ -226,11 +322,12 @@ class MemoryDBDictionary:
             return candidates[0]
         return None
 
-    def put(self, key: str, value: str, rel_f: str, proofread=False, tag=""):
-        self._insert_record(key, value, rel_f, proofread=proofread, tag=tag)
-        return True
+    def put(self, key: str, value: str, rel_f: str, proofread=False, tag="", job_context=None, **_kwargs):
+        record = self._insert_record(key, value, "", proofread=proofread, tag=tag)
+        self._put_word_usage(record["id"], rel_f, job_context)
+        return record["id"]
 
-    def update(self, sql_id: int, en_or_cn: str, cn=None, proofread: bool = False, tag=""):
+    def update(self, sql_id: int, en_or_cn: str, cn=None, proofread: bool = False, tag="", rel_f="", job_context=None):
         record = self.store_by_id.get(sql_id)
         if record is None:
             return False
@@ -247,6 +344,8 @@ class MemoryDBDictionary:
         if old_en != record["en"]:
             self._refresh_cache_for_en(old_en)
         self._refresh_cache_for_en(record["en"])
+        if rel_f:
+            self._put_word_usage(sql_id, rel_f, job_context)
         return True
 
     def _refresh_cache_for_en(self, en: str):
@@ -262,7 +361,7 @@ class MemoryDBDictionary:
     def putSource(self, key: str, value, rel_f: str):
         for record in self.store_records:
             if record["en"] == key and record["cn"] == value:
-                self.source_index.setdefault(rel_f, set()).add(record["id"])
+                self._put_word_usage(record["id"], rel_f)
         return True
 
     def dump(self, file_names=None):
