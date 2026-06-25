@@ -1,6 +1,7 @@
 import pytest
 
 from app.core.translator.json_generator import JsonGenerator
+from app.core.utils.file_work_info import FileWorkInfo
 from app.core.utils.job import Job
 
 
@@ -37,6 +38,26 @@ def test_replace_sub_jobs_keeps_marker_mapping_when_order_differs():
     assert result == cn_str
 
 
+def test_invoke_does_not_mutate_source_json_obj():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.ok = True
+    generator.dictionary = None
+    generator.thread_num = 1
+
+    file_info = FileWorkInfo(
+        job_list=[Job(uid="entry", en_str="Hello world", cn_str="你好，世界")],
+        json_obj={"entries": ["{!@ entry}"]},
+        json_path="book/example.json",
+        out_path="book/example.json",
+    )
+
+    result = list(generator.invoke([file_info], config={"metadata": {}}))
+
+    assert result == [file_info]
+    assert file_info.json_obj == {"entries": ["{!@ entry}"]}
+    assert file_info.cn_obj == {"entries": ["你好，世界"]}
+
+
 def test_replace_sub_jobs_matches_already_translated_values_by_order():
     generator = JsonGenerator.__new__(JsonGenerator)
     generator.done_jobs = []
@@ -67,6 +88,257 @@ def test_replace_sub_jobs_matches_already_translated_values_by_order():
 
     assert success is True
     assert result == cn_str
+
+
+def test_replace_sub_jobs_keeps_item_display_text_from_source():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    en_str = "{@item Enspelled Staff (Level 3 Spell)|XDMG|3}"
+    cn_str = "{@item 魔咒法杖（3环）|XDMG|3环}"
+
+    def fake_process_value(value, tag=""):
+        if value == "3":
+            return value, True
+        translations = {
+            "Enspelled Staff (Level 3 Spell)": "魔咒法杖（3环）",
+        }
+        if tag == "item" and value in translations:
+            return translations[value], True
+        return value, False
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(cn_str, en_str)
+
+    assert success is True
+    assert result == "{@item 魔咒法杖（3环）|XDMG|3}"
+
+
+def test_replace_sub_jobs_translates_item_display_text_from_jobs():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    en_str = "{@item Ink (1-ounce bottle)|phb|bottle of ink}"
+    cn_str = "{@item 墨水(1盎司/瓶)|phb|bottle of ink}"
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            "Ink (1-ounce bottle)": "墨水(1盎司/瓶)",
+            "bottle of ink": "一瓶墨水",
+        }
+        if tag == "item" and value in translations:
+            return translations[value], True
+        return value, False
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(cn_str, en_str)
+
+    assert success is True
+    assert result == "{@item 墨水(1盎司/瓶)|phb|一瓶墨水}"
+
+
+def test_replace_sub_jobs_prefers_item_display_text_from_uid_job():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    en_str = "{@item Armor of Resistance (Fire)|XDMG|Fire}"
+    cn_str = "{@item 火焰抗性护甲|XDMG|火焰}"
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            "Armor of Resistance (Fire)": "火焰抗性护甲",
+            "Fire": "火",
+        }
+        if tag == "item" and value in translations:
+            return translations[value], True
+        return value, False
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(cn_str, en_str)
+
+    assert success is True
+    assert result == "{@item 火焰抗性护甲|XDMG|火焰}"
+
+
+def test_replace_jobs_uses_child_uid_for_item_display_text():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    parent_uid = "$.itemGroup[name=Armor-of-Resistance;source=XDMG;page=231].entries[1].rows[2][1]"
+    generator.done_jobs = [
+        Job(uid=parent_uid, en_str="{@item Armor of Fire Resistance|XDMG|Fire}", cn_str="{@item Armor of Fire Resistance|XDMG|Fire}", tag="item"),
+        Job(uid=f"{parent_uid}.item[0].0", en_str="Armor of Fire Resistance", cn_str="火焰抗性护甲", tag="item"),
+        Job(uid=f"{parent_uid}.item[0].1", en_str="XDMG", cn_str="XDMG", tag="item"),
+        Job(uid=f"{parent_uid}.item[0].2", en_str="Fire", cn_str="火焰", tag="item"),
+    ]
+    generator.dictionary = None
+    generator._JsonGenerator__build_lookup_cache()
+
+    result, success = generator._JsonGenerator__replace_jobs(f"{{!@ {parent_uid}}}")
+
+    assert success is True
+    assert result == "{@item 火焰抗性护甲|XDMG|火焰}"
+
+
+def test_replace_sub_jobs_does_not_reprocess_translated_plain_job_with_tag():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = [
+        Job(uid="card", en_str="Rogue", cn_str="浪客", tag="item"),
+        Job(uid="class", en_str="Rogue", cn_str="游荡者", tag="item"),
+    ]
+    generator.dictionary = None
+    generator._JsonGenerator__build_lookup_cache()
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "游荡者",
+        "Rogue",
+        tag="item",
+    )
+
+    assert success is True
+    assert result == "游荡者"
+
+
+def test_replace_sub_jobs_keeps_variantrule_source_metadata():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Hit Points", "variantrule"): "生命值",
+            ("XPHB", "variantrule"): "经验值",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@variantrule 生命值|经验值|生命值}",
+        "{@variantrule Hit Points|XPHB|Hit Points}",
+    )
+
+    assert success is True
+    assert result == "{@variantrule 生命值|XPHB|生命值}"
+
+
+def test_replace_sub_jobs_translates_filter_search_value_with_page_context():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Quori", "bestiary"): "梦灵",
+            ("Quori", None): "梦灵语",
+            ("Quori", "language"): "梦灵语",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@filter 梦灵语|bestiary|source=ERLW|search=梦灵语}",
+        "{@filter Quori|bestiary|source=ERLW|search=Quori}",
+    )
+
+    assert success is True
+    assert result == "{@filter 梦灵|bestiary|source=ERLW|search=梦灵}"
+
+
+def test_replace_sub_jobs_keeps_total_skip_prefix_filter_condition():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Common", "items"): "普通",
+            ("common", ""): "普通",
+            ("common", "item"): "通用语",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@filter 普通|items|rarity=common}",
+        "{@filter Common|items|rarity=common}",
+    )
+
+    assert success is True
+    assert result == "{@filter 普通|items|rarity=common}"
+
+
+def test_replace_sub_jobs_normalizes_translated_tag_values_from_dictionary():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    en_str = (
+        "Choose two from among {@skill Deception}, {@skill Insight}, "
+        "{@skill Persuasion}, and {@skill Stealth}"
+    )
+    cn_str = (
+        "从{@skill 欺骗}，{@skill 洞察}，{@skill 说服}，以及{@skill 潜行}中选择两项"
+    )
+
+    def fake_process_value(value, tag=""):
+        if value == en_str:
+            return value, False
+        translations = {
+            ("Deception", "skill"): "欺瞒",
+            ("Insight", "skill"): "洞悉",
+            ("Persuasion", "skill"): "游说",
+            ("Stealth", "skill"): "隐匿",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(cn_str, en_str)
+
+    assert success is True
+    assert result == (
+        "从{@skill 欺瞒}，{@skill 洞悉}，{@skill 游说}，以及{@skill 隐匿}中选择两项"
+    )
+
+
+def test_generator_get_uses_job_lookup_cache_before_dictionary():
+    class FailingDictionary:
+        def get(self, *args, **kwargs):
+            raise AssertionError("dictionary should not be queried")
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = FailingDictionary()
+    generator.done_jobs = [
+        Job(uid="skill", en_str="Deception", cn_str="欺瞒", tag="skill"),
+        Job(uid="unique", en_str="Arcane Study", cn_str="奥术书房", tag="name"),
+    ]
+    generator._JsonGenerator__build_lookup_cache()
+
+    assert generator._JsonGenerator__get("Deception", "skill") == ("欺瞒", True)
+    assert generator._JsonGenerator__get("deception", "skill") == ("欺瞒", True)
+    assert generator._JsonGenerator__get("Arcane Study", "entries") == ("奥术书房", True)
+
+
+def test_replace_sub_jobs_skips_dictionary_for_already_translated_plain_text():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fail_process_value(value, tag=""):
+        raise AssertionError("plain translated text should not be looked up again")
+
+    generator._JsonGenerator__process_value = fail_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "已经翻译的描述文本。",
+        "Already translated description text.",
+    )
+
+    assert success is True
+    assert result == "已经翻译的描述文本。"
 
 
 def test_tag_only_sync_wraps_new_english_tags_and_updates_database():
@@ -236,6 +508,104 @@ def test_replace_sub_jobs_restores_quickref_numeric_metadata():
     assert result == "{@quickref 困难地形||3}"
 
 
+def test_replace_sub_jobs_keeps_filter_rewards_page_metadata():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("New Chwinga Charms", "rewards"): "新的怯蕴阿灵护咒",
+            ("rewards", "filter"): "大功告成",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@filter 新的怯蕴阿灵护咒|大功告成|source=IDRotF}",
+        "{@filter New Chwinga Charms|rewards|source=IDRotF}",
+    )
+
+    assert success is True
+    assert result == "{@filter 新的怯蕴阿灵护咒|rewards|source=IDRotF}"
+
+
+def test_replace_sub_jobs_keeps_card_source_metadata():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Obo'laka", "card"): "奥博娜卡",
+            ("Omu's Trickster Gods", "card"): "奥姆城诡神",
+            ("ToA", "card"): "墓碑",
+            ("Obo'laka's card", "card"): "奥博娜卡的卡片",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@card 奥博娜卡|奥姆城诡神|墓碑|奥博娜卡的卡片}",
+        "{@card Obo'laka|Omu's Trickster Gods|ToA|Obo'laka's card}",
+    )
+
+    assert success is True
+    assert result == "{@card 奥博娜卡|奥姆城诡神|ToA|奥博娜卡的卡片}"
+
+
+def test_replace_sub_jobs_translates_recipe_display_text_as_plain_text():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Faerie Fire", "recipe"): "妖火",
+            ("PaF", "recipe"): "PaF",
+            ("this page", "recipe"): "妖火",
+            ("this page", ""): "本页",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@recipe 妖火|PaF|妖火}",
+        "{@recipe Faerie Fire|PaF|this page}",
+    )
+
+    assert success is True
+    assert result == "{@recipe 妖火|PaF|本页}"
+
+
+def test_replace_sub_jobs_keeps_class_source_and_level_metadata():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("fighter", "class"): "战士",
+            ("Battle Master", "class"): "战斗大师",
+            ("phb", "class"): "玩家手册",
+            ("2-0", "class"): "战士",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@class 战士|玩家手册|战斗大师|战斗大师|玩家手册|战士}",
+        "{@class fighter|phb|Battle Master|Battle Master|phb|2-0}",
+    )
+
+    assert success is True
+    assert result == "{@class 战士|phb|战斗大师|战斗大师|phb|2-0}"
+
+
 def test_replace_sub_jobs_restores_subclass_feature_level_metadata():
     generator = JsonGenerator.__new__(JsonGenerator)
     generator.done_jobs = []
@@ -346,7 +716,7 @@ def test_replace_jobs_continues_sub_tag_replacement_after_alignment():
 
     calls = []
 
-    def fake_replace_sub_jobs(cn_str, en_str=None, tag=""):
+    def fake_replace_sub_jobs(cn_str, en_str=None, tag="", **_kwargs):
         calls.append(cn_str)
         if len(calls) == 1:
             assert cn_str == "他们不会被{@table 突袭|RMR|突袭}。"
@@ -410,6 +780,61 @@ def test_replace_jobs_prefers_value_matching_over_position_alignment():
         "entries": [
             "若擒抱者陷入{@condition 失能|XPHB}，"
             "受擒{@variantrule 状态|XPHB|状态}将结束。"
+        ]
+    }
+
+
+def test_replace_jobs_keeps_same_tag_items_in_order_when_old_terms_changed():
+    class FakeDictionary:
+        def get(self, en, tag=""):
+            translations = {
+                ("spell scroll", "item"): "法术卷轴",
+                ("lesser restoration", "spell"): "次等复原术",
+                ("Potion of Greater Healing", "item"): "高等治疗药水",
+                ("potion of healing (greater)", "item"): "治疗药水（高等）",
+                ("chime of opening", "item"): "开门钟琴",
+            }
+            value = translations.get((en, tag))
+            return (value, True) if value is not None else (None, False)
+
+        def update(self, *args, **kwargs):
+            return True
+
+    en_str = (
+        "The grave-robbers had gathered grave goods, candlesticks, metal fixtures, "
+        "and other art objects worth a total of 440 gp, plus a {@item spell scroll} "
+        "of {@spell lesser restoration}, a {@item Potion of Greater Healing||potion "
+        "of healing (greater)}, and a {@item chime of opening}."
+    )
+    old_cn = (
+        "盗墓者收集了墓葬品、烛台、金属装置和其他艺术品，总价值为440金币，"
+        "外加一张{@item 法术卷轴}上的{@spell 次级复原}法术，"
+        "一瓶{@item 强效治疗药水||治疗药水（强效）}，以及一个{@item 开锁铃铛}。"
+    )
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = FakeDictionary()
+    generator.done_jobs = [
+        Job(
+            uid="treasure",
+            en_str=en_str,
+            cn_str=old_cn,
+            tag="adventure",
+            sql_id=185450,
+            is_proofread=False,
+        )
+    ]
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entries": ["{!@ treasure}"]}
+    )
+
+    assert ok is True
+    assert cn_obj == {
+        "entries": [
+            "盗墓者收集了墓葬品、烛台、金属装置和其他艺术品，总价值为440金币，"
+            "外加一张{@item 法术卷轴}上的{@spell 次等复原术}法术，"
+            "一瓶{@item 高等治疗药水||治疗药水（强效）}，以及一个{@item 开门钟琴}。"
         ]
     }
 

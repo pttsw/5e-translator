@@ -145,6 +145,10 @@ def main():
                                   help='Preview using all translatable jobs, ignoring current DB translation state')
     translate_parser.add_argument('--batch-preview-detail-limit', default=5, type=int,
                                   help='How many largest preview units to print per file, default to 5')
+    translate_parser.add_argument('--intermediate-cache', action='store_true', default=False,
+                                  help='Write .en/.jobs cache before LLM processing, default to False')
+    translate_parser.add_argument('--generator-update-db', action='store_true', default=False,
+                                  help='Allow JsonGenerator to write tag normalization updates back to DB, default to False')
     translate_parser.add_argument('--mock-db', action='store_true', default=False,
                                   help='Use in-memory mock database backend for this run')
     translate_parser.add_argument('--mock-db-seed', default='', type=str,
@@ -270,7 +274,7 @@ def main():
             else:
                 args.en = args.file
 
-        config = {'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache, 'batch': args.batch, 'batch_max_chars': args.batch_max_chars, 'use_ai': args.use_ai}
+        config = {'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache, 'batch': args.batch, 'batch_max_chars': args.batch_max_chars, 'use_ai': args.use_ai, 'intermediate_cache': args.intermediate_cache, 'generator_update_db': args.generator_update_db}
         if args.batch_preview:
             preview_pipeline = find_json_files|JsonAnalyser()|JobNeedTranslateSetter()
             if args.use_ai:
@@ -286,9 +290,15 @@ def main():
 
         if args.use_ai:
             processor = BatchJobProcessor(args.thread_num, update=True) if args.batch else JobProcessor(args.thread_num, update=True)
-            pipeline = find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()|write_translate_cache|processor|JsonGenerator(args.thread_num)|write_translate_cache
+            pipeline = find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()
+            if args.intermediate_cache:
+                pipeline = pipeline|write_translate_cache
+            pipeline = pipeline|processor|JsonGenerator(args.thread_num)|write_translate_cache
         else:
-            pipeline = find_json_files|JsonAnalyser()|NonAiFallbackSetter()|write_translate_cache|JsonGenerator(args.thread_num)|write_translate_cache
+            pipeline = find_json_files|JsonAnalyser()|NonAiFallbackSetter()
+            if args.intermediate_cache:
+                pipeline = pipeline|write_translate_cache
+            pipeline = pipeline|JsonGenerator(args.thread_num)|write_translate_cache
         res = pipeline.invoke((args.en, args.skip_file_name), config=config)
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})

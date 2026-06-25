@@ -145,7 +145,13 @@ class DBDictionary:
             'modified_at': row['modified_at'],
         }
 
-    def __get_usage_match(self, db, k: str, tag: str, rel_f: str, job=None):
+    @staticmethod
+    def __same_en(left: str, right: str, ignore_case: bool = False) -> bool:
+        if ignore_case and isinstance(left, str) and isinstance(right, str):
+            return left.lower() == right.lower()
+        return left == right
+
+    def __get_usage_match(self, db, k: str, tag: str, rel_f: str, job=None, ignore_case: bool = False):
         if not rel_f or job is None:
             return None
         context = self.__job_usage_context(job)
@@ -177,6 +183,8 @@ class DBDictionary:
                         f"word_category={rows[0]['category']}, job_category={target_tag}"
                     )
                     return self.__row_to_bean(rows[0])
+                if not self.__same_en(rows[0]['en'], k, ignore_case):
+                    continue
                 if rows[0]['category'] != target_tag:
                     continue
                 return self.__row_to_bean(rows[0])
@@ -193,7 +201,6 @@ class DBDictionary:
                 (word_id, file, uid, key_path, context_key, context_label, version)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
-                word_id = VALUES(word_id),
                 key_path = VALUES(key_path),
                 context_key = VALUES(context_key),
                 context_label = VALUES(context_label),
@@ -210,7 +217,7 @@ class DBDictionary:
             ),
         )
 
-    def __get_usage_matches_by_uid(self, db, keys: list, tags: list, rel_f: str, contexts: list):
+    def __get_usage_matches_by_uid(self, db, keys: list, tags: list, rel_f: str, contexts: list, ignore_case: bool = False):
         uid_requests = {}
         for index, (k, t) in enumerate(zip(keys, tags)):
             if index >= len(contexts):
@@ -243,7 +250,7 @@ class DBDictionary:
                     continue
                 k, t, _job_context = request
                 target_tag = t if t not in ("", None) else None
-                if row['en'] != k:
+                if not self.__same_en(row['en'], k, ignore_case):
                     continue
                 if row['category'] != target_tag:
                     logger.debug(
@@ -324,7 +331,6 @@ class DBDictionary:
                 "(word_id, file, uid, key_path, context_key, context_label, version) "
                 f"VALUES {values_sql} "
                 "ON DUPLICATE KEY UPDATE "
-                "word_id = VALUES(word_id), "
                 "key_path = VALUES(key_path), "
                 "context_key = VALUES(context_key), "
                 "context_label = VALUES(context_label), "
@@ -524,10 +530,10 @@ class DBDictionary:
             db_index = self.__get_db_index()
             db = self.db_list[db_index]
             try:
-                usage_matches = self.__get_usage_matches_by_uid(db, keys, tags, rel_f, contexts)
+                usage_matches = self.__get_usage_matches_by_uid(db, keys, tags, rel_f, contexts, ignore_case=ignore_case)
                 for k, t, job_context in zip(keys, tags, contexts):
                     uid = getattr(job_context, "uid", "") or ""
-                    usage_bean = usage_matches.get(uid) if uid else self.__get_usage_match(db, k, t, rel_f, job_context)
+                    usage_bean = usage_matches.get(uid) if uid else self.__get_usage_match(db, k, t, rel_f, job_context, ignore_case=ignore_case)
                     if usage_bean is not None:
                         if uid:
                             res_beans[(k, t, uid)] = usage_bean

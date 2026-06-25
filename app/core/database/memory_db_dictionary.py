@@ -168,14 +168,27 @@ class MemoryDBDictionary:
         }
         existing = self.usage_by_file_uid.get((rel_f, uid))
         if existing:
-            existing.update(usage)
+            existing.update({
+                "file": rel_f,
+                "uid": uid,
+                "key_path": context["key_path"],
+                "context_key": context["context_key"],
+                "context_label": context["context_label"],
+                "version": self.version,
+            })
         else:
             self.word_usage.append(usage)
             self.usage_by_file_uid[(rel_f, uid)] = usage
         self.source_index.setdefault(rel_f, set()).add(word_id)
         return True
 
-    def _get_usage_match(self, en: str, tag: str, rel_f: str, job_context=None):
+    @staticmethod
+    def _same_en(left: str, right: str, ignore_case: bool = False) -> bool:
+        if ignore_case and isinstance(left, str) and isinstance(right, str):
+            return left.lower() == right.lower()
+        return left == right
+
+    def _get_usage_match(self, en: str, tag: str, rel_f: str, job_context=None, ignore_case: bool = False):
         if not rel_f or job_context is None:
             return None
         context = self._job_usage_context(job_context)
@@ -195,7 +208,7 @@ class MemoryDBDictionary:
                 record = self.store_by_id.get(usage["word_id"])
                 if not record:
                     continue
-                if record["en"] != en:
+                if not self._same_en(record["en"], en, ignore_case):
                     continue
                 if record["category"] == target_tag or field == "uid":
                     matches.append(record)
@@ -226,7 +239,7 @@ class MemoryDBDictionary:
         return [record for record in self.store_records if record["en"] == en]
 
     def get(self, k: str, rel_f="", load_from_sql=False, ignore_case=False, tag="", correct_tag_from_db=False, job_context=None):
-        usage_match = self._get_usage_match(k, tag, rel_f, job_context) if load_from_sql else None
+        usage_match = self._get_usage_match(k, tag, rel_f, job_context, ignore_case=ignore_case) if load_from_sql else None
         if usage_match is not None:
             return usage_match
         target_tag = tag if tag not in ("", None) else None
@@ -282,12 +295,12 @@ class MemoryDBDictionary:
             job_context = contexts[index] if index < len(contexts) else None
             bean = self.get(
                 key,
-                rel_f=rel_f,
-                load_from_sql=True,
-                ignore_case=ignore_case,
-                tag=tag,
-                correct_tag_from_db=correct_tag_from_db,
-                job_context=job_context,
+            rel_f=rel_f,
+            load_from_sql=True,
+            ignore_case=ignore_case,
+            tag=tag,
+            correct_tag_from_db=correct_tag_from_db,
+            job_context=job_context,
             )
             if bean is not None:
                 uid = getattr(job_context, "uid", "") if job_context is not None else ""

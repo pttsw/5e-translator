@@ -9,6 +9,9 @@
 
 import os
 import json
+import re
+import subprocess
+from datetime import date, datetime
 from config import *
 from langchain_core.runnables import RunnableLambda
 from .file_work_info import FileWorkInfo
@@ -75,6 +78,130 @@ def write_translate_cache_func(file_work_infos:List[FileWorkInfo], out_path:str=
     """
     for file_work_info in file_work_infos:
         yield write_file_work_infos(file_work_info, out_path)
+
+
+def order_cn_entity_fields(obj):
+    if isinstance(obj, list):
+        return [order_cn_entity_fields(item) for item in obj]
+    if not isinstance(obj, dict):
+        return obj
+
+    ordered_items = [
+        (key, order_cn_entity_fields(value))
+        for key, value in obj.items()
+    ]
+    if not all(key in obj for key in ("ENG_name", "name", "type")):
+        return dict(ordered_items)
+
+    ordered_map = dict(ordered_items)
+    priority_keys = ("ENG_name", "name", "type")
+    return {
+        **{key: ordered_map[key] for key in priority_keys},
+        **{key: value for key, value in ordered_items if key not in priority_keys},
+    }
+
+
+_CLEAN_JSON_SCRIPT = os.path.abspath(os.path.join(
+    os.path.dirname(__file__),
+    "../../../scripts/clean_5etools_json.mjs",
+))
+_FIVETOOLS_ROOT = os.getenv("FIVETOOLS_ROOT", "/data/5etools-mirror-2.github.io")
+_SHARED_REPLACEMENTS = {
+    "’": "'",
+    "‘": "'",
+    "": "'",
+    "\u02BC": "'",
+    "…": "...",
+    "\u200B": "",
+    "\u2002": " ",
+    "ﬀ": "ff",
+    "ﬃ": "ffi",
+    "ﬄ": "ffl",
+    "ﬁ": "fi",
+    "ﬂ": "fl",
+    "Ĳ": "IJ",
+    "ĳ": "ij",
+    "Ǉ": "LJ",
+    "ǈ": "Lj",
+    "ǉ": "lj",
+    "Ǌ": "NJ",
+    "ǋ": "Nj",
+    "ǌ": "nj",
+    "ﬅ": "ft",
+    "“": '"',
+    "”": '"',
+    "\u201a": ",",
+}
+_STR_REPLACEMENTS = {
+    "—": "\\u2014",
+    "–": "\\u2013",
+    "‑": "\\u2011",
+    "−": "\\u2212",
+    " ": "\\u00A0",
+    " ": "\\u2007",
+}
+_SOFT_HYPHEN_REMOVE_REGEX = re.compile(r"\u00AD *\r?\n?\r?")
+
+
+def _clean_5etools_string(value: str):
+    for old, new in _SHARED_REPLACEMENTS.items():
+        value = value.replace(old, new)
+    return _SOFT_HYPHEN_REMOVE_REGEX.sub("", value)
+
+
+def _clean_5etools_strings(obj):
+    if isinstance(obj, str):
+        return _clean_5etools_string(obj)
+    if isinstance(obj, list):
+        return [_clean_5etools_strings(item) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _clean_5etools_strings(value) for key, value in obj.items()}
+    return obj
+
+
+def _to_json_safe(obj):
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, list):
+        return [_to_json_safe(item) for item in obj]
+    if isinstance(obj, tuple):
+        return [_to_json_safe(item) for item in obj]
+    if isinstance(obj, dict):
+        return {str(key): _to_json_safe(value) for key, value in obj.items()}
+    if hasattr(obj, "to_serializable"):
+        return _to_json_safe(obj.to_serializable())
+    if hasattr(obj, "__dict__"):
+        return _to_json_safe(obj.__dict__)
+    return str(obj)
+
+
+def _clean_json_with_python_fallback(obj):
+    cleaned = _clean_5etools_strings(obj)
+    content = json.dumps(cleaned, ensure_ascii=False, indent="\t") + "\n"
+    for old, new in _STR_REPLACEMENTS.items():
+        content = content.replace(old, new)
+    return content
+
+
+def clean_5etools_json(obj):
+    obj = _to_json_safe(obj)
+    if os.path.exists(_CLEAN_JSON_SCRIPT) and os.path.isdir(_FIVETOOLS_ROOT):
+        try:
+            raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+            proc = subprocess.run(
+                ["node", _CLEAN_JSON_SCRIPT],
+                input=raw,
+                text=True,
+                capture_output=True,
+                check=True,
+                env={**os.environ, "FIVETOOLS_ROOT": _FIVETOOLS_ROOT},
+            )
+            return proc.stdout
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    return _clean_json_with_python_fallback(obj)
         
 def write_file_work_infos(file_work_info:FileWorkInfo, out_path:str=OUT_PATH):
     out_file_path = os.path.join(out_path, file_work_info.out_path)  # 输出目录
@@ -86,22 +213,14 @@ def write_file_work_infos(file_work_info:FileWorkInfo, out_path:str=OUT_PATH):
 
     # 写入替换好Job uuid的Json文件
     with open(out_file_path + '.en', 'w') as file:
-        file.write(json.dumps(file_work_info.json_obj, ensure_ascii=False, indent=2))
+        file.write(clean_5etools_json(file_work_info.json_obj))
     if file_work_info.cn_obj is not None:
+        file_work_info.cn_obj = order_cn_entity_fields(file_work_info.cn_obj)
         with open(out_file_path, 'w') as file:
-            file.write(json.dumps(file_work_info.cn_obj, ensure_ascii=False, indent=2))
+            file.write(clean_5etools_json(file_work_info.cn_obj))
     # 写入Job列表文件
     with open(out_file_path+'.jobs', 'w') as file:
-        file.write('[\n')
-        first_flag = True
-        for j in file_work_info.job_list:
-            if first_flag:
-                first_flag = False
-            else:
-                file.write(',\n')
-            file.write(json.dumps(
-                j, default=lambda o: o.__dict__ if hasattr(o, '__dict__') else str(o), ensure_ascii=False, indent=2))
-        file.write('\n]')
+        file.write(clean_5etools_json(file_work_info.job_list))
     file_work_info.json_path = out_file_path
     return file_work_info
     

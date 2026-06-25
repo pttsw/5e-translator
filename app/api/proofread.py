@@ -13,6 +13,10 @@ import json
 api = Api()
 
 
+def _is_admin_user():
+    return getattr(current_user, 'roles', '') == 'admin'
+
+
 def _get_file_progress(file_path: str):
     if not file_path:
         return {}
@@ -25,6 +29,29 @@ def _get_file_progress(file_path: str):
             'translate': int(file_row.translate or 0),
             'proofread': int(file_row.proofread or 0),
         }
+    }
+
+
+def _word_candidate_dict(word, input_cn=''):
+    data = word.to_dict()
+    data['matches_input'] = word.cn == input_cn
+    return data
+
+
+def _get_confirmed_replacement_data(word, input_cn=''):
+    candidates = (
+        WordsModel.query
+        .filter(WordsModel.en == word.en)
+        .order_by(WordsModel.proofread.desc(), WordsModel.modified_at.desc(), WordsModel.id.asc())
+        .all()
+    )
+    has_input_match = any(candidate.cn == input_cn for candidate in candidates)
+    return {
+        'word_id': word.id,
+        'en': word.en,
+        'cn': input_cn,
+        'items': [_word_candidate_dict(candidate, input_cn) for candidate in candidates],
+        'has_input_match': has_input_match,
     }
 
 @api.resource('/proofread')
@@ -138,6 +165,16 @@ class ProofreadApi(Resource, BaseApi):
                     .filter(WordsModel.en == en_str)
                     .first()
                 )
+            if word is not None and int(word.proofread or 0) == 1:
+                usage_count = SourceModel.query.filter_by(word_id=word.id).count()
+                if usage_count > 1:
+                    replacement_data = _get_confirmed_replacement_data(word, cn)
+                    replacement_data['requires_replacement'] = True
+                    replacement_data['usage_count'] = usage_count
+                    replacement_data['can_direct_update'] = False
+                    return success(message="此已确认Job被多处引用，请选择替换目标", data=replacement_data)
+                if not _is_admin_user():
+                    return error("已确认内容仅管理员可直接修改，请联系管理员")
 
             # if ProofreadModel.query.filter_by(word_id = data['word_id']).filter_by(cn = data['cn']).first():
             #     return error("请勿重复提交已存在的翻译！")
@@ -240,6 +277,139 @@ class ProofreadApi(Resource, BaseApi):
     def _update(self,words):
         if words is None:
             raise Exception("words is none")            
+
+
+@api.resource('/proofread/confirmed-replacement-options')
+class ConfirmedReplacementOptionsApi(Resource):
+    @login_required
+    def post(self):
+        if not current_user.is_authenticated:
+            return error('请先登录！')
+        if not request.is_json:
+            return error("请求参数必须为JSON")
+
+        data = request.get_json()
+        word_id = data.get('word_id')
+        cn = str(data.get('cn') or '').strip()
+        if not word_id:
+            return error("检查失败：word_id不能为空")
+        word = WordsModel.query.get(word_id)
+        if word is None:
+            return error("检查失败：没有找到相关词条")
+
+        usage_count = SourceModel.query.filter_by(word_id=word.id).count()
+        if usage_count <= 1:
+            return success(data={
+                'word_id': word.id,
+                'en': word.en,
+                'cn': cn,
+                'usage_count': usage_count,
+                'requires_replacement': False,
+                'can_direct_update': _is_admin_user(),
+            })
+
+        replacement_data = _get_confirmed_replacement_data(word, cn)
+        replacement_data['usage_count'] = usage_count
+        replacement_data['requires_replacement'] = True
+        replacement_data['can_direct_update'] = False
+        return success(data=replacement_data)
+
+
+@api.resource('/proofread/confirmed-replacement')
+class ConfirmedReplacementApi(Resource):
+    @login_required
+    def post(self):
+        if not current_user.is_authenticated:
+            return error('请先登录！')
+        if not request.is_json:
+            return error("请求参数必须为JSON")
+
+        data = request.get_json()
+        current_file = str(data.get('current_file') or '').strip('/')
+        uid = str(data.get('uid') or '').strip()
+        word_id = data.get('word_id')
+        target_word_id = data.get('target_word_id')
+        cn = str(data.get('cn') or '').strip()
+        if not current_file or not uid or not word_id:
+            return error("替换失败：current_file、uid、word_id不能为空")
+
+        current_word = WordsModel.query.get(word_id)
+        if current_word is None:
+            return error("替换失败：当前词条不存在")
+        if int(current_word.proofread or 0) != 1:
+            return error("替换失败：当前词条不是已确认Job")
+        if SourceModel.query.filter_by(word_id=current_word.id).count() <= 1:
+            return error("替换失败：当前Job未被多处引用")
+        usage = SourceModel.query.filter_by(
+            file=current_file,
+            uid=uid,
+            word_id=current_word.id,
+        ).first()
+        if usage is None:
+            return error("替换失败：没有找到当前Job对应的使用记录")
+
+        target_word = None
+        created = False
+        if target_word_id:
+            target_word = WordsModel.query.get(target_word_id)
+            if target_word is None:
+                return error("替换失败：选择的词条不存在")
+            if target_word.en != current_word.en:
+                return error("替换失败：选择的词条英文原文不一致")
+        else:
+            if not cn:
+                return error("替换失败：新增翻译不能为空")
+            target_word = (
+                WordsModel.query
+                .filter(WordsModel.en == current_word.en)
+                .filter(WordsModel.cn == cn)
+                .order_by(WordsModel.id.asc())
+                .first()
+            )
+
+        try:
+            if target_word is None:
+                target_word = WordsModel(
+                    en=current_word.en,
+                    cn=cn,
+                    json_file=current_file,
+                    modified_by=current_user.get_id(),
+                    source=current_word.source or "",
+                    version=current_word.version or "0",
+                )
+                target_word.category = current_word.category
+                target_word.is_key = 1
+                target_word.proofread = 1
+                session.add(target_word)
+                session.flush()
+                created = True
+
+            proofread = ProofreadModel(
+                word_id=target_word.id,
+                cn=target_word.cn,
+                modified_by=current_user.get_id(),
+                accepted=1,
+            )
+            session.add(proofread)
+            usage.word_id = target_word.id
+            usage.version = usage.version or target_word.version or "0"
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            print(f"替换已确认Job失败: {exc}")
+            return error("替换失败：数据库更新失败")
+
+        try:
+            progress = refresh_file_runtime(current_file)
+        except Exception as exc:
+            print(f"替换已确认Job缓存重建失败: {exc}")
+            return error("替换已写入数据库，但预览缓存重建失败，请刷新文件缓存")
+
+        return success(message="替换成功", data={
+            'created': created,
+            'word': target_word.to_dict(),
+            'progress': progress,
+        })
 
 
 @api.resource('/proofread/batch')

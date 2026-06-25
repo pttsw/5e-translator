@@ -1,9 +1,10 @@
 import uuid
 import re
 import hashlib
+from collections import Counter
 from config import logger,KEY_MATCHED_TAG
 from typing import List, Optional
-from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path, replace_split_values, process_filter_split_values, process_post_filter_split_values
+from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path, replace_split_values, process_filter_split_values, process_post_filter_split_values, FILTER_SUPPORT_PAGES
 from app.core.database import DBDictionary
 # 添加jsonpath_ng的导入
 from jsonpath_ng import parse
@@ -25,6 +26,10 @@ class BaseAnalyser:
         self.correct_tag_from_db = False # 是否根据标签从数据库中准确抽取？(影响性能)
         self.locked_entries = {} # 已锁定的条目
         self.force_title = force_title
+        self._jobs_by_en_tag = {}
+        self._jobs_by_uid = {}
+        self._jobs_by_key_path = {}
+        self._dictionary_exact_cache = {}
 
     @staticmethod
     def _stable_path_token(value) -> str:
@@ -57,6 +62,26 @@ class BaseAnalyser:
             if source and page:
                 return f"{parent_path}[source={source};page={page}]"
         return f"{parent_path}[{index}]"
+
+    @staticmethod
+    def _list_item_key_path_with_index(key_path: str, index: int) -> str:
+        if key_path.endswith(f"[{index}]"):
+            return key_path
+        if key_path.endswith("]"):
+            return f"{key_path[:-1]};index={index}]"
+        return f"{key_path}[{index}]"
+
+    def _list_item_key_paths(self, parent_path: str, values: list) -> list:
+        key_paths = [
+            self._list_item_key_path(parent_path, index, value)
+            for index, value in enumerate(values)
+        ]
+        path_counts = Counter(key_paths)
+        return [
+            self._list_item_key_path_with_index(key_path, index)
+            if path_counts[key_path] > 1 else key_path
+            for index, key_path in enumerate(key_paths)
+        ]
 
     def _job_uid_from_key_path(self, key_path: str, fallback_text: str, value_index=None) -> str:
         if key_path:
@@ -276,8 +301,20 @@ class BaseAnalyser:
             else:
                 names_in_job.append((name, ""))
         context_key, context_label = self._context_from_key_path(entry_path or key_path, current_names)
-        self.job_list.append(Job(uid, en, cn, rel_path=self.rel_path, tag=tag, knowledge=[
+        self._add_job(Job(uid, en, cn, rel_path=self.rel_path, tag=tag, knowledge=[
         ], current_names=names_in_job, is_proofread=is_proofread, is_key=is_key, sql_id=sql_id, modified_at=modified_at, key_path=key_path, entry_path=entry_path or key_path, context_key=context_key, context_label=context_label))
+
+    def _add_job(self, job: Job):
+        self.job_list.append(job)
+        self._index_job(job)
+        return job
+
+    def _index_job(self, job: Job):
+        self._jobs_by_en_tag.setdefault((job.en_str, job.tag), []).append(job)
+        if job.uid:
+            self._jobs_by_uid[job.uid] = job
+        if job.key_path:
+            self._jobs_by_key_path[job.key_path] = job
 
     def process_first_level(self, obj: dict, source = None):
         """处理dict的第一级，将其中的每个元素添加到Job列表中
@@ -312,13 +349,14 @@ class BaseAnalyser:
                     res_dict[k] = cn_json
             elif isinstance(v, list):
                 res_dict[k] = []
+                list_item_key_paths = self._list_item_key_paths(f"/{k}", v)
                 for index, entry in enumerate(v):
                     if isinstance(entry, dict):
                         cn_json, is_ok = self.process_locked_entry(entry, k, source)
                         if is_ok:
                             res_dict[k].append(cn_json)
                             continue
-                    list_item_key_path = self._list_item_key_path(f"/{k}", index, entry)
+                    list_item_key_path = list_item_key_paths[index]
                     tmp_dict, ok = self.process_base_item(entry,  list_item_key_path, current_names=[], tag=self.name_tag)
                     if not ok:
                         raise Exception(f"处理list {k} 失败")
@@ -410,7 +448,7 @@ class BaseAnalyser:
                     # 使用jsonpath作为唯一标识
                     name_jsonpath = name_uid
                     context_key, context_label = self._context_from_key_path(key_path, current_names)
-                    self.job_list.append(Job(name_jsonpath, en_dict["name"], cn_bean['cn'], rel_path=self.rel_path, tag=tag, knowledge=[
+                    self._add_job(Job(name_jsonpath, en_dict["name"], cn_bean['cn'], rel_path=self.rel_path, tag=tag, knowledge=[
                     ], current_names=names_in_job, is_proofread=cn_bean['proofread'], is_key=cn_bean['is_key'], sql_id=cn_bean['sql_id'], modified_at=cn_bean['modified_at'], key_path=key_path + '/name', entry_path=key_path, context_key=context_key, context_label=context_label))
                     skip_name = True
             elif "{@" not in en_dict["name"] and name_job.cn_str != None:
@@ -468,9 +506,10 @@ class BaseAnalyser:
 
     def process_list(self, en_list, key_path, current_names: list = [], tag: str = ""):
         res_list = []
+        list_item_key_paths = self._list_item_key_paths(key_path, en_list)
         for index, v in enumerate(en_list):
             # 对于列表项，我们需要在key_path后添加索引以确保唯一性
-            list_item_key_path = self._list_item_key_path(key_path, index, v)
+            list_item_key_path = list_item_key_paths[index]
             tmp_list, ok = self.process_base_item(v, list_item_key_path, current_names, tag=tag)
             if not ok:
                 logger.error(f"{self.rel_path}解析{v}时出错")
@@ -521,7 +560,7 @@ class BaseAnalyser:
             res_str, handled = process_filter_split_values(
                 str_list,
                 _process_value,
-                support_pages=["items", "spells", "optionalfeatures", "races", "rewards"],
+                support_pages=FILTER_SUPPORT_PAGES,
             )
             if handled:
                 return res_str
@@ -532,23 +571,26 @@ class BaseAnalyser:
         return replace_split_values(str_list, _process_value, tag=tag)
 
     def get_job(self, en, tag="", uid="", key_path=""):
-        # first_match = None
-        for j in self.job_list:
-            if j.en_str == en:
-                if j.tag == tag:
-                    if uid or key_path:
-                        if uid and j.uid == uid:
-                            return j
-                        if key_path and j.key_path == key_path:
-                            return j
-                        continue
-                    # 优先匹配tag和en都相同的
-                    return j
-        if self.dictionary.get(en, load_from_sql=False, tag=tag) is not None:
+        if uid:
+            job = self._jobs_by_uid.get(uid)
+            if job is not None and job.en_str == en and job.tag == tag:
+                return job
+        if key_path:
+            job = self._jobs_by_key_path.get(key_path)
+            if job is not None and job.en_str == en and job.tag == tag:
+                return job
+        if not uid and not key_path:
+            jobs = self._jobs_by_en_tag.get((en, tag), [])
+            if jobs:
+                # 优先匹配tag和en都相同的
+                return jobs[0]
+        cache_key = (en, tag)
+        if cache_key not in self._dictionary_exact_cache:
+            self._dictionary_exact_cache[cache_key] = self.dictionary.get(
+                en, load_from_sql=False, tag=tag) is not None
+        if self._dictionary_exact_cache[cache_key]:
             # 这里说明source表匹配到了en和tag完全相同的，但是还没有在job_list中，所以暂时返回None，让后续逻辑建一个新的
             return None
-        else:
-            # 这里说明表里没有en和tag完全相同的，则可以尝试匹配只有en相同，但tag为None的
-            for j in self.job_list:
-                if j.en_str == en and j.tag is None:
-                    return j
+        # 这里说明表里没有en和tag完全相同的，则可以尝试匹配只有en相同，但tag为None的
+        jobs = self._jobs_by_en_tag.get((en, None), [])
+        return jobs[0] if jobs else None

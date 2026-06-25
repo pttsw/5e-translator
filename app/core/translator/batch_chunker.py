@@ -6,6 +6,8 @@ from typing import List
 
 from app.core.utils import FileWorkInfo, Job
 
+PLACEHOLDER_PATTERN = re.compile(r'\{!@ ([^\}]+)\}')
+
 
 @dataclass
 class BatchUnit:
@@ -55,7 +57,8 @@ class BatchChunker:
             if (not job.need_translate) and isinstance(job.cn_str, str) and job.cn_str != ""
         ]
 
-        restored_obj = self._restore_placeholders(file_info.json_obj, file_info.job_list)
+        placeholder_map = {job.uid: job.en_str for job in file_info.job_list}
+        restored_obj = self._restore_placeholders(file_info.json_obj, placeholder_map)
         context_text = self._serialize_context(restored_obj)
         if len(context_text) <= self.max_chars:
             return [BatchUnit(
@@ -124,16 +127,16 @@ class BatchChunker:
         except Exception:
             return str(restored_obj)
 
-    def _restore_placeholders(self, value, job_list: List[Job]):
+    def _restore_placeholders(self, value, placeholder_map: dict):
         if isinstance(value, str):
-            restored_value = value
-            for job in job_list:
-                restored_value = restored_value.replace(f"{{!@ {job.uid}}}", job.en_str)
-            return restored_value
+            return PLACEHOLDER_PATTERN.sub(
+                lambda match: placeholder_map.get(match.group(1), match.group(0)),
+                value,
+            )
         if isinstance(value, list):
-            return [self._restore_placeholders(item, job_list) for item in value]
+            return [self._restore_placeholders(item, placeholder_map) for item in value]
         if isinstance(value, dict):
-            return {key: self._restore_placeholders(item, job_list) for key, item in value.items()}
+            return {key: self._restore_placeholders(item, placeholder_map) for key, item in value.items()}
         return value
 
     def _build_breadcrumb(self, jobs: List[Job]) -> List[str]:

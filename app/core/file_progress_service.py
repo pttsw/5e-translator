@@ -22,6 +22,8 @@ SYNC_TASK_LOCK = threading.Lock()
 SYNC_TASKS = {}
 SYNC_TASKS_BY_FILE = {}
 SYNC_SUCCESS_COOLDOWN_SECONDS = 30
+JOB_CACHE_LOCK = threading.Lock()
+JOB_CACHE_LOCKS = {}
 
 
 def get_split_file_path(rel_path: str) -> str:
@@ -82,6 +84,65 @@ def get_job_cache_paths(rel_path: str):
         os.path.join(APP_TEMP_PATH, rel_path + ".jobs"),
         os.path.join(APP_TEMP_PATH, rel_path),
     )
+
+
+def _get_job_cache_lock(split_file: str):
+    with JOB_CACHE_LOCK:
+        if split_file not in JOB_CACHE_LOCKS:
+            JOB_CACHE_LOCKS[split_file] = threading.Lock()
+        return JOB_CACHE_LOCKS[split_file]
+
+
+def _load_json_file(path: str):
+    with open(path, "r") as json_file:
+        return json.load(json_file)
+
+
+def _load_split_file_fallback(split_file: str):
+    split_path = get_split_file_path(split_file)
+    try:
+        return _load_json_file(split_path)
+    except Exception as exc:
+        cached_obj = load_cached_json_content(split_file)
+        if cached_obj is not None:
+            logger.warning(f"拆分文件缺失，使用temp内容缓存兜底: {split_file}")
+            return cached_obj
+        logger.error(f"读取拆分文件兜底失败: {split_file}, {exc}")
+        return {}
+
+
+def get_cached_content_paths(rel_path: str):
+    return (
+        os.path.join(APP_TEMP_PATH, rel_path + ".en"),
+        os.path.join(APP_TEMP_PATH, rel_path),
+    )
+
+
+def has_jobs_cache(split_file: str) -> bool:
+    job_path, cn_path = get_job_cache_paths(split_file)
+    return os.path.exists(job_path) and os.path.exists(cn_path)
+
+
+def load_cached_json_content(split_file: str):
+    for cache_path in get_cached_content_paths(split_file):
+        if not os.path.exists(cache_path):
+            continue
+        try:
+            return _load_json_file(cache_path)
+        except Exception as exc:
+            logger.error(f"读取temp内容缓存失败: {split_file}, {cache_path}, {exc}")
+    return None
+
+
+def _read_jobs_cache_files(split_file: str):
+    job_path, cn_path = get_job_cache_paths(split_file)
+    return _load_json_file(job_path), _load_json_file(cn_path)
+
+
+def _fallback_jobs_cache(split_file: str, exc: Exception = None):
+    if exc is not None:
+        logger.error(f"读取/重建jobs缓存失败，使用拆分文件兜底: {split_file}, {exc}")
+    return [], _load_split_file_fallback(split_file)
 
 
 def update_job_cache_word(
@@ -373,20 +434,40 @@ def rebuild_split_file(split_file: str):
 
 
 def ensure_jobs_cache(split_file: str):
-    if is_job_cache_stale(split_file):
-        rebuild_split_file(split_file)
-    job_path, cn_path = get_job_cache_paths(split_file)
-    with open(job_path, "r") as job_file:
-        job_list = json.load(job_file)
-    with open(cn_path, "r") as cn_file:
-        cn_obj = json.load(cn_file)
-    if _contains_job_placeholder(cn_obj):
-        rebuild_split_file(split_file)
-        with open(job_path, "r") as job_file:
-            job_list = json.load(job_file)
-        with open(cn_path, "r") as cn_file:
-            cn_obj = json.load(cn_file)
-    return job_list, cn_obj
+    cache_lock = _get_job_cache_lock(split_file)
+    with cache_lock:
+        try:
+            cached_job_list = None
+            cached_cn_obj = None
+            try:
+                cached_job_list, cached_cn_obj = _read_jobs_cache_files(split_file)
+            except Exception:
+                pass
+
+            if is_job_cache_stale(split_file):
+                job_list, cn_obj = rebuild_split_file(split_file)
+                if job_list:
+                    return job_list, cn_obj
+                if cached_job_list:
+                    logger.warning(f"重建jobs缓存为空，保留已有缓存: {split_file}")
+                    return cached_job_list, cached_cn_obj
+                if cn_obj is not None:
+                    return job_list, cn_obj
+            job_list, cn_obj = _read_jobs_cache_files(split_file)
+            if _contains_job_placeholder(cn_obj):
+                cached_job_list, cached_cn_obj = job_list, cn_obj
+                job_list, cn_obj = rebuild_split_file(split_file)
+                if job_list:
+                    return job_list, cn_obj
+                if cached_job_list:
+                    logger.warning(f"重建jobs缓存为空，保留已有缓存: {split_file}")
+                    return cached_job_list, cached_cn_obj
+                if cn_obj is not None:
+                    return job_list, cn_obj
+                job_list, cn_obj = _read_jobs_cache_files(split_file)
+            return job_list, cn_obj
+        except Exception as exc:
+            return _fallback_jobs_cache(split_file, exc)
 
 
 def rebuild_jobs_by_source(source_file: str):

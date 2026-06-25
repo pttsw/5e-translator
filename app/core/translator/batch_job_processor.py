@@ -3,7 +3,7 @@ import os
 from typing import List
 
 from config import OUT_PATH, PROMOT_BATCH, logger
-from app.core.utils import FileWorkInfo
+from app.core.utils import FileWorkInfo, clean_5etools_json
 from app.core.utils import Job, TranslatorStatus, format_llm_msg, replace_cn_pattern
 from app.core.bean.term import to_terms
 from .batch_chunker import BatchChunker, BatchUnit
@@ -228,7 +228,7 @@ class BatchJobProcessor(JobProcessor):
         try:
             os.makedirs(os.path.dirname(failed_path), exist_ok=True)
             with open(failed_path, 'w') as fh:
-                json.dump([job.to_serializable() for job in failed_jobs], fh, ensure_ascii=False, indent=2)
+                fh.write(clean_5etools_json([job.to_serializable() for job in failed_jobs]))
         except Exception as exc:
             logger.error(f'写出 failed_jobs 文件失败: {exc}')
 
@@ -251,7 +251,7 @@ class BatchJobProcessor(JobProcessor):
                     "last_response": unit.last_response,
                 })
             with open(failed_path, 'w') as fh:
-                json.dump(payload, fh, ensure_ascii=False, indent=2)
+                fh.write(clean_5etools_json(payload))
         except Exception as exc:
             logger.error(f'写出 failed_batches 文件失败: {exc}')
 

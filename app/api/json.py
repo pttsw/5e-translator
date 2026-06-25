@@ -13,6 +13,8 @@ from app.core.file_progress_service import (
     enqueue_sync_split_file,
     ensure_jobs_cache,
     get_sync_task,
+    has_jobs_cache,
+    load_cached_json_content,
     get_progress_from_jobs,
     is_file_marked_stale,
     is_source_file_stale,
@@ -24,6 +26,18 @@ api = Api()
 
 def _escape_like(value):
     return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
+def _normalize_json_file_name(value):
+    value = (value or '').replace('\\', '/').strip().strip('/')
+    if not value:
+        return ''
+    file_name = os.path.normpath(value).replace('\\', '/')
+    if file_name in ('', '.'):
+        return ''
+    if os.path.isabs(file_name) or file_name == '..' or file_name.startswith('../'):
+        raise ValueError('file路径非法')
+    return file_name
 
 
 def _get_claim_user_map(user_ids):
@@ -169,6 +183,10 @@ class JsonApi(Resource):
         if not file_name:
             return error("file不能为空")
         try:
+            file_name = _normalize_json_file_name(file_name)
+        except ValueError as exc:
+            return error(str(exc))
+        try:
             sync_task = enqueue_sync_split_file(file_name, current_app._get_current_object())
             return success(data=sync_task)
         except Exception as exc:
@@ -178,11 +196,15 @@ class JsonApi(Resource):
     def get(self):
         file_name = request.args.get('file', '', str)
         source = request.args.get('source', None, str)
-        file_name = file_name.strip('/')
+        try:
+            file_name = _normalize_json_file_name(file_name)
+        except ValueError as exc:
+            return error(str(exc))
         if file_name and file_name != '':
             file_path = os.path.join(SPLITED_5ETOOLS_EN_PATH, file_name)
             db_file = FileModule.query.filter_by(file=file_name).first()
 
+            use_cached_missing_split = False
             if db_file is not None and not os.path.exists(file_path):
                 try:
                     sync_split_file(file_name)
@@ -190,14 +212,17 @@ class JsonApi(Resource):
                 except Exception as exc:
                     logger.error(f'拆分文件缺失，自动同步失败: {file_name}, {exc}')
                 file_path = os.path.join(SPLITED_5ETOOLS_EN_PATH, file_name)
+                if not os.path.exists(file_path) and has_jobs_cache(file_name):
+                    use_cached_missing_split = True
+                    logger.warning(f'拆分文件缺失，使用temp缓存返回预览: {file_name}')
 
             if os.path.isdir(file_path):
                 files = list_json_entries(file_name, current_user.get_id())
                 return success(data=files)
-            elif os.path.isfile(file_path):
+            elif os.path.isfile(file_path) or use_cached_missing_split:
                 if db_file is None:
                     return error(f'{file_name}不在数据库中')
-                if db_file.stale or is_file_marked_stale(file_name) or is_source_file_stale(db_file.source_file, file_name):
+                if (not use_cached_missing_split) and (db_file.stale or is_file_marked_stale(file_name) or is_source_file_stale(db_file.source_file, file_name)):
                     sync_split_file(file_name)
                     db_file = FileModule.query.filter_by(file=file_name).first()
                     if db_file is None:
@@ -210,13 +235,25 @@ class JsonApi(Resource):
                         'cn_content': db_file.cn_json,
                         'json_content': db_file.en_json,
                     })
-                job_list, cn_obj = self.__get_job_list_by_file(file_path)
-                progress = get_progress_from_jobs(job_list)
-                update_file_progress_from_jobs(file_name, job_list)
+                job_list, cn_obj = self.__get_job_list_by_file(file_name)
+                if job_list:
+                    progress = get_progress_from_jobs(job_list)
+                    update_file_progress_from_jobs(file_name, job_list)
+                else:
+                    progress = {
+                        'total': db_file.total or 0,
+                        'translate': db_file.translate or 0,
+                        'proofread': db_file.proofread or 0,
+                    }
 
-                with open(file_path, 'r') as file:
-                    content = file.read()
-                json_content = json.loads(content)
+                if os.path.exists(file_path):
+                    with open(file_path, 'r') as file:
+                        content = file.read()
+                    json_content = json.loads(content)
+                else:
+                    json_content = load_cached_json_content(file_name)
+                    if json_content is None:
+                        return error(f'{file_name}拆分文件缺失，且没有可用缓存')
                 if source and isinstance(json_content, dict):
                     json_content = self.__check_source(json_content, source)
                 return success(data=[{
@@ -239,11 +276,12 @@ class JsonApi(Resource):
             return success(data=files)
         return error('参数错误')
 
-    def __get_job_list_by_file(self, file_path):
-        if SPLITED_5ETOOLS_EN_PATH not in file_path:
-            return []
-        rel_path = os.path.relpath(file_path, SPLITED_5ETOOLS_EN_PATH)
-        return ensure_jobs_cache(rel_path)
+    def __get_job_list_by_file(self, file_name):
+        try:
+            return ensure_jobs_cache(_normalize_json_file_name(file_name))
+        except Exception as exc:
+            logger.error(f'读取jobs缓存失败: {file_name}, {exc}')
+            return [], {}
         
     def __check_source(self, json_dict, source):
         return_dict = {}

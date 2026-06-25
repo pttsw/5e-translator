@@ -1,5 +1,5 @@
 from app.core.translator.job_processor import JobProcessor
-from app.core.utils import Job
+from app.core.utils import FileWorkInfo, Job
 
 
 def make_pending_job(uid):
@@ -37,3 +37,59 @@ def test_processor_propagates_representative_translation_to_alias():
     assert second.cn_str == "命中。"
     assert second.sql_id == 7
     assert second in processor.done_jobs
+
+
+class FakeFactory:
+    def __init__(self):
+        self.jobs = []
+        self.started = False
+        self.reset_called = False
+
+    def reset(self):
+        self.reset_called = True
+
+    def set_progress_context(self, label):
+        self.label = label
+
+    def add_jobs(self, jobs):
+        self.jobs.extend(jobs)
+
+    def set_finish(self, add_finish):
+        self.add_finish = add_finish
+
+    def start_work(self):
+        self.started = True
+
+    def isAllDone(self):
+        return True
+
+
+def test_processor_skips_factory_when_no_jobs_need_translation():
+    processor = JobProcessor(thread_num=1, update=False, use_ai=False)
+    fake_factory = FakeFactory()
+    processor._JobProcessor__init_factory = lambda: setattr(processor, "factory", fake_factory) or True
+    ready = Job("ready", "Hit.", "命中。", rel_path="bestiary/test.json", tag="entries")
+    file_info = FileWorkInfo([ready], {}, "test.json", "test.json")
+
+    result = list(processor.invoke([file_info], config={"metadata": {"use_ai": False}}))
+
+    assert result == [file_info]
+    assert processor.done_jobs == [ready]
+    assert fake_factory.started is False
+    assert fake_factory.jobs == []
+
+
+def test_processor_only_queues_jobs_that_need_translation():
+    processor = JobProcessor(thread_num=1, update=False, use_ai=False)
+    fake_factory = FakeFactory()
+    processor._JobProcessor__init_factory = lambda: setattr(processor, "factory", fake_factory) or True
+    ready = Job("ready", "Hit.", "命中。", rel_path="bestiary/test.json", tag="entries")
+    pending = make_pending_job("pending")
+    file_info = FileWorkInfo([ready, pending], {}, "test.json", "test.json")
+
+    result = list(processor.invoke([file_info], config={"metadata": {"use_ai": False, "cache": False}}))
+
+    assert result == [file_info]
+    assert processor.done_jobs == [ready]
+    assert fake_factory.started is True
+    assert fake_factory.jobs == [pending]

@@ -3,6 +3,11 @@ from config import SKIP_PATTERN,SKIP_ONLY_PURE_STR_KEYS, SKIP_PREFIX, SKIP_SUFFI
 import json
 from typing import Tuple, List, Callable, Optional, Set
 
+FILTER_SUPPORT_PAGES = ("items", "spells", "optionalfeatures", "races", "rewards")
+FILTER_CONDITION_VALUE_TAGS = {
+    ("items", "rarity"): "",
+}
+
 
 def check_skip_key(key: str, value: str, prefix_key_path: str):
     """根据key检查是否跳过
@@ -32,8 +37,7 @@ def check_prefix(input_str: str):
     res_str = input_str
     for sp in TOTAL_SKIP_PREFIX:
         if input_str.startswith(sp):
-            prefix = input_str
-            res_str = ""
+            return "", input_str
     for sp in SKIP_PREFIX:
         if input_str.startswith(sp):
             prefix = sp
@@ -365,6 +369,14 @@ def process_filter_split_values(
     processed_conditions = []
 
     for idx, raw_value in enumerate(values[2:], 2):
+        if any(raw_value.startswith(sp) for sp in TOTAL_SKIP_PREFIX):
+            processed_conditions.append(raw_value)
+            continue
+
+        if raw_value.startswith('source='):
+            processed_conditions.append(raw_value)
+            continue
+
         if page == "bestiary" and raw_value.startswith('type='):
             processed_conditions.append(raw_value)
             continue
@@ -379,9 +391,19 @@ def process_filter_split_values(
             processed_conditions.append(f'tag={";".join(cn_tags)}')
             continue
 
-        value_tag = condition_tag_resolver(
-            page, idx, raw_value) if condition_tag_resolver else None
-        processed_conditions.append(process_value(raw_value, value_tag, idx))
+        if '=' in raw_value:
+            condition_key, condition_value = raw_value.split('=', 1)
+            value_tag = FILTER_CONDITION_VALUE_TAGS.get((page, condition_key))
+            if value_tag is None:
+                value_tag = condition_tag_resolver(
+                    page, idx, raw_value) if condition_tag_resolver else page
+            processed_conditions.append(
+                f"{condition_key}={process_value(condition_value, value_tag, idx)}"
+            )
+        else:
+            value_tag = condition_tag_resolver(
+                page, idx, raw_value) if condition_tag_resolver else page
+            processed_conditions.append(process_value(raw_value, value_tag, idx))
 
     return f"{name_value}|{page}|{'|'.join(processed_conditions)}", True
 
@@ -397,6 +419,22 @@ def process_post_filter_split_values(
         return replace_split_values(values, process_value, tag=tag, skip_indices={2, 4}), True
     if tag == "optfeature":
         return replace_split_values(values, process_value, tag=tag, skip_indices={1}), True
+    if tag == "card":
+        return replace_split_values(values, process_value, tag=tag, skip_indices={2}), True
+    if tag == "deity":
+        return replace_split_values(values, process_value, tag=tag, skip_indices={2}), True
+    if tag == "recipe":
+        replaced_values = []
+        for idx, value in enumerate(values):
+            if idx == 1:
+                replaced_values.append(value)
+            elif idx == 2:
+                replaced_values.append(process_value(value, "", idx))
+            else:
+                replaced_values.append(process_value(value, tag, idx))
+        return '|'.join(replaced_values), True
+    if tag == "class":
+        return replace_split_values(values, process_value, tag=tag, skip_indices={1, 4, 5}), True
     if key_path and ("/classFeature" in key_path or "/subclassFeatures" in key_path):
         return replace_split_values(values, process_value, tag=tag, skip_indices={2, 4}), True
     return None, False

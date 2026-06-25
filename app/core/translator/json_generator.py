@@ -3,6 +3,7 @@ import re
 import json
 import csv
 import threading
+import copy
 
 from langchain_core.runnables import Runnable
 from config import logger, DS_KEY, OUT_PATH
@@ -10,7 +11,7 @@ from app.core.utils import Job, TranslatorStatus
 from app.core.database import DatabaseAdapter
 from .siliconflow_adapter import SiliconFlowAdapter
 from .llm_factory import LLMFactory
-from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format, split_string, process_filter_split_values, process_post_filter_split_values, get_tag_display_text
+from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format, split_string, process_filter_split_values, process_post_filter_split_values, get_tag_display_text, FILTER_SUPPORT_PAGES
 from typing import List, Tuple, Optional
 from app.core.bean.term import Term, to_terms
 
@@ -31,16 +32,25 @@ class JsonGenerator(Runnable):
             return
 
         self.done_jobs:List[Job] = []
+        self._job_by_uid = {}
+        self._done_translation_by_key = {}
+        self._done_translation_by_lower_key = {}
+        self._unique_translation_by_en = {}
+        self._translation_cache = {}
+        self.update_dictionary_during_generation = False
         
     def invoke(self, input, config=None, **kwargs):
         inputs = [input] if isinstance(input, str) else input
         self.mode = config['metadata'].get('mode', '5et')
+        self.update_dictionary_during_generation = config['metadata'].get(
+            'generator_update_db', False)
             
         for res in inputs:
             logger.info(f"开始将 {res.json_path} 转换为中文")
             self.done_jobs = res.job_list
+            self.__build_lookup_cache()
             # 调用 __replace_jobs 方法替换英文Json中的相关内容
-            cn_obj, ok = self.__replace_jobs(res.json_obj)
+            cn_obj, ok = self.__replace_jobs(copy.deepcopy(res.json_obj))
         
             # 检查替换操作是否成功
             if not ok:
@@ -61,12 +71,61 @@ class JsonGenerator(Runnable):
         self.dictionary = DatabaseAdapter(source="GPT")
         return self.dictionary.ok
 
-    def __get(self, en: str, tag="") -> (Tuple[str, bool]):
-        for j in self.done_jobs:
-            if j.en_str == en and j.tag == tag:
-                return j.cn_str, True
+    def __should_update_dictionary(self) -> bool:
+        return (
+            getattr(self, "update_dictionary_during_generation", True)
+            and self.dictionary is not None
+        )
 
-        return self.dictionary.get(en, tag=tag)
+    def __build_lookup_cache(self):
+        self._job_by_uid = {}
+        self._done_translation_by_key = {}
+        self._done_translation_by_lower_key = {}
+        self._unique_translation_by_en = {}
+        self._translation_cache = {}
+        translations_by_en = {}
+        for job in self.done_jobs:
+            self._job_by_uid.setdefault(job.uid, job)
+            if job.cn_str is None:
+                continue
+            key = (job.en_str, job.tag)
+            self._done_translation_by_key.setdefault(key, job.cn_str)
+            if isinstance(job.en_str, str):
+                self._done_translation_by_lower_key.setdefault((job.en_str.lower(), job.tag), job.cn_str)
+                translations_by_en.setdefault(job.en_str, set()).add(job.cn_str)
+                translations_by_en.setdefault(job.en_str.lower(), set()).add(job.cn_str)
+        self._unique_translation_by_en = {
+            en: next(iter(cn_values))
+            for en, cn_values in translations_by_en.items()
+            if len(cn_values) == 1
+        }
+
+    def __ensure_lookup_cache(self):
+        if not hasattr(self, "_job_by_uid") or not hasattr(self, "_done_translation_by_key"):
+            self.__build_lookup_cache()
+        elif len(self._job_by_uid) == 0 and self.done_jobs:
+            self.__build_lookup_cache()
+
+    def __get(self, en: str, tag="") -> (Tuple[str, bool]):
+        self.__ensure_lookup_cache()
+        key = (en, tag)
+        if key in self._done_translation_by_key:
+            return self._done_translation_by_key[key], True
+        if isinstance(en, str):
+            lower_key = (en.lower(), tag)
+            if lower_key in self._done_translation_by_lower_key:
+                return self._done_translation_by_lower_key[lower_key], True
+            if en in self._unique_translation_by_en:
+                return self._unique_translation_by_en[en], True
+            lower_en = en.lower()
+            if lower_en in self._unique_translation_by_en:
+                return self._unique_translation_by_en[lower_en], True
+
+        if self.dictionary is None:
+            return None, False
+        if key not in self._translation_cache:
+            self._translation_cache[key] = self.dictionary.get(en, tag=tag)
+        return self._translation_cache[key]
 
     def __process_value(self, value, tag=""):
         """
@@ -157,7 +216,11 @@ class JsonGenerator(Runnable):
                 cache_key = (cn_item["idx"], en_item["idx"])
                 if cache_key not in translated_match_cache:
                     replaced_value, ok = self.__replace_sub_jobs(
-                        cn_item["value"], en_item["value"], tag=en_item["tag"])
+                        cn_item["value"],
+                        en_item["value"],
+                        tag=en_item["tag"],
+                        allow_plain_reprocess=True,
+                    )
                     translated_match_cache[cache_key] = ok and replaced_value == cn_item["value"]
                 if translated_match_cache[cache_key]:
                     matches[cn_item["idx"]] = en_item["idx"]
@@ -209,7 +272,14 @@ class JsonGenerator(Runnable):
                           en_item["tag"], en_item["value"]))
         return True, paired
     
-    def __replace_sub_jobs(self, cn_str: str, en_str: Optional[str] = None, tag = ""):
+    def __replace_sub_jobs(
+        self,
+        cn_str: str,
+        en_str: Optional[str] = None,
+        tag="",
+        allow_plain_reprocess: bool = False,
+        base_uid: str = "",
+    ):
         # print(cn_str)
         processed = False
         if en_str is None:
@@ -244,12 +314,19 @@ class JsonGenerator(Runnable):
         # if len(cn_match_k) > 0:
         #     processed = True
             
-        for ck, cv, ek, ev in matched_pairs:
+        for match_index, (ck, cv, ek, ev) in enumerate(matched_pairs):
             check_split_str = check_split_str.replace(f"{{@{ek} {ev}}}", "")
 
             cn_str = cn_str.replace(f"{{@{ck} {cv}}}", f"{{@{ek} {ev}}}",1)
             # 第二步：逐个解析每个ev
-            new_v, ok = self.__replace_sub_jobs(cv, ev, tag = ek)
+            child_base_uid = f"{base_uid}.{ek}[{match_index}]" if base_uid else ""
+            new_v, ok = self.__replace_sub_jobs(
+                cv,
+                ev,
+                tag=ek,
+                allow_plain_reprocess=True,
+                base_uid=child_base_uid,
+            )
             if not ok:
                 return cn_str, False
             cn_str = cn_str.replace(f"{{@{ek} {ev}}}", f"{{@{ek} {new_v}}}",1)
@@ -266,7 +343,7 @@ class JsonGenerator(Runnable):
                 cn_str, handled = process_filter_split_values(
                     filter_values,
                     _process_pipe_value,
-                    support_pages=["items", "spells", "optionalfeatures", "races"],
+                    support_pages=FILTER_SUPPORT_PAGES,
                     condition_tag_resolver=lambda page, _idx, _value: page[:-1] if page.endswith("s") else page,
                     bestiary_tag_resolver=lambda _idx, _value: "creature",
                 )
@@ -304,6 +381,8 @@ class JsonGenerator(Runnable):
                     display_index = len(en_split) - 1
                 else:
                     display_index = 0
+            elif tag == "item" and len(en_split) >= 3 and en_split[-1] != "":
+                display_index = len(en_split) - 1
             elif tag == "subclassFeature":
                 display_index = 0
             elif tag not in ("adventure", "area", "book", "filter") and len(en_split) >= 3 and en_split[-1] != "":
@@ -314,12 +393,34 @@ class JsonGenerator(Runnable):
                     ccv = cn_split[i]
                 else:
                     ccv = None
+                if base_uid:
+                    child_job = self._job_by_uid.get(f"{base_uid}.{i}")
+                    if child_job is not None and child_job.cn_str is not None:
+                        ccv = child_job.cn_str
+                if tag == "variantrule" and i == 1:
+                    res_split.append(eev)
+                    continue
                 if "{@" in eev and ccv is not None and ccv != eev:
                     res_split.append(ccv)
                 elif "{@" in eev:
-                    p_v, ok = self.__replace_sub_jobs(eev, tag=tag)
+                    p_v, ok = self.__replace_sub_jobs(
+                        eev, tag=tag, allow_plain_reprocess=True)
                     res_split.append(p_v)
                 else:
+                    if tag == "item" and display_index == i:
+                        if not need_translate_str(eev):
+                            res_split.append(eev)
+                        elif ccv is not None and ccv != eev:
+                            res_split.append(ccv)
+                        else:
+                            p_v, ok = self.__process_value(eev, tag=tag)
+                            if ok:
+                                res_split.append(p_v)
+                            elif ccv is not None:
+                                res_split.append(ccv)
+                            else:
+                                res_split.append(p_v)
+                        continue
                     p_v, ok = self.__process_value(eev, tag=tag)
                     if ok and p_v != eev:
                         res_split.append(p_v)
@@ -327,6 +428,7 @@ class JsonGenerator(Runnable):
                         display_index == i
                         and res_split
                         and res_split[0] != en_split[0]
+                        and tag != "item"
                         and (ccv is None or ccv == eev)
                     ):
                         res_split.append(res_split[0])
@@ -344,7 +446,7 @@ class JsonGenerator(Runnable):
                     else:
                         res_split.append(p_v)
             cn_str = '|'.join(res_split)
-        elif processed == False and cn_str == en_str:
+        elif processed == False and (cn_str == en_str or allow_plain_reprocess):
             p_v, ok = self.__process_value(en_str, tag = tag)
             if ok:
                 cn_str = p_v
@@ -554,17 +656,41 @@ class JsonGenerator(Runnable):
             pattern = r'\{!@ ([^\}]+)\}'
             matches = re.findall(pattern, obj)
             if len(matches) > 0:
+                self.__ensure_lookup_cache()
                 for job_id in matches:
-                    for j in self.done_jobs:
-                        if j.uid == job_id and j.cn_str is not None:
-                            if getattr(j, "tag_sync_required", False):
-                                j.cn_str = self.__sync_tag_only_cn(
-                                    j.cn_str,
-                                    getattr(j, "old_en_str", None),
-                                    j.en_str,
-                                    tag=j.tag,
-                                )
-                                if j.sql_id is not None and self.dictionary is not None:
+                    j = self._job_by_uid.get(job_id)
+                    if j is None or j.cn_str is None:
+                        continue
+                    if getattr(j, "tag_sync_required", False):
+                        j.cn_str = self.__sync_tag_only_cn(
+                            j.cn_str,
+                            getattr(j, "old_en_str", None),
+                            j.en_str,
+                            tag=j.tag,
+                        )
+                        if j.sql_id is not None and self.__should_update_dictionary():
+                            self.dictionary.update(
+                                j.sql_id,
+                                j.en_str,
+                                j.cn_str,
+                                proofread=bool(j.is_proofread),
+                                tag=j.tag,
+                            )
+                            j.tag_sync_required = False
+                        j.cn_str, ok = self.__replace_sub_jobs(
+                            j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
+                    else:
+                        original_cn = j.cn_str
+                        replaced_cn, ok = self.__replace_sub_jobs(
+                            j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
+                        if not ok:
+                            aligned_cn, aligned = self.__align_cn_tags_to_en_by_position(
+                                j.cn_str,
+                                j.en_str,
+                            )
+                            if aligned:
+                                j.cn_str = aligned_cn
+                                if j.sql_id is not None and self.__should_update_dictionary():
                                     self.dictionary.update(
                                         j.sql_id,
                                         j.en_str,
@@ -572,48 +698,29 @@ class JsonGenerator(Runnable):
                                         proofread=bool(j.is_proofread),
                                         tag=j.tag,
                                     )
-                                    j.tag_sync_required = False
-                            else:
-                                original_cn = j.cn_str
                                 replaced_cn, ok = self.__replace_sub_jobs(
-                                    j.cn_str, j.en_str, tag=j.tag)
-                                if not ok:
-                                    aligned_cn, aligned = self.__align_cn_tags_to_en_by_position(
-                                        j.cn_str,
-                                        j.en_str,
-                                    )
-                                    if aligned:
-                                        j.cn_str = aligned_cn
-                                        if j.sql_id is not None and self.dictionary is not None:
-                                            self.dictionary.update(
-                                                j.sql_id,
-                                                j.en_str,
-                                                j.cn_str,
-                                                proofread=bool(j.is_proofread),
-                                                tag=j.tag,
-                                            )
-                                        replaced_cn, ok = self.__replace_sub_jobs(
-                                            j.cn_str, j.en_str, tag=j.tag)
-                                if ok:
-                                    j.cn_str = replaced_cn
-                                    if (
-                                        j.cn_str != original_cn
-                                        and j.sql_id is not None
-                                        and self.dictionary is not None
-                                    ):
-                                        self.dictionary.update(
-                                            j.sql_id,
-                                            j.en_str,
-                                            j.cn_str,
-                                            proofread=bool(j.is_proofread),
-                                            tag=j.tag,
-                                        )
-                                obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)
-                                break
-                            j.cn_str, ok = self.__replace_sub_jobs(
-                                j.cn_str, j.en_str, tag=j.tag)
-                            obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)
-                            break
+                                    j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
+                        if ok:
+                            j.cn_str = replaced_cn
+                            if (
+                                j.cn_str != original_cn
+                                and j.sql_id is not None
+                                and self.__should_update_dictionary()
+                            ):
+                                self.dictionary.update(
+                                    j.sql_id,
+                                    j.en_str,
+                                    j.cn_str,
+                                    proofread=bool(j.is_proofread),
+                                    tag=j.tag,
+                                )
+                    self._done_translation_by_key[(j.en_str, j.tag)] = j.cn_str
+                    if isinstance(j.en_str, str):
+                        self._done_translation_by_lower_key[(j.en_str.lower(), j.tag)] = j.cn_str
+                        self._unique_translation_by_en[j.en_str] = j.cn_str
+                        self._unique_translation_by_en[j.en_str.lower()] = j.cn_str
+                    self._translation_cache[(j.en_str, j.tag)] = (j.cn_str, True)
+                    obj = obj.replace(f'{{!@ {job_id}}}', j.cn_str)
 
                 return obj, True
             else:

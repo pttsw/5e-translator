@@ -54,6 +54,100 @@ def test_list_item_uid_uses_source_to_disambiguate_duplicate_names():
     assert entry_uids["New text."] == "$.action[name=Escape-a-Grapple;source=XPHB].entries[0].0"
 
 
+def test_list_item_uid_adds_index_for_duplicate_stable_keys():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+    analyser = BaseAnalyser(db, "bastions.json")
+
+    _, jobs = analyser.process({
+        "facility": [
+            {
+                "name": "Workshop",
+                "source": "XDMG",
+                "entries": [
+                    {
+                        "name": "Craft Options",
+                        "entries": [
+                            {
+                                "type": "list",
+                                "items": [
+                                    {"name": "Craft:", "entry": "First option."},
+                                    {"name": "Craft:", "entry": "Second option."},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    })
+
+    entry_uids = {job.en_str: job.uid for job in jobs if job.en_str in ("First option.", "Second option.")}
+
+    assert entry_uids["First option."] == "$.facility[name=Workshop;source=XDMG].entries[name=Craft-Options].entries[0].items[name=Craft:;index=0].entry.0"
+    assert entry_uids["Second option."] == "$.facility[name=Workshop;source=XDMG].entries[name=Craft-Options].entries[0].items[name=Craft:;index=1].entry.0"
+
+
+def test_card_tag_source_segment_is_not_translated_as_job():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+    analyser = BaseAnalyser(db, "adventure/adventure-toa.json")
+
+    _, jobs = analyser.process({
+        "entries": [
+            "{@card Obo'laka|Omu's Trickster Gods|ToA|Obo'laka's card}"
+        ]
+    })
+
+    job_texts = {job.en_str for job in jobs}
+    assert "ToA" not in job_texts
+    assert {
+        "Obo'laka",
+        "Omu's Trickster Gods",
+        "Obo'laka's card",
+    }.issubset(job_texts)
+
+
+def test_class_tag_source_and_level_segments_are_not_translated_as_jobs():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+    analyser = BaseAnalyser(db, "deities.json")
+
+    _, jobs = analyser.process({
+        "entries": [
+            "{@class fighter|phb|Battle Master|Battle Master|phb|2-0}"
+        ]
+    })
+
+    job_texts = {job.en_str for job in jobs}
+    assert "phb" not in job_texts
+    assert "2-0" not in job_texts
+    assert {"fighter", "Battle Master"}.issubset(job_texts)
+
+
+def test_get_job_uses_stable_uid_and_key_path_for_duplicate_text():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+    analyser = BaseAnalyser(db, "items.json")
+
+    analyser.set_job("$.item[name=First].entries[0].0", "Hit.", None, tag="entries", key_path="/item[name=First]/entries[0]")
+    analyser.set_job("$.item[name=Second].entries[0].0", "Hit.", None, tag="entries", key_path="/item[name=Second]/entries[0]")
+
+    by_uid = analyser.get_job(
+        "Hit.",
+        tag="entries",
+        uid="$.item[name=Second].entries[0].0",
+    )
+    by_key_path = analyser.get_job(
+        "Hit.",
+        tag="entries",
+        key_path="/item[name=First]/entries[0]",
+    )
+
+    assert by_uid.uid == "$.item[name=Second].entries[0].0"
+    assert by_key_path.uid == "$.item[name=First].entries[0].0"
+
+
 def test_memory_db_usage_can_disambiguate_same_en_and_tag():
     db = MemoryDBDictionary()
     reset_memory_db(db)
@@ -111,6 +205,51 @@ def test_memory_db_uid_usage_beats_inferred_category_for_same_en():
     assert result[("Light", "", Context.uid)]["cn"] == "轻型"
     assert db.usage_by_file_uid[("book/book-phb.json", Context.uid)]["word_id"] == 1856
     assert spell_record["id"] == 979
+
+
+def test_memory_db_backfill_does_not_overwrite_existing_uid_word_id():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+
+    class Context:
+        uid = "$.language[name=Quori;source=ERLW;page=6].typicalSpeakers[2].filter[0].0"
+        key_path = "/language[name=Quori;source=ERLW;page=6]/typicalSpeakers[2]/filter[0]"
+        context_key = "/language[name=Quori;source=ERLW;page=6]/typicalSpeakers[2]"
+        context_label = "Quori"
+
+    creature_record = db._insert_record("Quori", "梦灵", "", tag=None, sql_id=10955)
+    language_record = db._insert_record("Quori", "梦灵语", "", tag="language", sql_id=486671)
+
+    db._put_word_usage(creature_record["id"], "languages.json", Context())
+    db._put_word_usage(language_record["id"], "languages.json", Context())
+
+    assert db.usage_by_file_uid[("languages.json", Context.uid)]["word_id"] == 10955
+
+
+def test_memory_db_uid_usage_match_ignores_case():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+
+    class Context:
+        uid = "$.language[name=Quori;source=ERLW;page=6].typicalSpeakers[2].filter[0].0"
+        key_path = "/language[name=Quori;source=ERLW;page=6]/typicalSpeakers[2]/filter[0]"
+        context_key = "/language[name=Quori;source=ERLW;page=6]/typicalSpeakers[2]"
+        context_label = "Quori"
+
+    creature_record = db._insert_record("Quori", "梦灵", "", tag=None, sql_id=10955)
+    db._insert_record("Quori", "梦灵语", "", tag="language", sql_id=486671)
+    db._put_word_usage(creature_record["id"], "languages.json", Context())
+
+    result = db.get_bunch(
+        ["quori"],
+        ["bestiary"],
+        "languages.json",
+        ignore_case=True,
+        job_contexts=[Context()],
+    )
+
+    assert result[("quori", "bestiary", Context.uid)]["sql_id"] == 10955
+    assert result[("quori", "bestiary", Context.uid)]["cn"] == "梦灵"
 
 
 def test_memory_db_backfills_stable_usage_when_cache_hits_legacy_file_dump():

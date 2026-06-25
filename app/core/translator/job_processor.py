@@ -6,12 +6,12 @@ import threading
 
 from langchain_core.runnables import Runnable
 from config import logger, OUT_PATH
-from app.core.utils import Job, TranslatorStatus
+from app.core.utils import Job, TranslatorStatus, clean_5etools_json
 from app.core.database import DatabaseAdapter
 from .siliconflow_adapter import SiliconFlowAdapter, resolve_llm_api_key
 from .mock_adapter import MockAdapter
 from .llm_factory import LLMFactory
-from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format
+from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format, FILTER_SUPPORT_PAGES
 from typing import List, Tuple, Optional
 from app.core.bean.term import Term, to_terms
 
@@ -71,7 +71,13 @@ class JobProcessor(Runnable):
             logger.info(f"开始处理 {res.json_path} 中的Job")
             # self.rel_path = get_rel_path(res.json_path)
             # self.obj = res['obj']
-            self.done_jobs: List[Job] = []
+            pending_jobs = [job for job in res.job_list if job.need_translate]
+            self.done_jobs = [job for job in res.job_list if not job.need_translate]
+            if not pending_jobs:
+                logger.info(f"{res.json_path} 没有需要翻译的Job，跳过JobProcessor线程队列")
+                yield res
+                continue
+
             self.factory.reset()
             self.factory.set_progress_context(
                 label=f"File {res.out_path}",
@@ -79,8 +85,8 @@ class JobProcessor(Runnable):
             if self.cache:
                 # 贪心，按照job的en_str长度从短到长排序。
                 # 这样短文本中的术语先处理。加速
-                res.job_list.sort(key=lambda x: len(x.en_str))
-            work_jobs = self._dedupe_translation_jobs(res.job_list)
+                pending_jobs.sort(key=lambda x: len(x.en_str))
+            work_jobs = self._dedupe_translation_jobs(pending_jobs)
             self.factory.add_jobs(work_jobs)
             self.factory.set_finish(True)
             # 加载临时术语
@@ -104,7 +110,7 @@ class JobProcessor(Runnable):
                     os.makedirs(os.path.dirname(failed_path), exist_ok=True)
 
                     with open(failed_path, 'w') as fh:
-                        json.dump([j.to_serializable() for j in failed], fh, ensure_ascii=False, indent=2)
+                        fh.write(clean_5etools_json([j.to_serializable() for j in failed]))
                 except Exception as e:
                     logger.error(f'写出 failed_jobs 文件失败: {e}')
 
@@ -529,7 +535,7 @@ class JobProcessor(Runnable):
                           en_item["tag"], en_item["value"]))
         return True, paired
 
-    def __replace_sub_jobs(self, cn_str: str, en_str: Optional[str] = None, tag = ""):
+    def __replace_sub_jobs(self, cn_str: str, en_str: Optional[str] = None, tag = "", allow_plain_reprocess: bool = False):
         # print(cn_str)
         processed = False
         if en_str is None:
@@ -569,7 +575,8 @@ class JobProcessor(Runnable):
 
             cn_str = cn_str.replace(f"{{@{ck} {cv}}}", f"{{@{ek} {ev}}}",1)
             # 第二步：逐个解析每个ev
-            new_v, ok = self.__replace_sub_jobs(cv, ev, tag = ek)
+            new_v, ok = self.__replace_sub_jobs(
+                cv, ev, tag=ek, allow_plain_reprocess=True)
             if not ok:
                 return cn_str, False
             cn_str = cn_str.replace(f"{{@{ek} {ev}}}", f"{{@{ek} {new_v}}}",1)
@@ -599,7 +606,7 @@ class JobProcessor(Runnable):
                                 cv_conditions.append(ccv)
                         cn_str = f"{cv_name}|{cv_page}|{'|'.join(cv_conditions)}"
                         return cn_str, True
-                    elif cv_page in ["items", "spells", "optionalfeatures", "races"]:
+                    elif cv_page in FILTER_SUPPORT_PAGES:
                         cv_conditions = []
                         for eev in filter_values[2:]:
                             ccv, _ = self.__process_value(eev, tag=cv_page)
@@ -619,6 +626,72 @@ class JobProcessor(Runnable):
                     cn_str = f"{cv_name}|{cv_source}|{'|'.join(cv_conditions)}"
                     return cn_str, True
 
+            if tag in {"card", "deity"}:
+                en_split = en_str.split('|')
+                cn_split = cn_str.split('|')
+                res_split = []
+                for i, eev in enumerate(en_split):
+                    if i == 2:
+                        res_split.append(eev)
+                        continue
+                    ccv = cn_split[i] if len(cn_split) > i else None
+                    p_v, ok = self.__process_value(eev, tag=tag)
+                    if ok or ccv is None:
+                        res_split.append(p_v)
+                    else:
+                        res_split.append(ccv)
+                cn_str = '|'.join(res_split)
+                return cn_str, True
+
+            if tag == "class":
+                en_split = en_str.split('|')
+                cn_split = cn_str.split('|')
+                res_split = []
+                for i, eev in enumerate(en_split):
+                    if i in {1, 4, 5}:
+                        res_split.append(eev)
+                        continue
+                    ccv = cn_split[i] if len(cn_split) > i else None
+                    p_v, ok = self.__process_value(eev, tag=tag)
+                    if ok or ccv is None:
+                        res_split.append(p_v)
+                    else:
+                        res_split.append(ccv)
+                cn_str = '|'.join(res_split)
+                return cn_str, True
+
+            if tag == "item":
+                en_split = en_str.split('|')
+                cn_split = cn_str.split('|')
+                display_index = len(en_split) - 1 if len(en_split) >= 3 and en_split[-1] != "" else None
+
+                res_split = []
+                for i, eev in enumerate(en_split):
+                    ccv = cn_split[i] if len(cn_split) > i else None
+                    if display_index == i:
+                        if not need_translate_str(eev):
+                            res_split.append(eev)
+                        elif ccv is not None and ccv != eev:
+                            res_split.append(ccv)
+                        else:
+                            p_v, ok = self.__process_value(eev, tag=tag)
+                            if ok:
+                                res_split.append(p_v)
+                            elif ccv is not None:
+                                res_split.append(ccv)
+                            else:
+                                res_split.append(p_v)
+                        continue
+                    p_v, ok = self.__process_value(eev, tag=tag)
+                    if ok and p_v != eev:
+                        res_split.append(p_v)
+                    elif ccv is not None:
+                        res_split.append(ccv)
+                    else:
+                        res_split.append(p_v)
+                cn_str = '|'.join(res_split)
+                return cn_str, True
+
             en_split = en_str.split('|')
             cn_split = cn_str.split('|')
             res_split = []
@@ -627,6 +700,9 @@ class JobProcessor(Runnable):
                     ccv = cn_split[i]
                 else:
                     ccv = None
+                if tag == "variantrule" and i == 1:
+                    res_split.append(eev)
+                    continue
                 if "{@" in eev and ccv is not None and ccv != eev:
                     res_split.append(ccv)
                 else:
@@ -636,7 +712,7 @@ class JobProcessor(Runnable):
                     else:
                         res_split.append(ccv)
             cn_str = '|'.join(res_split)
-        elif processed == False:
+        elif processed == False and (cn_str == en_str or allow_plain_reprocess):
             p_v, ok = self.__process_value(en_str, tag = tag)
             if ok:
                 cn_str = p_v
@@ -682,7 +758,7 @@ class JobProcessor(Runnable):
             json_path = json_path.replace(f'/{en_category}', f'/{cn_category}')
         try:
             with open(json_path, "w") as file:
-                file.write(json.dumps(new_obj, ensure_ascii=False, indent=2))
+                file.write(clean_5etools_json(new_obj))
 
             # with open(job_path, "w") as file:
             #     file.write(json.dumps(self.done_jobs,

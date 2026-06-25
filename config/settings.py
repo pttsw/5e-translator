@@ -48,6 +48,7 @@ KEY_MATCHED_TAG={
   'attachedSpells':'spell',
   'monster': 'creature',
   'languages': 'language',
+  "languageProficiencies": 'language'
 }
 
 # 检测字符串中标签所用的正则表达式
@@ -66,7 +67,7 @@ SKIP_PATTERN=[r'^Math\.',r'\.json$',r'\.mp3$',r'\.pdf$',r'\.svg$', r'\.glb$',r'^
 # 跳过的前缀，此类字符串的前缀不翻译，只翻译前缀后面的内容
 SKIP_PREFIX=['source=','level=','class=','subclass=','challenge rating=','speed type=','type=','miscellaneous=','category=','school=','subschool=','group=','range=','components & miscellaneous=', 'Components & Miscellaneous=','spell attack=','tag=','search=','Type=','damage type=','Feature Type=','Base Species=', 'environment=','strength=','property=','feature type=']
 # 完全跳过的前缀，有此类前缀的字符串，整个字符串都不翻译
-TOTAL_SKIP_PREFIX=['rarity=', 'featrue type=', 'size=','alignment=', 'cr=', 'area style=']
+TOTAL_SKIP_PREFIX=['rarity=', 'feature type=', 'Feature Type=', 'featrue type=', 'size=','alignment=', 'cr=', 'area style=']
 # 跳过的后缀，此类字符串的后缀不翻译，只翻译后缀前面的内容
 SKIP_SUFFIX=['#2','#c','#x']
 # 完全跳过的键，有此类键的字符串，整个字符串都不翻译

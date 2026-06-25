@@ -56,6 +56,12 @@ from app.core.utils.utils import check_prefix as _bootstrap_check_prefix
 from app.core.utils.utils import check_suffix as _bootstrap_check_suffix
 from app.core.utils.utils import parse_custom_format as _bootstrap_parse_custom_format
 from app.core.utils.utils import parse_foundry_items_uuid_format as _bootstrap_parse_foundry_items_uuid_format
+from app.core.utils.utils import normalize_tagless_text as _bootstrap_normalize_tagless_text
+from app.core.utils.utils import split_string as _bootstrap_split_string
+from app.core.utils.utils import process_filter_split_values as _bootstrap_process_filter_split_values
+from app.core.utils.utils import process_post_filter_split_values as _bootstrap_process_post_filter_split_values
+from app.core.utils.utils import get_tag_display_text as _bootstrap_get_tag_display_text
+from app.core.utils.utils import FILTER_SUPPORT_PAGES as _bootstrap_FILTER_SUPPORT_PAGES
 from app.core.utils.reference_finder import find_reference as _bootstrap_find_reference
 
 sys.modules["app.core.utils"].Job = _BootstrapJob
@@ -68,6 +74,12 @@ sys.modules["app.core.utils"].check_prefix = _bootstrap_check_prefix
 sys.modules["app.core.utils"].check_suffix = _bootstrap_check_suffix
 sys.modules["app.core.utils"].parse_custom_format = _bootstrap_parse_custom_format
 sys.modules["app.core.utils"].parse_foundry_items_uuid_format = _bootstrap_parse_foundry_items_uuid_format
+sys.modules["app.core.utils"].normalize_tagless_text = _bootstrap_normalize_tagless_text
+sys.modules["app.core.utils"].split_string = _bootstrap_split_string
+sys.modules["app.core.utils"].process_filter_split_values = _bootstrap_process_filter_split_values
+sys.modules["app.core.utils"].process_post_filter_split_values = _bootstrap_process_post_filter_split_values
+sys.modules["app.core.utils"].get_tag_display_text = _bootstrap_get_tag_display_text
+sys.modules["app.core.utils"].FILTER_SUPPORT_PAGES = _bootstrap_FILTER_SUPPORT_PAGES
 sys.modules["app.core.utils"].find_reference = _bootstrap_find_reference
 
 from app.core.translator.batch_chunker import BatchChunker, BatchUnit
@@ -127,6 +139,25 @@ def test_batch_chunker_keeps_original_split_unit_when_under_threshold():
     assert units[0].jobs[0].uid == "$.spell[0].entries[0]"
     assert "Acid Splash" in units[0].context_text
     assert "You hurl a bubble of acid." in units[0].context_text
+
+
+def test_batch_chunker_restores_placeholders_from_uid_map_and_preserves_unknowns():
+    chunker = BatchChunker(max_chars=12000)
+
+    restored = chunker._restore_placeholders(
+        [
+            "{!@ $.known}",
+            "{!@ $.missing}",
+            "before {!@ $.known} after",
+        ],
+        {"$.known": "Known text"},
+    )
+
+    assert restored == [
+        "Known text",
+        "{!@ $.missing}",
+        "before Known text after",
+    ]
 
 
 def test_batch_chunker_resplits_large_adventure_unit_by_structure_block():

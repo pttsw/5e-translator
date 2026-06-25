@@ -25,7 +25,7 @@
             "request": "launch",
             "program": "main.py",
             "console": "integratedTerminal",
-            "args": "translate --en /data/pttsw-core/output/split-data/dmg/variantrule --splited --force",
+            "args": "translate --en \"/data/homebrew-en/collection/Mage Hand Press; Valda's Spire of Secrets - Player Pack.json\" --force-title --mode homebrew --thread_num 1",
             "justMyCode": true
         }
     ]

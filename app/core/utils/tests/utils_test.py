@@ -2,7 +2,7 @@
 import unittest
 from app.core.utils.utils import only_has_format
 import pytest
-from app.core.utils.utils import check_skip_key, get_tag_display_text, normalize_tagless_text, parse_foundry_items_uuid_format
+from app.core.utils.utils import check_skip_key, get_tag_display_text, need_translate_str, normalize_tagless_text, parse_foundry_items_uuid_format
 
 class TestOnlyHasFormat(unittest.TestCase):
     def test_only_format_no_english(self):
@@ -118,6 +118,10 @@ def test_skip_key_path_ignores_list_qualifiers():
 
 def test_no_skip_path_still_overrides_skip_key_path_with_qualifiers():
     assert not check_skip_key("tags", "tag value", "/type[id=abc]")
+
+
+def test_total_skip_prefix_feature_type_is_not_translated():
+    assert not need_translate_str("feature type=Bonus Feat")
     
 if __name__ == '__main__':
     unittest.main()

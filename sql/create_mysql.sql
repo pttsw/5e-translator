@@ -33,13 +33,21 @@ CREATE TABLE 5e.words (
   CONSTRAINT `words_ibfk_1` FOREIGN KEY (`modified_by`) REFERENCES `user` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=387420 DEFAULT CHARSET=utf8mb3;
 
-CREATE TABLE 5e.source (
-  `file` varchar(255) NOT NULL,
+CREATE TABLE 5e.word_usage (
+  `id` int NOT NULL AUTO_INCREMENT,
   `word_id` int NOT NULL,
+  `file` varchar(255) NOT NULL,
+  `uid` varchar(512) NOT NULL DEFAULT '',
+  `key_path` varchar(1024) NOT NULL DEFAULT '',
+  `context_key` varchar(1024) NOT NULL DEFAULT '',
+  `context_label` text,
   `version` char(10) DEFAULT NULL,
-  PRIMARY KEY (`file`,`word_id`),
-  KEY `word_id` (`word_id`),
-  CONSTRAINT `source_ibfk_1` FOREIGN KEY (`word_id`) REFERENCES `words` (`id`) ON DELETE CASCADE
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_word_usage_file_uid` (`file`,`uid`),
+  KEY `idx_word_usage_word_id` (`word_id`),
+  KEY `idx_word_usage_file_word` (`file`,`word_id`),
+  KEY `idx_word_usage_context` (`context_key`(191)),
+  CONSTRAINT `word_usage_ibfk_1` FOREIGN KEY (`word_id`) REFERENCES `words` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE 5e.term (
