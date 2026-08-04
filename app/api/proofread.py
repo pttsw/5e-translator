@@ -478,6 +478,11 @@ class BatchProofreadApi(Resource, BaseApi):
                     ).first()
                 if source is None:
                     session.add(SourceModel(word.id, current_file, word.version or "0", uid=uid or ""))
+                else:
+                    source.word_id = word.id
+                    source.version = word.version or source.version or "0"
+                    if uid and not source.uid:
+                        source.uid = uid
 
                 proofread = ProofreadModel(
                     word_id=word.id,

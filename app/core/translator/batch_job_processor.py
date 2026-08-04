@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import List
 
 from config import OUT_PATH, PROMOT_BATCH, logger
@@ -8,6 +9,8 @@ from app.core.utils import Job, TranslatorStatus, format_llm_msg, replace_cn_pat
 from app.core.bean.term import to_terms
 from .batch_chunker import BatchChunker, BatchUnit
 from .job_processor import JobProcessor
+
+MIN_REFERENCE_TERM_LEN = 2
 
 
 class BatchJobProcessor(JobProcessor):
@@ -133,14 +136,21 @@ class BatchJobProcessor(JobProcessor):
     def _build_batch_request(self, batch_unit: BatchUnit) -> str:
         reference = []
         parents = []
+        reference_text = self._build_reference_match_text(batch_unit)
         for job in batch_unit.jobs:
             parents.extend(job.current_names)
             reference.extend(job.knowledge)
-            reference.extend([f"{term.en}:{term.cn}" for term in job.terms])
             if self.cache:
                 for temp in self._JobProcessor__search_temple_terms(job.en_str):  # type: ignore[attr-defined]
                     if temp not in job.terms:
                         job.terms.append(temp)
+            reference.extend(
+                f"{term.en}:{term.cn}"
+                for term in job.terms
+                if self._term_matches_batch_text(term.en, reference_text)
+            )
+        parents = self._dedupe_parents(parents)
+        reference = self._dedupe_reference(reference)
         payload = {
             "batch_id": batch_unit.batch_id,
             "source_hash": batch_unit.source_hash,
@@ -155,6 +165,54 @@ class BatchJobProcessor(JobProcessor):
             ],
         }
         return json.dumps(payload, ensure_ascii=False)
+
+    def _build_reference_match_text(self, batch_unit: BatchUnit) -> str:
+        parts = [batch_unit.context_text or ""]
+        for job in batch_unit.jobs:
+            parts.append(job.en_str or "")
+            for name_pair in job.current_names:
+                if name_pair and isinstance(name_pair[0], str):
+                    parts.append(name_pair[0])
+        return "\n".join(parts).lower()
+
+    def _term_matches_batch_text(self, term_en: str, reference_text: str) -> bool:
+        if not isinstance(term_en, str):
+            return False
+        term = term_en.strip()
+        if len(term) < MIN_REFERENCE_TERM_LEN:
+            return False
+        pattern = r'(?<![A-Za-z0-9_])' + re.escape(term.lower()) + r'(?![A-Za-z0-9_])'
+        return re.search(pattern, reference_text) is not None
+
+    def _dedupe_reference(self, reference: list) -> list:
+        deduped = []
+        seen = set()
+        for item in reference:
+            if not isinstance(item, str):
+                continue
+            normalized = item.strip()
+            if normalized == "" or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(item)
+        return deduped
+
+    def _dedupe_parents(self, parents: list) -> list:
+        deduped = []
+        seen = set()
+        for parent in parents:
+            if not isinstance(parent, (list, tuple)) or not parent:
+                continue
+            en = parent[0]
+            cn = parent[1] if len(parent) > 1 else None
+            if not isinstance(en, str) or en == "":
+                continue
+            key = (en, cn)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(parent)
+        return deduped
 
     def _retry_as_sub_batches(self, batch_unit: BatchUnit, worker_id: int) -> bool:
         if len(batch_unit.jobs) <= 1:

@@ -32,21 +32,81 @@ def compare_term(term_path: str):
         
     with open("term.json", 'w') as f:
         f.write(json.dumps(res, ensure_ascii=False, indent=2))
+
+
+def _term_key(term: Term):
+    return ((term.en or '').strip().casefold(), (term.category or '').strip().casefold())
+
+
+def _term_row_key(row: dict):
+    return (
+        (row.get('en') or '').strip().casefold(),
+        (row.get('category') or '').strip().casefold(),
+    )
+
+
+def _dedupe_terms_by_db_key(terms: list[Term]):
+    """Deduplicate terms before writing to DB-like stores keyed by en+category."""
+    deduped: dict[tuple[str, str], Term] = {}
+    skipped_same = 0
+    conflicts = 0
+    for term in terms:
+        key = _term_key(term)
+        existing = deduped.get(key)
+        if existing is None:
+            deduped[key] = term
+            continue
+        if existing.cn == term.cn:
+            skipped_same += 1
+        else:
+            conflicts += 1
+            print(
+                f"Duplicate term conflict before write, kept first value: "
+                f"{term.en} [{term.category or ''}] {existing.cn} != {term.cn}"
+            )
+    return list(deduped.values()), skipped_same, conflicts
+
+
+def _term_store_skip_reason(term: Term):
+    en = term.en or ''
+    cn = term.cn or ''
+    category = term.category or ''
+    if len(en) > 255:
+        return f"en too long ({len(en)} > 255)"
+    if len(cn) > 255:
+        return f"cn too long ({len(cn)} > 255)"
+    if len(category) > 50:
+        return f"category too long ({len(category)} > 50)"
+    return ""
         
 def _add_word_terms_to_term_table(mysql_db: DBDictionary):
     existing_terms = {
-        (row['en'], row.get('category') or ''): row['cn']
+        _term_row_key(row): row['cn']
         for row in mysql_db.get_all_term_entries()
     }
     inserted = 0
     skipped = 0
     conflicts = 0
+    duplicate_skipped = 0
+    duplicate_conflicts = 0
+    invalid_skipped = 0
 
-    for term in sorted(
+    candidate_terms = sorted(
         mysql_db.get_word_terms_for_sync(),
         key=lambda item: (item.en.lower(), item.category or '', item.cn),
-    ):
-        key = (term.en, term.category or '')
+    )
+    candidate_terms, duplicate_skipped, duplicate_conflicts = _dedupe_terms_by_db_key(candidate_terms)
+
+    for term in candidate_terms:
+        skip_reason = _term_store_skip_reason(term)
+        if skip_reason:
+            invalid_skipped += 1
+            print(
+                f"Skipped invalid term before write: "
+                f"{term.en} [{term.category or ''}] -> {term.cn} ({skip_reason})"
+            )
+            continue
+        key = _term_key(term)
         existing_cn = existing_terms.get(key)
         if existing_cn is not None:
             if existing_cn != term.cn:
@@ -59,21 +119,28 @@ def _add_word_terms_to_term_table(mysql_db: DBDictionary):
                 skipped += 1
             continue
 
-        inserted_ok = mysql_db.put_term(
+        inserted_rows = mysql_db.put_term_ignore_duplicate(
             term,
             source='words',
             modified_by=1,
             modified_reson='term add from words',
         )
-        if not inserted_ok:
+        if inserted_rows is None:
             print(f"Failed to insert term: {term.en} [{term.category or ''}] -> {term.cn}")
+            continue
+        if inserted_rows == 0:
+            skipped += 1
+            existing_terms[key] = term.cn
             continue
         existing_terms[key] = term.cn
         inserted += 1
 
     print(
         f"Synced words to term table: inserted={inserted}, "
-        f"skipped={skipped}, conflicts={conflicts}"
+        f"skipped={skipped}, conflicts={conflicts}, "
+        f"duplicate_skipped={duplicate_skipped}, "
+        f"duplicate_conflicts={duplicate_conflicts}, "
+        f"invalid_skipped={invalid_skipped}"
     )
 
 
@@ -110,12 +177,17 @@ def add_mysql_terms_to_redis():
     mysql_db = DBDictionary()
     _add_word_terms_to_term_table(mysql_db)
     redis_db = RedisDB(db=1)
-    mysql_terms = mysql_db.get_all_term()
+    mysql_terms, duplicate_skipped, duplicate_conflicts = _dedupe_terms_by_db_key(
+        sorted(mysql_db.get_all_term(), key=lambda item: (item.en.lower(), item.category or '', item.cn))
+    )
     redis_db.clean()
     for term in mysql_terms:
         redis_db.put(term.en, term.cn, term.category)
         # print(f"{term.en} -> {term.cn}")
-    print(f"Added {len(mysql_terms)} terms to Redis")
+    print(
+        f"Added {len(mysql_terms)} terms to Redis "
+        f"(duplicate_skipped={duplicate_skipped}, duplicate_conflicts={duplicate_conflicts})"
+    )
         
 def combine_temp_terms_to_csv():
     mysql_db = DBDictionary()
@@ -185,6 +257,11 @@ def _prompt_new_category(en: str, current_category: str):
 
 def _sync_term_pairs(mysql_db: DBDictionary, terms: list[Term], stats: dict, source_label: str):
     stats['parsed_terms'] += len(terms)
+    terms, duplicate_skipped, duplicate_conflicts = _dedupe_terms_by_db_key(
+        sorted(terms, key=lambda item: (item.en.lower(), item.category or '', item.cn))
+    )
+    stats['skipped_same'] += duplicate_skipped
+    stats['skipped_manual'] += duplicate_conflicts
     for term in terms:
         en = term.en
         cn = term.cn

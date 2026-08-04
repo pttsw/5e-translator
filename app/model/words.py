@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # -*- coding: UTF-8 -*-
 
-from sqlalchemy import Column, Integer, String, TIMESTAMP
+from sqlalchemy import Column, Integer, String, TIMESTAMP, text
 from sqlalchemy.dialects.mysql import TINYINT
 
 from .base import CRUDMixin, db
@@ -57,3 +57,16 @@ class WordsModel(db.Model, CRUDMixin):
 
     def __repr__(self):
         return f"<Word {self.en}>"
+
+
+def ensure_words_table_schema():
+    statements = [
+        "CREATE INDEX `idx_words_en_category` ON `words` (`en`(191), `category`)",
+        "CREATE INDEX `idx_words_modified_at` ON `words` (`modified_at`)",
+    ]
+    for statement in statements:
+        try:
+            db.session.execute(text(statement))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()

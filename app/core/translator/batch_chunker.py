@@ -7,6 +7,8 @@ from typing import List
 from app.core.utils import FileWorkInfo, Job
 
 PLACEHOLDER_PATTERN = re.compile(r'\{!@ ([^\}]+)\}')
+TAG_VALUE_PATTERN = re.compile(r'\{@[a-zA-Z0-9_ -]+ ([^}|]+)')
+MAX_KNOWN_TRANSLATIONS_PER_BATCH = 120
 
 
 @dataclass
@@ -68,7 +70,7 @@ class BatchChunker:
                 jobs=pending_jobs,
                 context_text=context_text,
                 breadcrumb=self._build_breadcrumb(pending_jobs),
-                known_translations=known_translations,
+                known_translations=self._filter_known_translations(known_translations, pending_jobs, context_text),
             )]
 
         return self._split_large_unit(
@@ -101,7 +103,11 @@ class BatchChunker:
                     jobs=jobs,
                     context_text=self._build_context_from_jobs(jobs),
                     breadcrumb=self._build_breadcrumb(jobs) or batch_unit.breadcrumb,
-                    known_translations=batch_unit.known_translations,
+                    known_translations=self._filter_known_translations(
+                        batch_unit.known_translations,
+                        jobs,
+                        self._build_context_from_jobs(jobs),
+                    ),
                     retry_depth=batch_unit.retry_depth + 1,
                 )
             )
@@ -152,15 +158,73 @@ class BatchChunker:
 
     def _build_context_from_jobs(self, jobs: List[Job]) -> str:
         context_lines = []
+        last_names = None
         for job in jobs:
+            names = ""
             if job.current_names:
                 names = " > ".join(name_pair[0] for name_pair in job.current_names if name_pair)
-                if names:
+                if names and names != last_names:
                     context_lines.append(f"[PATH] {names}")
+                    last_names = names
+            elif last_names is not None:
+                last_names = None
             context_lines.append(job.en_str)
         context_text = "\n\n".join(context_lines)
         context_text = re.sub(r"\n{3,}", "\n\n", context_text)
         return context_text[:self.max_chars]
+
+    def _filter_known_translations(self, known_translations: List[dict], jobs: List[Job], context_text: str) -> List[dict]:
+        if not known_translations:
+            return []
+
+        relevance_text = " ".join(
+            [context_text or ""] +
+            [job.en_str or "" for job in jobs] +
+            [
+                name_pair[0]
+                for job in jobs
+                for name_pair in job.current_names
+                if name_pair and isinstance(name_pair[0], str)
+            ]
+        )
+        relevance_text_lower = relevance_text.lower()
+        priority_terms = self._collect_priority_terms(jobs, context_text)
+
+        exact_matches = []
+        text_matches = []
+        seen = set()
+        for item in known_translations:
+            en_str = item.get("en_str")
+            cn_str = item.get("cn_str")
+            if not isinstance(en_str, str) or not isinstance(cn_str, str) or cn_str == "":
+                continue
+            key = item.get("uid") or en_str
+            if key in seen:
+                continue
+            normalized = en_str.strip().lower()
+            if not normalized:
+                continue
+            if normalized in priority_terms:
+                exact_matches.append(item)
+                seen.add(key)
+                continue
+            if len(normalized) >= 3 and normalized in relevance_text_lower:
+                text_matches.append(item)
+                seen.add(key)
+
+        return (exact_matches + text_matches)[:MAX_KNOWN_TRANSLATIONS_PER_BATCH]
+
+    def _collect_priority_terms(self, jobs: List[Job], context_text: str) -> set:
+        terms = set()
+        for job in jobs:
+            for name_pair in job.current_names:
+                if name_pair and isinstance(name_pair[0], str):
+                    terms.add(name_pair[0].strip().lower())
+            for tag_value in TAG_VALUE_PATTERN.findall(job.en_str or ""):
+                terms.add(tag_value.strip().lower())
+        for tag_value in TAG_VALUE_PATTERN.findall(context_text or ""):
+            terms.add(tag_value.strip().lower())
+        return {term for term in terms if term}
 
     def _split_large_unit(self, batch_id: str, restored_obj, pending_jobs: List[Job], known_translations: List[dict]) -> List[BatchUnit]:
         blocks = self._extract_blocks(restored_obj)
@@ -354,12 +418,13 @@ class BatchChunker:
         return self._build_chunk_unit_from_context(batch_id, chunk_index, jobs, known_translations, context_text)
 
     def _build_chunk_unit_from_context(self, batch_id: str, chunk_index: int, jobs: List[Job], known_translations: List[dict], context_text: str) -> BatchUnit:
+        context_text = context_text[:self.max_chars]
         return BatchUnit(
             batch_id=f"{batch_id}#{chunk_index}",
             parent_batch_id=batch_id,
             chunk_index=chunk_index,
             jobs=jobs,
-            context_text=context_text[:self.max_chars],
+            context_text=context_text,
             breadcrumb=self._build_breadcrumb(jobs),
-            known_translations=known_translations,
+            known_translations=self._filter_known_translations(known_translations, jobs, context_text),
         )

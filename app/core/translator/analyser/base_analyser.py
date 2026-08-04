@@ -1,6 +1,7 @@
 import uuid
 import re
 import hashlib
+import copy
 from collections import Counter
 from config import logger,KEY_MATCHED_TAG
 from typing import List, Optional
@@ -180,7 +181,11 @@ class BaseAnalyser:
 
     def _get_usage_rel_path(self, en_obj) -> str:
         if isinstance(en_obj, dict):
-            origin_file = en_obj.get("_meta", {}).get("origin_file", "")
+            meta = en_obj.get("_meta", {})
+            pttsw_id = meta.get("pttsw_id", "") if isinstance(meta, dict) else ""
+            if isinstance(pttsw_id, str) and pttsw_id.strip():
+                return f"{pttsw_id.strip('/')}.json"
+            origin_file = meta.get("origin_file", "") if isinstance(meta, dict) else ""
             if isinstance(origin_file, str) and origin_file.strip():
                 return origin_file.strip("/")
         return self.rel_path
@@ -395,7 +400,88 @@ class BaseAnalyser:
         cn_json = self.locked_entries[file_name].get('cn_json')
         if cn_json is None:
             return None, False
-        return self.locked_entries[file_name].get('cn_json'), True
+        return self._sync_locked_table_tags(obj, copy.deepcopy(cn_json)), True
+
+    def _translate_locked_tag_value(self, value: str, tag: str):
+        bean = self.dictionary.get(
+            value,
+            load_from_sql=True,
+            ignore_case=True,
+            tag=tag,
+        )
+        if bean is None and tag:
+            bean = self.dictionary.get(
+                value,
+                load_from_sql=True,
+                ignore_case=True,
+                tag="",
+            )
+        if bean is None:
+            return value
+        return bean["cn"]
+
+    def _sync_locked_table_value(self, en_value: str):
+        values = en_value.split("|")
+        if not values:
+            return en_value
+        replaced_values = []
+        for index, value in enumerate(values):
+            if index == 1:
+                replaced_values.append(value)
+            elif index == 0 and ";" in value:
+                whole_value = self._translate_locked_tag_value(value, "table")
+                if whole_value != value:
+                    replaced_values.append(whole_value.replace("；", ";"))
+                else:
+                    parts = []
+                    for part in value.split(";"):
+                        stripped_part = part.strip()
+                        parts.append(
+                            self._translate_locked_tag_value(stripped_part, "table")
+                            if stripped_part else stripped_part
+                        )
+                    replaced_values.append("; ".join(parts))
+            else:
+                replaced_values.append(
+                    self._translate_locked_tag_value(value, "table")
+                )
+        return "|".join(replaced_values)
+
+    def _sync_locked_table_tags_in_string(self, en_str: str, cn_str: str):
+        en_tags, en_values, en_valid = parse_custom_format(en_str, False)
+        cn_tags, cn_values, cn_valid = parse_custom_format(cn_str, False)
+        if (
+            not en_valid
+            or not cn_valid
+            or len(en_values) != len(cn_values)
+        ):
+            return cn_str
+        for en_tag, en_value, cn_tag, cn_value in zip(en_tags, en_values, cn_tags, cn_values):
+            if en_tag != "table" or cn_tag != "table":
+                continue
+            cn_str = cn_str.replace(
+                f"{{@{cn_tag} {cn_value}}}",
+                f"{{@table {self._sync_locked_table_value(en_value)}}}",
+                1,
+            )
+        return cn_str
+
+    def _sync_locked_table_tags(self, en_obj, cn_obj):
+        if isinstance(en_obj, str) and isinstance(cn_obj, str):
+            if "{@table " not in en_obj or "{@table " not in cn_obj:
+                return cn_obj
+            return self._sync_locked_table_tags_in_string(en_obj, cn_obj)
+        if isinstance(en_obj, dict) and isinstance(cn_obj, dict):
+            for key, value in cn_obj.items():
+                if key in en_obj:
+                    cn_obj[key] = self._sync_locked_table_tags(en_obj[key], value)
+            return cn_obj
+        if isinstance(en_obj, list) and isinstance(cn_obj, list):
+            for index, value in enumerate(cn_obj):
+                if index < len(en_obj):
+                    cn_obj[index] = self._sync_locked_table_tags(en_obj[index], value)
+            return cn_obj
+        return cn_obj
 
     def process_dict(self, en_dict: dict, key_path: str, current_names: list = [], skip_keys: list = [], tag: str = ""):
         """检查dict类型，输出处理完的dict
@@ -430,10 +516,28 @@ class BaseAnalyser:
             name_uid = self._job_uid_from_key_path(name_key_path, en_dict["name"])
             name_job = self.get_job(en_dict["name"], tag=tag, uid=name_uid, key_path=name_key_path)
             if name_job is None:
+                context_key, context_label = self._context_from_key_path(key_path, current_names)
+                name_context_job = Job(
+                    name_uid,
+                    en_dict["name"],
+                    None,
+                    rel_path=self.rel_path,
+                    tag=tag,
+                    key_path=name_key_path,
+                    entry_path=key_path,
+                    context_key=context_key,
+                    context_label=context_label,
+                )
                 cn_bean = self.dictionary.get(
-                    en_dict["name"], load_from_sql=False, ignore_case=True, tag=tag)
+                    en_dict["name"],
+                    rel_f=self.usage_rel_path,
+                    load_from_sql=self.load_from_sql,
+                    ignore_case=True,
+                    tag=tag,
+                    correct_tag_from_db=self.correct_tag_from_db,
+                    job_context=name_context_job,
+                )
                 if cn_bean != None:
-                    res_dict['name'] = cn_bean['cn']
                             # 将当前元素的名称列表转换为(name,cn_str)的元组列表
                     names_in_job = []
                     for name in current_names:
@@ -447,9 +551,12 @@ class BaseAnalyser:
                     names_in_job.append((en_dict["name"], cn_bean['cn'] if cn_bean['proofread'] else ""))
                     # 使用jsonpath作为唯一标识
                     name_jsonpath = name_uid
-                    context_key, context_label = self._context_from_key_path(key_path, current_names)
                     self._add_job(Job(name_jsonpath, en_dict["name"], cn_bean['cn'], rel_path=self.rel_path, tag=tag, knowledge=[
                     ], current_names=names_in_job, is_proofread=cn_bean['proofread'], is_key=cn_bean['is_key'], sql_id=cn_bean['sql_id'], modified_at=cn_bean['modified_at'], key_path=key_path + '/name', entry_path=key_path, context_key=context_key, context_label=context_label))
+                    if "{@" in en_dict["name"] or "{@" in cn_bean['cn']:
+                        res_dict['name'] = f'{{!@ {name_jsonpath}}}'
+                    else:
+                        res_dict['name'] = cn_bean['cn']
                     skip_name = True
             elif "{@" not in en_dict["name"] and name_job.cn_str != None:
                 res_dict['name'] = name_job.cn_str

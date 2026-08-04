@@ -70,6 +70,7 @@ def ensure_word_usage_table_schema():
           UNIQUE KEY `uk_word_usage_file_uid` (`file`, `uid`),
           KEY `idx_word_usage_word_id` (`word_id`),
           KEY `idx_word_usage_file_word` (`file`, `word_id`),
+          KEY `idx_word_usage_file_key_path` (`file`, `key_path`(191)),
           KEY `idx_word_usage_context` (`context_key`(191)),
           CONSTRAINT `word_usage_ibfk_1` FOREIGN KEY (`word_id`) REFERENCES `words` (`id`) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
@@ -81,6 +82,7 @@ def ensure_word_usage_table_schema():
         "CREATE UNIQUE INDEX `uk_word_usage_file_uid` ON `word_usage` (`file`, `uid`)",
         "CREATE INDEX `idx_word_usage_word_id` ON `word_usage` (`word_id`)",
         "CREATE INDEX `idx_word_usage_file_word` ON `word_usage` (`file`, `word_id`)",
+        "CREATE INDEX `idx_word_usage_file_key_path` ON `word_usage` (`file`, `key_path`(191))",
         "CREATE INDEX `idx_word_usage_context` ON `word_usage` (`context_key`(191))",
         """
         INSERT IGNORE INTO `word_usage` (`word_id`, `file`, `uid`, `version`)

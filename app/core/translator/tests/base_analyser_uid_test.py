@@ -252,6 +252,46 @@ def test_memory_db_uid_usage_match_ignores_case():
     assert result[("quori", "bestiary", Context.uid)]["cn"] == "梦灵"
 
 
+def test_name_lookup_uses_key_path_usage_when_uid_format_changed():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+
+    class OldContext:
+        uid = "$.monster[name=Gynosphinx;source=MM;page=282].legendaryGroup.name.0"
+        key_path = "/monster[name=Gynosphinx;source=MM;page=282]/legendaryGroup/name"
+        context_key = "/monster[name=Gynosphinx;source=MM;page=282]/legendaryGroup"
+        context_label = "Gynosphinx"
+
+    language_record = db._insert_record(
+        "Sphinx", "斯芬克斯语", "", proofread=True, tag="language", sql_id=486676)
+    creature_record = db._insert_record(
+        "Sphinx", "斯芬克斯", "", proofread=True, tag=None, sql_id=10977)
+    db._put_word_usage(
+        creature_record["id"], "bestiary/bestiary-mm.json", OldContext())
+
+    analyser = BaseAnalyser(db, "bestiary/bestiary-mm.json")
+    cn_obj, jobs = analyser.process({
+        "monster": [
+            {
+                "name": "Gynosphinx",
+                "source": "MM",
+                "page": 282,
+                "legendaryGroup": {"name": "Sphinx"},
+            }
+        ]
+    })
+
+    legendary_name_job = next(
+        job for job in jobs
+        if job.key_path == "/monster[name=Gynosphinx;source=MM;page=282]/legendaryGroup/name"
+    )
+
+    assert cn_obj["monster"][0]["legendaryGroup"]["name"] == "斯芬克斯"
+    assert legendary_name_job.sql_id == 10977
+    assert legendary_name_job.cn_str == "斯芬克斯"
+    assert language_record["id"] == 486676
+
+
 def test_memory_db_backfills_stable_usage_when_cache_hits_legacy_file_dump():
     db = MemoryDBDictionary()
     reset_memory_db(db)
@@ -277,7 +317,7 @@ def test_memory_db_backfills_stable_usage_when_cache_hits_legacy_file_dump():
     assert db.usage_by_file_uid[("actions.json", Context.uid)]["word_id"] == 11
 
 
-def test_split_file_word_usage_uses_origin_file_from_meta():
+def test_split_file_word_usage_uses_pttsw_id_from_meta():
     db = MemoryDBDictionary()
     reset_memory_db(db)
 
@@ -285,7 +325,7 @@ def test_split_file_word_usage_uses_origin_file_from_meta():
     analyser = BaseAnalyser(db, "phb/book/light.json")
 
     _, jobs = analyser.process({
-        "_meta": {"origin_file": "book/book-phb.json"},
+        "_meta": {"pttsw_id": "phb/book/light", "origin_file": "book/book-phb.json"},
         "item": {
             "name": "Lamp",
             "source": "PHB",
@@ -296,7 +336,38 @@ def test_split_file_word_usage_uses_origin_file_from_meta():
     light_job = next(job for job in jobs if job.en_str == "Light")
     assert light_job.cn_str == "轻型"
     assert light_job.sql_id == record["id"]
-    assert light_job.uid == "$.item[name=Lamp;source=PHB].entries[0].0"
-    assert light_job.key_path == "/item[name=Lamp;source=PHB]/entries[0]"
-    assert ("book/book-phb.json", light_job.uid) in db.usage_by_file_uid
-    assert ("phb/book/light.json", light_job.uid) not in db.usage_by_file_uid
+    assert light_job.uid == "$.item.entries[0].0"
+    assert light_job.key_path == "/item/entries[0]"
+    assert ("phb/book/light.json", light_job.uid) in db.usage_by_file_uid
+    assert ("book/book-phb.json", light_job.uid) not in db.usage_by_file_uid
+
+
+def test_split_file_word_usage_does_not_cross_chapter_uid_collision():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+
+    first = db._insert_record("Chapter Title", "第一章", "", proofread=True, tag="book", sql_id=101)
+    second = db._insert_record("Chapter Title", "第二章", "", proofread=True, tag="book", sql_id=202)
+
+    class Context:
+        uid = "$.data[name=Chapter-Title].name"
+        key_path = "/data[name=Chapter-Title]/name"
+        context_key = "/data[name=Chapter-Title]"
+        context_label = ""
+
+    db._put_word_usage(first["id"], "dmg/data/0aa.json", Context())
+    db._put_word_usage(second["id"], "dmg/data/0ab.json", Context())
+
+    first_analyser = BaseAnalyser(db, "book/book-dmg.json")
+    _, first_jobs = first_analyser.process({
+        "_meta": {"pttsw_id": "dmg/data/0aa", "origin_file": "book/book-dmg.json"},
+        "data": {"name": "Chapter Title", "type": "section", "entries": []},
+    })
+    second_analyser = BaseAnalyser(db, "book/book-dmg.json")
+    _, second_jobs = second_analyser.process({
+        "_meta": {"pttsw_id": "dmg/data/0ab", "origin_file": "book/book-dmg.json"},
+        "data": {"name": "Chapter Title", "type": "section", "entries": []},
+    })
+
+    assert next(job for job in first_jobs if job.uid == Context.uid).cn_str == "第一章"
+    assert next(job for job in second_jobs if job.uid == Context.uid).cn_str == "第二章"

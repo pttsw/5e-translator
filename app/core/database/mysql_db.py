@@ -77,6 +77,18 @@ class MySQLDatabase:
                 logger.error(f"语句执行失败，错误原因: {e},{query},{params}")
                 return False
 
+    def execute_non_query_affected(self, query, params=None):
+        """执行非查询语句，并返回受影响行数；失败返回 None。"""
+        try:
+            self.cursor.execute(query, params)
+            affected_rows = self.cursor.rowcount
+            self.connection.commit()
+            return affected_rows
+        except pymysql.MySQLError as e:
+            self.connection.rollback()
+            logger.error(f"语句执行失败，错误原因: {e},{query},{params}")
+            return None
+
     def insert(self, table, data):
         """插入数据"""
         columns = ', '.join(data.keys())

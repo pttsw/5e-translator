@@ -106,7 +106,7 @@ class JsonGenerator(Runnable):
         elif len(self._job_by_uid) == 0 and self.done_jobs:
             self.__build_lookup_cache()
 
-    def __get(self, en: str, tag="") -> (Tuple[str, bool]):
+    def __get(self, en: str, tag="", allow_generic_fallback: bool = False) -> (Tuple[str, bool]):
         self.__ensure_lookup_cache()
         key = (en, tag)
         if key in self._done_translation_by_key:
@@ -125,9 +125,16 @@ class JsonGenerator(Runnable):
             return None, False
         if key not in self._translation_cache:
             self._translation_cache[key] = self.dictionary.get(en, tag=tag)
-        return self._translation_cache[key]
+        value, ok = self._translation_cache[key]
+        if ok or not tag or not allow_generic_fallback:
+            return value, ok
 
-    def __process_value(self, value, tag=""):
+        fallback_key = (en, "")
+        if fallback_key not in self._translation_cache:
+            self._translation_cache[fallback_key] = self.dictionary.get(en, tag="")
+        return self._translation_cache[fallback_key]
+
+    def __process_value(self, value, tag="", allow_generic_fallback: bool = False):
         """
         处理单个值，进行前缀、后缀检查和翻译替换
         """
@@ -136,7 +143,11 @@ class JsonGenerator(Runnable):
                 return value, False
             value_without_prefix, prefix = check_prefix(value)
             value_pure, suffix = check_suffix(value_without_prefix)
-            new_value, ok = self.__get(value_pure,tag)
+            new_value, ok = self.__get(
+                value_pure,
+                tag,
+                allow_generic_fallback=allow_generic_fallback,
+            )
             if ok and new_value is not None:
                 new_value = f'{prefix}{new_value}{suffix}'
                 # TODO 临时增加一次校验逻辑，后续删除。校验value和new_value中的@数量是否相同
@@ -159,10 +170,40 @@ class JsonGenerator(Runnable):
         matches = {}
         translated_match_cache = {}
 
+        def _candidate_en_items(cn_item, protect_other_tag=False):
+            same_tag = [
+                en_item for en_item in en_items
+                if en_item["idx"] not in used_en and cn_item["tag"] == en_item["tag"]
+            ]
+            other_tag = [
+                en_item for en_item in en_items
+                if en_item["idx"] not in used_en and cn_item["tag"] != en_item["tag"]
+                and (
+                    not protect_other_tag
+                    or en_item["idx"] == cn_item["idx"]
+                    or not any(
+                        other_cn["idx"] not in matches
+                        and other_cn["idx"] != cn_item["idx"]
+                        and other_cn["tag"] == en_item["tag"]
+                        for other_cn in cn_items
+                    )
+                )
+            ]
+            return same_tag + other_tag
+
         # 1) tag+value完全一致
         for cn_item in cn_items:
-            for en_item in en_items:
+            ordered_en_items = sorted(
+                en_items,
+                key=lambda item: 0 if item["idx"] == cn_item["idx"] else 1,
+            )
+            for en_item in ordered_en_items:
                 if en_item["idx"] in used_en:
+                    continue
+                if (
+                    en_match_k.count(en_item["tag"]) > 1
+                    and en_item["idx"] != cn_item["idx"]
+                ):
                     continue
                 if cn_item["tag"] == en_item["tag"] and cn_item["value"] == en_item["value"]:
                     matches[cn_item["idx"]] = en_item["idx"]
@@ -176,9 +217,7 @@ class JsonGenerator(Runnable):
             cn_display = get_tag_display_text(cn_item["value"], cn_item["tag"]).strip().lower()
             if not cn_display:
                 continue
-            for en_item in en_items:
-                if en_item["idx"] in used_en:
-                    continue
+            for en_item in _candidate_en_items(cn_item, protect_other_tag=True):
                 en_display = get_tag_display_text(en_item["value"], en_item["tag"]).strip().lower()
                 if cn_display == en_display:
                     matches[cn_item["idx"]] = en_item["idx"]
@@ -192,9 +231,7 @@ class JsonGenerator(Runnable):
             cn_display = get_tag_display_text(cn_item["value"], cn_item["tag"])
             if not cn_display:
                 continue
-            for en_item in en_items:
-                if en_item["idx"] in used_en:
-                    continue
+            for en_item in _candidate_en_items(cn_item, protect_other_tag=True):
                 en_display = get_tag_display_text(en_item["value"], en_item["tag"])
                 cache_key = ("display", cn_item["idx"], en_item["idx"])
                 if cache_key not in translated_match_cache:
@@ -205,6 +242,23 @@ class JsonGenerator(Runnable):
                     matches[cn_item["idx"]] = en_item["idx"]
                     used_en.add(en_item["idx"])
                     break
+
+        # 3.5) tag序列完全一致且包含多种tag时，对剩余项按位置兜底。
+        # 放在翻译显示文本匹配之后，避免把中文自然语序里重排的同类tag先锁死。
+        # 例如 {@dc 15}/{@skill ...}/{@item ...} 被旧翻译串位后，仍应按tag位置回填。
+        if en_match_k == cn_match_k and len(set(en_match_k)) > 1:
+            for cn_item, en_item in zip(cn_items, en_items):
+                if cn_item["idx"] in matches:
+                    continue
+                if en_item["idx"] in used_en:
+                    continue
+                if (
+                    en_match_k.count(en_item["tag"]) > 1
+                    and len(cn_item["value"].split("|")) != len(en_item["value"].split("|"))
+                ):
+                    continue
+                matches[cn_item["idx"]] = en_item["idx"]
+                used_en.add(en_item["idx"])
 
         # 4) tag一致，且英文value替换后的结果与当前中文value一致
         for cn_item in cn_items:
@@ -232,21 +286,25 @@ class JsonGenerator(Runnable):
             if cn_item["idx"] in matches:
                 continue
             best_en_idx = None
-            best_score = 0
+            best_score = None
             cn_parts = cn_item["value"].split("|")
             for en_item in en_items:
                 if en_item["idx"] in used_en or cn_item["tag"] != en_item["tag"]:
                     continue
                 en_parts = en_item["value"].split("|")
                 score = 0
+                if len(cn_parts) == len(en_parts):
+                    score += 100
+                else:
+                    score -= abs(len(cn_parts) - len(en_parts)) * 10
                 max_len = max(len(cn_parts), len(en_parts))
                 for pos, (cn_part, en_part) in enumerate(zip(cn_parts, en_parts)):
                     if cn_part == en_part:
                         score += (max_len - pos)
-                if score > best_score:
+                if best_score is None or score > best_score:
                     best_score = score
                     best_en_idx = en_item["idx"]
-            if best_en_idx is not None and best_score > 0:
+            if best_en_idx is not None and best_score is not None and best_score > 0:
                 matches[cn_item["idx"]] = best_en_idx
                 used_en.add(best_en_idx)
 
@@ -269,7 +327,7 @@ class JsonGenerator(Runnable):
         for cn_item in cn_items:
             en_item = en_items[matches[cn_item["idx"]]]
             paired.append((cn_item["tag"], cn_item["value"],
-                          en_item["tag"], en_item["value"]))
+                          en_item["tag"], en_item["value"], en_item["idx"]))
         return True, paired
     
     def __replace_sub_jobs(
@@ -279,6 +337,7 @@ class JsonGenerator(Runnable):
         tag="",
         allow_plain_reprocess: bool = False,
         base_uid: str = "",
+        process_full_value: bool = True,
     ):
         # print(cn_str)
         processed = False
@@ -292,7 +351,7 @@ class JsonGenerator(Runnable):
             return cn_str, False
 
         # 初筛
-        if "{@" in cn_str:
+        if process_full_value and "{@" in cn_str:
             # 初筛，包含@{的，需要继续处理
             p_v, ok = self.__process_value(en_str, tag=tag)
             if ok:
@@ -302,7 +361,17 @@ class JsonGenerator(Runnable):
             en_str, False)
         cn_match_k, cn_match_v, cn_is_valid = parse_custom_format(
             cn_str, False)
-        if (not en_is_valid) or (not cn_is_valid) or (len(cn_match_v) != len(en_match_v)):
+        if (not en_is_valid) or (not cn_is_valid):
+            logger.error(
+                f"tag解析失败: en={en_str}, cn={cn_str}, "
+                f"en_valid={en_is_valid}, cn_valid={cn_is_valid}"
+            )
+            return cn_str, False
+        if len(cn_match_v) != len(en_match_v):
+            logger.error(
+                f"tag数量不一致: en_count={len(en_match_v)}, cn_count={len(cn_match_v)}, "
+                f"en={en_str}, cn={cn_str}"
+            )
             return cn_str, False
 
         ok, matched_pairs = self.__match_tag_values_by_priority(
@@ -314,12 +383,12 @@ class JsonGenerator(Runnable):
         # if len(cn_match_k) > 0:
         #     processed = True
             
-        for match_index, (ck, cv, ek, ev) in enumerate(matched_pairs):
+        for _match_index, (ck, cv, ek, ev, en_match_index) in enumerate(matched_pairs):
             check_split_str = check_split_str.replace(f"{{@{ek} {ev}}}", "")
 
             cn_str = cn_str.replace(f"{{@{ck} {cv}}}", f"{{@{ek} {ev}}}",1)
             # 第二步：逐个解析每个ev
-            child_base_uid = f"{base_uid}.{ek}[{match_index}]" if base_uid else ""
+            child_base_uid = f"{base_uid}.{ek}[{en_match_index}]" if base_uid else ""
             new_v, ok = self.__replace_sub_jobs(
                 cv,
                 ev,
@@ -333,9 +402,27 @@ class JsonGenerator(Runnable):
             
         if '|' in check_split_str:
             str_list = check_split_str.split("|")
+            en_split = split_string(en_str)
+            cn_split = split_string(cn_str)
+
+            def _call_process_value(value, value_tag, allow_generic_fallback=False):
+                try:
+                    return self.__process_value(
+                        value,
+                        tag=value_tag,
+                        allow_generic_fallback=allow_generic_fallback,
+                    )
+                except TypeError as exc:
+                    if "allow_generic_fallback" not in str(exc):
+                        raise
+                    return self.__process_value(value, tag=value_tag)
 
             def _process_pipe_value(value, value_tag, _value_index):
-                cn_value, _ = self.__process_value(value, tag=value_tag)
+                cn_value, _ = _call_process_value(
+                    value,
+                    value_tag,
+                    value_tag in {"variantrule", "card", "table"},
+                )
                 return cn_value
 
             if tag == "filter":
@@ -354,10 +441,23 @@ class JsonGenerator(Runnable):
                if (len(filter_values) > 2):
                     # 正常至少有3个值
                     cv_source = filter_values[1]
-                    cv_name, _ = self.__process_value(filter_values[0], tag=tag)
+                    cv_name, name_ok = self.__process_value(
+                        filter_values[0], tag=tag)
+                    if (
+                        not name_ok
+                        and len(cn_split) > 0
+                        and cn_split[0] != filter_values[0]
+                    ):
+                        cv_name = cn_split[0]
                     cv_conditions = []
-                    for eev in filter_values[2:]:
-                        ccv, _ = self.__process_value(eev, tag=tag)
+                    for condition_index, eev in enumerate(filter_values[2:], start=2):
+                        ccv, condition_ok = self.__process_value(eev, tag=tag)
+                        if (
+                            not condition_ok
+                            and len(cn_split) > condition_index
+                            and cn_split[condition_index] != eev
+                        ):
+                            ccv = cn_split[condition_index]
                         cv_conditions.append(ccv)
                     cn_str = f"{cv_name}|{cv_source}|{'|'.join(cv_conditions)}"
                     return cn_str, True
@@ -365,12 +465,10 @@ class JsonGenerator(Runnable):
                 str_list, _process_pipe_value, tag=tag)
             if handled:
                 return processed_pipe, True
-            en_split = split_string(en_str)
-            cn_split = split_string(cn_str)
             res_split = []
 
             def _looks_like_source_code(value: str):
-                return isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9]{1,12}", value) is not None
+                return isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,12}", value) is not None
 
             def _looks_like_metadata_value(value: str):
                 return isinstance(value, str) and re.fullmatch(r"\d+(?:-\d+)?", value.strip()) is not None
@@ -400,6 +498,9 @@ class JsonGenerator(Runnable):
                 if tag == "variantrule" and i == 1:
                     res_split.append(eev)
                     continue
+                if eev == "":
+                    res_split.append(eev)
+                    continue
                 if "{@" in eev and ccv is not None and ccv != eev:
                     res_split.append(ccv)
                 elif "{@" in eev:
@@ -413,7 +514,11 @@ class JsonGenerator(Runnable):
                         elif ccv is not None and ccv != eev:
                             res_split.append(ccv)
                         else:
-                            p_v, ok = self.__process_value(eev, tag=tag)
+                            p_v, ok = _call_process_value(
+                                eev,
+                                tag,
+                                tag in {"variantrule", "table"},
+                            )
                             if ok:
                                 res_split.append(p_v)
                             elif ccv is not None:
@@ -421,7 +526,11 @@ class JsonGenerator(Runnable):
                             else:
                                 res_split.append(p_v)
                         continue
-                    p_v, ok = self.__process_value(eev, tag=tag)
+                    p_v, ok = _call_process_value(
+                        eev,
+                        tag,
+                        tag in {"variantrule", "table"},
+                    )
                     if ok and p_v != eev:
                         res_split.append(p_v)
                     elif (
@@ -447,6 +556,10 @@ class JsonGenerator(Runnable):
                         res_split.append(p_v)
             cn_str = '|'.join(res_split)
         elif processed == False and (cn_str == en_str or allow_plain_reprocess):
+            if base_uid:
+                child_job = self._job_by_uid.get(f"{base_uid}.0")
+                if child_job is not None and child_job.cn_str is not None:
+                    return child_job.cn_str, True
             p_v, ok = self.__process_value(en_str, tag = tag)
             if ok:
                 cn_str = p_v
@@ -478,14 +591,36 @@ class JsonGenerator(Runnable):
             ]
 
         old_pairs = list(zip(old_tags, old_values))
+        old_cn_links_remaining = list(old_cn_links)
+
+        def _consume_old_pair(old_tag: str, old_value: str):
+            for pair_index, pair in enumerate(old_pairs):
+                if pair != (old_tag, old_value):
+                    continue
+                old_pairs.pop(pair_index)
+                for link_index, link in enumerate(old_cn_links_remaining):
+                    if (
+                        link["old_tag"] == old_tag
+                        and link["old_value"] == old_value
+                    ):
+                        old_cn_links_remaining.pop(link_index)
+                        break
+                return True
+            return False
+
+        def _take_old_cn_link(display_text: str):
+            for link_index, link in enumerate(old_cn_links_remaining):
+                if link["old_display"] == display_text:
+                    return old_cn_links_remaining.pop(link_index)
+            return None
+
         replaced_existing_tag = False
         inserted_plain_tag = False
         for new_tag, new_value in zip(new_tags, new_values):
-            if (new_tag, new_value) in old_pairs:
-                old_pairs.remove((new_tag, new_value))
+            if _consume_old_pair(new_tag, new_value):
                 continue
             display_text = get_tag_display_text(new_value, new_tag)
-            old_cn_link = self.__find_old_cn_link(old_cn_links, display_text)
+            old_cn_link = _take_old_cn_link(display_text)
             if old_cn_link is not None:
                 old_cn_tag = f"{{@{old_cn_link['cn_tag']} {old_cn_link['cn_value']}}}"
                 new_cn_value = self.__build_cn_tag_value(
@@ -493,23 +628,31 @@ class JsonGenerator(Runnable):
                 cn_str = cn_str.replace(old_cn_tag, f"{{@{new_tag} {new_cn_value}}}", 1)
                 replaced_existing_tag = True
                 continue
-            if not display_text or display_text not in cn_str:
-                known_cn = self.__get_known_translation(display_text, new_tag)
-                if not known_cn or known_cn not in cn_str:
-                    continue
-                display_text = known_cn
             cn_str, replaced = self.__replace_plain_outside_tags(
                 cn_str,
                 display_text,
                 f"{{@{new_tag} {self.__build_cn_tag_value(new_value, new_tag, display_text)}}}",
             )
             if not replaced:
+                known_cn = self.__get_known_translation(display_text, new_tag)
+                if known_cn and known_cn != display_text:
+                    cn_str, replaced = self.__replace_plain_outside_tags(
+                        cn_str,
+                        known_cn,
+                        f"{{@{new_tag} {self.__build_cn_tag_value(new_value, new_tag, known_cn)}}}",
+                    )
+            if not replaced:
                 continue
             inserted_plain_tag = True
 
         if replaced_existing_tag and not inserted_plain_tag:
             return cn_str
-        synced, ok = self.__replace_sub_jobs(cn_str, new_en_str, tag=tag)
+        synced, ok = self.__replace_sub_jobs(
+            cn_str,
+            new_en_str,
+            tag=tag,
+            process_full_value=False,
+        )
         return synced if ok else cn_str
 
     def __find_old_cn_link(self, old_cn_links: List[dict], display_text: str):
@@ -681,6 +824,27 @@ class JsonGenerator(Runnable):
                             j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
                     else:
                         original_cn = j.cn_str
+                        en_tags, en_values, en_valid = parse_custom_format(j.en_str, False)
+                        cn_tags, cn_values, cn_valid = parse_custom_format(j.cn_str, False)
+                        if (
+                            en_valid
+                            and cn_valid
+                            and len(cn_values) < len(en_values)
+                        ):
+                            synced_cn = self.__sync_tag_only_cn(
+                                j.cn_str,
+                                None,
+                                j.en_str,
+                                tag=j.tag,
+                            )
+                            if synced_cn != j.cn_str:
+                                j.cn_str = synced_cn
+                                self._done_translation_by_key[(j.en_str, j.tag)] = j.cn_str
+                                if isinstance(j.en_str, str):
+                                    self._done_translation_by_lower_key[(j.en_str.lower(), j.tag)] = j.cn_str
+                                    self._unique_translation_by_en[j.en_str] = j.cn_str
+                                    self._unique_translation_by_en[j.en_str.lower()] = j.cn_str
+                                self._translation_cache[(j.en_str, j.tag)] = (j.cn_str, True)
                         replaced_cn, ok = self.__replace_sub_jobs(
                             j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
                         if not ok:
@@ -690,6 +854,25 @@ class JsonGenerator(Runnable):
                             )
                             if aligned:
                                 j.cn_str = aligned_cn
+                                if j.sql_id is not None and self.__should_update_dictionary():
+                                    self.dictionary.update(
+                                        j.sql_id,
+                                        j.en_str,
+                                        j.cn_str,
+                                        proofread=bool(j.is_proofread),
+                                        tag=j.tag,
+                                    )
+                                replaced_cn, ok = self.__replace_sub_jobs(
+                                    j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
+                        if not ok:
+                            synced_cn = self.__sync_tag_only_cn(
+                                j.cn_str,
+                                None,
+                                j.en_str,
+                                tag=j.tag,
+                            )
+                            if synced_cn != j.cn_str:
+                                j.cn_str = synced_cn
                                 if j.sql_id is not None and self.__should_update_dictionary():
                                     self.dictionary.update(
                                         j.sql_id,

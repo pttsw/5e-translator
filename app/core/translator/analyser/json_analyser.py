@@ -171,6 +171,7 @@ class JsonAnalyser(Runnable):
             if "_meta" not in en_json_obj or "origin_file" not in en_json_obj["_meta"]:
                 return None, None, True
             self.rel_path = en_json_obj["_meta"]["origin_file"]
+            self.split_rel_path = get_rel_path(json_file, SPLITED_5ETOOLS_EN_PATH)
         elif self.mode == 'homebrew':
             self.rel_path = get_rel_path(json_file, HOMEBREW_EN_PATH)
         elif self.mode == 'ua':
@@ -183,6 +184,8 @@ class JsonAnalyser(Runnable):
         # 从数据库导出当前文件的相关翻译条目，为后续直接匹配正确的翻译做准备
         if self.mode == 'plu':
             self.dictionary.dump([self.rel_path, os.path.join('plu/', self.rel_path)])
+        elif self.mode == 'splited':
+            self.dictionary.dump([self.split_rel_path])
         else:
             self.dictionary.dump([self.rel_path])
         # 清空name_list，防止上一个文件的name污染这次查询

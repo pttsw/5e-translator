@@ -423,6 +423,27 @@ def process_post_filter_split_values(
         return replace_split_values(values, process_value, tag=tag, skip_indices={2}), True
     if tag == "deity":
         return replace_split_values(values, process_value, tag=tag, skip_indices={2}), True
+    if tag == "table":
+        replaced_values = []
+        for idx, value in enumerate(values):
+            if idx == 1:
+                replaced_values.append(value)
+            elif idx == 0 and ";" in value:
+                whole_value = process_value(value, tag, idx)
+                if whole_value != value:
+                    replaced_values.append(whole_value.replace("；", ";"))
+                else:
+                    replaced_parts = []
+                    for part in value.split(";"):
+                        stripped_part = part.strip()
+                        if stripped_part:
+                            replaced_parts.append(process_value(stripped_part, tag, idx))
+                        else:
+                            replaced_parts.append(stripped_part)
+                    replaced_values.append("; ".join(replaced_parts))
+            else:
+                replaced_values.append(process_value(value, tag, idx))
+        return '|'.join(replaced_values), True
     if tag == "recipe":
         replaced_values = []
         for idx, value in enumerate(values):
@@ -435,6 +456,8 @@ def process_post_filter_split_values(
         return '|'.join(replaced_values), True
     if tag == "class":
         return replace_split_values(values, process_value, tag=tag, skip_indices={1, 4, 5}), True
+    if tag == "subclass":
+        return replace_split_values(values, process_value, tag=tag, skip_indices={2, 3}), True
     if key_path and ("/classFeature" in key_path or "/subclassFeatures" in key_path):
         return replace_split_values(values, process_value, tag=tag, skip_indices={2, 4}), True
     return None, False

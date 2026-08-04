@@ -210,7 +210,7 @@ class MemoryDBDictionary:
                     continue
                 if not self._same_en(record["en"], en, ignore_case):
                     continue
-                if record["category"] == target_tag or field == "uid":
+                if record["category"] == target_tag or field in ("uid", "key_path"):
                     matches.append(record)
             if matches:
                 proofread = [record for record in matches if record["proofread"] == 1]

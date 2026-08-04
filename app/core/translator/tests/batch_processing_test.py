@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import types
@@ -63,6 +64,7 @@ from app.core.utils.utils import process_post_filter_split_values as _bootstrap_
 from app.core.utils.utils import get_tag_display_text as _bootstrap_get_tag_display_text
 from app.core.utils.utils import FILTER_SUPPORT_PAGES as _bootstrap_FILTER_SUPPORT_PAGES
 from app.core.utils.reference_finder import find_reference as _bootstrap_find_reference
+from app.core.utils.loader import clean_5etools_json as _bootstrap_clean_5etools_json
 
 sys.modules["app.core.utils"].Job = _BootstrapJob
 sys.modules["app.core.utils"].FileWorkInfo = _BootstrapFileWorkInfo
@@ -81,9 +83,11 @@ sys.modules["app.core.utils"].process_post_filter_split_values = _bootstrap_proc
 sys.modules["app.core.utils"].get_tag_display_text = _bootstrap_get_tag_display_text
 sys.modules["app.core.utils"].FILTER_SUPPORT_PAGES = _bootstrap_FILTER_SUPPORT_PAGES
 sys.modules["app.core.utils"].find_reference = _bootstrap_find_reference
+sys.modules["app.core.utils"].clean_5etools_json = _bootstrap_clean_5etools_json
 
 from app.core.translator.batch_chunker import BatchChunker, BatchUnit
 from app.core.translator.batch_job_processor import BatchJobProcessor
+from app.core.bean.term import Term
 from app.core.utils.file_work_info import FileWorkInfo
 from app.core.utils.job import Job
 
@@ -285,6 +289,151 @@ def test_batch_chunker_keeps_unmatched_jobs_when_some_blocks_do_match():
     assert len(units) == 2
     assert [job.uid for job in units[0].jobs] == ["$.spell[0].entries[0]"]
     assert [job.uid for job in units[1].jobs] == ["$.spell[0].name.0"]
+
+
+def test_batch_chunker_filters_known_translations_to_current_batch_context():
+    pending = make_job(
+        "$.data[0].entries[0]",
+        "After the orrery is destroyed, {@creature Hazlik|RHW} appears.",
+        key_path="/data[0]/entries[0]",
+        entry_path="/data[0]",
+        batch_seq=0,
+    )
+    pending.current_names = [("Chapter 2", "第二章"), ("Hazlan", "哈兹兰")]
+    known_parent = make_job(
+        "$.data[0].name",
+        "Hazlan",
+        key_path="/data[0]/name",
+        need_translate=False,
+        cn_str="哈兹兰",
+    )
+    known_tag = make_job(
+        "$.creature.hazlik.name",
+        "Hazlik",
+        key_path="/creature/hazlik/name",
+        need_translate=False,
+        cn_str="哈兹里克",
+    )
+    unrelated = make_job(
+        "$.data[9].name",
+        "Unrelated City",
+        key_path="/data[9]/name",
+        need_translate=False,
+        cn_str="无关城市",
+    )
+    file_info = FileWorkInfo(
+        job_list=[pending, known_parent, known_tag, unrelated],
+        json_obj={
+            "data": [
+                {
+                    "name": "{!@ $.data[0].name}",
+                    "entries": ["{!@ $.data[0].entries[0]}"],
+                }
+            ]
+        },
+        json_path="book/book-rhw.json",
+        out_path="book/book-rhw.json",
+    )
+
+    units = BatchChunker(max_chars=12000).build_units(file_info)
+    known_en = {item["en_str"] for item in units[0].known_translations}
+
+    assert known_en == {"Hazlan", "Hazlik"}
+
+
+def test_batch_chunker_collapses_repeated_adjacent_context_paths():
+    first = make_job(
+        "$.data[0].entries[0]",
+        "First paragraph.",
+        key_path="/data[0]/entries[0]",
+        entry_path="/data[0]",
+        batch_seq=0,
+    )
+    second = make_job(
+        "$.data[0].entries[1]",
+        "Second paragraph.",
+        key_path="/data[0]/entries[1]",
+        entry_path="/data[0]",
+        batch_seq=1,
+    )
+    first.current_names = [("Chapter 2: Domains of Ravenloft", "第二章：鸦阁魔域"), ("Barovia", "巴洛维亚")]
+    second.current_names = list(first.current_names)
+
+    context = BatchChunker(max_chars=12000)._build_context_from_jobs([first, second])
+
+    assert context.count("[PATH] Chapter 2: Domains of Ravenloft > Barovia") == 1
+    assert "First paragraph." in context
+    assert "Second paragraph." in context
+
+
+def test_batch_job_processor_dedupes_repeated_parent_paths_in_request():
+    processor = BatchJobProcessor.__new__(BatchJobProcessor)
+    processor.cache = False
+    first = make_job(
+        "$.data[0].entries[0]",
+        "First paragraph.",
+        key_path="/data[0]/entries[0]",
+        entry_path="/data[0]",
+        batch_seq=0,
+    )
+    second = make_job(
+        "$.data[0].entries[1]",
+        "Second paragraph.",
+        key_path="/data[0]/entries[1]",
+        entry_path="/data[0]",
+        batch_seq=1,
+    )
+    first.current_names = [("Chapter 2: Domains of Ravenloft", "第二章：鸦阁魔域"), ("Barovia", "巴洛维亚")]
+    second.current_names = list(first.current_names)
+    batch_unit = BatchUnit(
+        batch_id="book/book-rhw.json#0",
+        parent_batch_id="book/book-rhw.json",
+        chunk_index=0,
+        jobs=[first, second],
+        context_text="context",
+    )
+
+    payload = json.loads(processor._build_batch_request(batch_unit))
+
+    assert payload["parents"] == [
+        ["Chapter 2: Domains of Ravenloft", "第二章：鸦阁魔域"],
+        ["Barovia", "巴洛维亚"],
+    ]
+
+
+def test_batch_job_processor_filters_reference_terms_to_batch_text_and_dedupes():
+    processor = BatchJobProcessor.__new__(BatchJobProcessor)
+    processor.cache = False
+    job = make_job(
+        "$.data[0].entries[0]",
+        "Hazlik studies the magical orrery.",
+        key_path="/data[0]/entries[0]",
+        entry_path="/data[0]",
+        batch_seq=0,
+    )
+    job.current_names = [("Chapter 2: Domains of Ravenloft", "第二章：鸦阁魔域")]
+    job.knowledge = ["Use Ravenloft tone.", "Use Ravenloft tone."]
+    job.terms = [
+        Term("Hazlik", "book", "哈兹里克"),
+        Term("Orrery", "book", "星象仪"),
+        Term("Unrelated City", "book", "无关城市"),
+        Term("Hazlik", "book", "哈兹里克"),
+    ]
+    batch_unit = BatchUnit(
+        batch_id="book/book-rhw.json#0",
+        parent_batch_id="book/book-rhw.json",
+        chunk_index=0,
+        jobs=[job],
+        context_text="Hazlik studies the magical orrery.",
+    )
+
+    payload = json.loads(processor._build_batch_request(batch_unit))
+
+    assert payload["reference"] == [
+        "Use Ravenloft tone.",
+        "Hazlik:哈兹里克",
+        "Orrery:星象仪",
+    ]
 
 
 def test_batch_chunker_ignores_unhashable_type_field_when_extracting_blocks():

@@ -156,7 +156,7 @@ class DBDictionary:
             return None
         context = self.__job_usage_context(job)
         target_tag = tag if tag not in ("", None) else None
-        base_select = (
+        base_select_with_en = (
             "SELECT w.id, w.en, w.cn, w.json_file, w.proofread, w.category, "
             "w.modified_at, w.is_key "
             "FROM word_usage wu JOIN words w ON w.id = wu.word_id "
@@ -164,22 +164,36 @@ class DBDictionary:
         )
         lookups = []
         if context["uid"]:
-            lookups.append(("wu.uid = %s", context["uid"]))
+            lookups.append(("wu.uid = %s", context["uid"], True))
         if context["key_path"]:
-            lookups.append(("wu.key_path = %s", context["key_path"]))
+            lookups.append(("wu.key_path = %s", context["key_path"], True))
         if context["context_key"]:
-            lookups.append(("wu.context_key = %s", context["context_key"]))
-        for usage_sql, usage_value in lookups:
+            lookups.append(("wu.context_key = %s", context["context_key"], False))
+        for usage_sql, usage_value, exact_usage in lookups:
+            if exact_usage:
+                query = (
+                    "SELECT w.id, w.en, w.cn, w.json_file, w.proofread, w.category, "
+                    "w.modified_at, w.is_key "
+                    "FROM word_usage wu JOIN words w ON w.id = wu.word_id "
+                    "WHERE wu.file = %s AND " + usage_sql + " "
+                    "ORDER BY w.proofread DESC, w.modified_at DESC LIMIT 1"
+                )
+                params = (rel_f, usage_value)
+            else:
+                query = (
+                    base_select_with_en + usage_sql + " "
+                    "ORDER BY w.proofread DESC, w.modified_at DESC LIMIT 1"
+                )
+                params = (rel_f, k, usage_value)
             rows = db.execute_query(
-                base_select + usage_sql + " "
-                "ORDER BY w.proofread DESC, w.modified_at DESC LIMIT 1",
-                (rel_f, k, usage_value),
+                query,
+                params,
             )
             if rows:
-                if usage_sql == "wu.uid = %s" and rows[0]['category'] != target_tag:
-                    logger.info(
-                        "word_usage按uid命中但category不同，优先使用已绑定记录: "
-                        f"file={rel_f}, uid={usage_value}, word_id={rows[0]['id']}, "
+                if exact_usage and rows[0]['category'] != target_tag:
+                    logger.debug(
+                        "word_usage精确命中但category不同，优先使用已绑定记录: "
+                        f"file={rel_f}, usage={usage_value}, word_id={rows[0]['id']}, "
                         f"word_category={rows[0]['category']}, job_category={target_tag}"
                     )
                     return self.__row_to_bean(rows[0])
@@ -259,6 +273,55 @@ class DBDictionary:
                         f"word_category={row['category']}, job_category={target_tag}"
                     )
                 result[uid] = self.__row_to_bean(row)
+        return result
+
+    def __get_usage_matches_by_field(
+        self,
+        db,
+        keys: list,
+        tags: list,
+        rel_f: str,
+        contexts: list,
+        field: str,
+        ignore_case: bool = False,
+    ):
+        requests = {}
+        for index, (k, t) in enumerate(zip(keys, tags)):
+            if index >= len(contexts):
+                continue
+            job_context = contexts[index]
+            usage_value = getattr(job_context, field, "") or ""
+            if not usage_value:
+                continue
+            requests.setdefault(usage_value, []).append((index, k, t, job_context))
+        if not requests:
+            return {}
+
+        result = {}
+        usage_values = list(requests.keys())
+        chunk_size = 500
+        for start in range(0, len(usage_values), chunk_size):
+            chunk = usage_values[start:start + chunk_size]
+            placeholders = ','.join(['%s'] * len(chunk))
+            rows = db.execute_query(
+                f"SELECT wu.{field} AS usage_value, w.id, w.en, w.cn, w.json_file, "
+                "w.proofread, w.category, w.modified_at, w.is_key "
+                "FROM word_usage wu JOIN words w ON w.id = wu.word_id "
+                f"WHERE wu.file = %s AND wu.{field} IN ({placeholders}) "
+                "ORDER BY w.proofread DESC, w.modified_at DESC",
+                (rel_f, *chunk),
+            ) or []
+            for row in rows:
+                usage_value = row.get('usage_value') or ""
+                for index, k, t, _job_context in requests.get(usage_value, []):
+                    if index in result:
+                        continue
+                    target_tag = t if t not in ("", None) else None
+                    if not self.__same_en(row['en'], k, ignore_case):
+                        continue
+                    if field == "context_key" and row['category'] != target_tag:
+                        continue
+                    result[index] = self.__row_to_bean(row)
         return result
 
     def __put_word_usages_if_needed(self, db, usage_items: list):
@@ -531,15 +594,63 @@ class DBDictionary:
             db = self.db_list[db_index]
             try:
                 usage_matches = self.__get_usage_matches_by_uid(db, keys, tags, rel_f, contexts, ignore_case=ignore_case)
-                for k, t, job_context in zip(keys, tags, contexts):
+                unresolved_indexes = []
+                for index, (k, t, job_context) in enumerate(zip(keys, tags, contexts)):
                     uid = getattr(job_context, "uid", "") or ""
-                    usage_bean = usage_matches.get(uid) if uid else self.__get_usage_match(db, k, t, rel_f, job_context, ignore_case=ignore_case)
+                    usage_bean = usage_matches.get(uid) if uid else None
                     if usage_bean is not None:
                         if uid:
                             res_beans[(k, t, uid)] = usage_bean
                         else:
                             res_beans[(k, t)] = usage_bean
                         self.__put_redis(k, usage_bean['cn'], usage_bean['category'], usage_bean['proofread'], usage_bean['is_key'], usage_bean['sql_id'], usage_bean['modified_at'])
+                    else:
+                        unresolved_indexes.append(index)
+                if unresolved_indexes:
+                    key_path_matches = self.__get_usage_matches_by_field(
+                        db,
+                        [keys[i] for i in unresolved_indexes],
+                        [tags[i] for i in unresolved_indexes],
+                        rel_f,
+                        [contexts[i] for i in unresolved_indexes],
+                        "key_path",
+                        ignore_case=ignore_case,
+                    )
+                    still_unresolved_indexes = []
+                    for local_index, usage_bean in key_path_matches.items():
+                        index = unresolved_indexes[local_index]
+                        k = keys[index]
+                        t = tags[index]
+                        uid = getattr(contexts[index], "uid", "") or ""
+                        if uid:
+                            res_beans[(k, t, uid)] = usage_bean
+                        else:
+                            res_beans[(k, t)] = usage_bean
+                        self.__put_redis(k, usage_bean['cn'], usage_bean['category'], usage_bean['proofread'], usage_bean['is_key'], usage_bean['sql_id'], usage_bean['modified_at'])
+                    matched_local_indexes = set(key_path_matches.keys())
+                    for local_index, index in enumerate(unresolved_indexes):
+                        if local_index not in matched_local_indexes:
+                            still_unresolved_indexes.append(index)
+                    if still_unresolved_indexes:
+                        context_key_matches = self.__get_usage_matches_by_field(
+                            db,
+                            [keys[i] for i in still_unresolved_indexes],
+                            [tags[i] for i in still_unresolved_indexes],
+                            rel_f,
+                            [contexts[i] for i in still_unresolved_indexes],
+                            "context_key",
+                            ignore_case=ignore_case,
+                        )
+                        for local_index, usage_bean in context_key_matches.items():
+                            index = still_unresolved_indexes[local_index]
+                            k = keys[index]
+                            t = tags[index]
+                            uid = getattr(contexts[index], "uid", "") or ""
+                            if uid:
+                                res_beans[(k, t, uid)] = usage_bean
+                            else:
+                                res_beans[(k, t)] = usage_bean
+                            self.__put_redis(k, usage_bean['cn'], usage_bean['category'], usage_bean['proofread'], usage_bean['is_key'], usage_bean['sql_id'], usage_bean['modified_at'])
             finally:
                 self.__release_db(db_index)
         for index, (k, t) in enumerate(zip(keys, tags)):
@@ -775,6 +886,30 @@ class DBDictionary:
                 'modified_reson': modified_reson or '',
                 'modified_by': modified_by,
             })
+        finally:
+            self.__release_db(db_index)
+
+    def put_term_ignore_duplicate(self, term, source="", modified_by=1, modified_reson=""):
+        """写入Term表，重复主键按数据库 collation 静默跳过。
+
+        Returns:
+            int | None: 1 表示插入成功，0 表示被 INSERT IGNORE 跳过，None 表示失败。
+        """
+        db_index = self.__get_db_index()
+        db = self.db_list[db_index]
+        try:
+            data = {
+                'en': term.en,
+                'cn': term.cn,
+                'category': term.category or '',
+                'source': source or '',
+                'modified_reson': modified_reson or '',
+                'modified_by': modified_by,
+            }
+            columns = ', '.join(data.keys())
+            placeholders = ', '.join(['%s'] * len(data))
+            query = f"INSERT IGNORE INTO term ({columns}) VALUES ({placeholders})"
+            return db.execute_non_query_affected(query, tuple(data.values()))
         finally:
             self.__release_db(db_index)
 

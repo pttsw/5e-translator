@@ -223,6 +223,30 @@ def test_replace_sub_jobs_keeps_variantrule_source_metadata():
     assert result == "{@variantrule 生命值|XPHB|生命值}"
 
 
+def test_replace_sub_jobs_uses_generic_dictionary_for_variantrule_parts():
+    class FakeDictionary:
+        def get(self, en, tag=""):
+            translations = {
+                ("Sphere [Area of Effect]", ""): "球状 [效应区域]",
+                ("Sphere", ""): "球状",
+            }
+            value = translations.get((en, tag))
+            return (value, True) if value is not None else (None, False)
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+    generator.dictionary = FakeDictionary()
+    generator._JsonGenerator__build_lookup_cache()
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@variantrule Sphere [Area of Effect]|XPHB|Sphere}",
+        "{@variantrule Sphere [Area of Effect]|XPHB|Sphere}",
+    )
+
+    assert success is True
+    assert result == "{@variantrule 球状 [效应区域]|XPHB|球状}"
+
+
 def test_replace_sub_jobs_translates_filter_search_value_with_page_context():
     generator = JsonGenerator.__new__(JsonGenerator)
     generator.done_jobs = []
@@ -508,6 +532,295 @@ def test_replace_sub_jobs_restores_quickref_numeric_metadata():
     assert result == "{@quickref 困难地形||3}"
 
 
+def test_replace_sub_jobs_keeps_empty_creature_source_segment():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Skeleton", "creature"): "骷髅",
+            ("skeletons", "creature"): "骷髅们",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@creature 骷髅|BGDIA|骷髅们}",
+        "{@creature Skeleton||skeletons}",
+    )
+
+    assert success is True
+    assert result == "{@creature 骷髅||骷髅们}"
+
+
+def test_replace_sub_jobs_keeps_mixed_case_creature_source_after_reordered_tags():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("githzerai uniter", "creature"): "吉斯泽莱统念者",
+            ("Zaythir", "creature"): "扎伊西尔",
+            ("Morte's Planar Parade", "book"): "莫提的位面游记",
+            ("Zaythir", "adventure"): "扎伊西尔",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    en_str = (
+        "The Fiends have kept the castle's caretaker, a neutral "
+        "{@creature githzerai uniter|MPP} (see {@book Morte's Planar Parade|MPP}) "
+        "named {@creature Zaythir|ToFW}, in this chamber. "
+        "{@creature Zaythir|ToFW} is eager to be free and evict the devils from her home. "
+        'She is further detailed in the "{@adventure Zaythir|ToFW|2|Zaythir}" section.'
+    )
+    cn_str = (
+        "邪魔们将城堡的看护者，一个名叫{@creature 扎伊西尔|MPP}的绝对中立吉斯"
+        "{@creature 吉斯泽莱统念者|MPP}（见《{@book 莫提的位面游记|MPP}》）"
+        "关押在这个房间里。{@creature 扎伊西尔|ToFW}渴望自由并希望将邪魔们驱逐出她的家。"
+        '她在"{@adventure 扎伊西尔|ToFW|2|扎伊西尔}"一节中有更详细的描述。'
+    )
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(cn_str, en_str)
+
+    assert success is True
+    assert "{@creature 扎伊西尔|MPP}的绝对中立吉斯" not in result
+    assert "{@creature 扎伊西尔|ToFW}的绝对中立吉斯" in result
+
+
+def test_replace_sub_jobs_keeps_format_tag_from_stealing_creature_match():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    base_uid = "$.entries[0]"
+    generator.done_jobs = [
+        Job(
+            uid=f"{base_uid}.b[0].0",
+            en_str="Darkmantles",
+            cn_str="暗幕魔兽",
+            tag="b",
+        ),
+        Job(
+            uid=f"{base_uid}.creature[1].0",
+            en_str="Darkmantle",
+            cn_str="暗幕魔兽",
+            tag="creature",
+        ),
+        Job(
+            uid=f"{base_uid}.creature[1].2",
+            en_str="darkmantles",
+            cn_str="暗幕魔兽",
+            tag="creature",
+        ),
+    ]
+    generator._JsonGenerator__build_lookup_cache()
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Darkmantles", "b"): "暗幕魔兽",
+            ("Darkmantle", "creature"): "暗幕魔兽",
+            ("darkmantles", "creature"): "暗幕魔兽",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@b 暗罩蕈}。钟乳石悬挂在高达30尺的天花板上。两只伪装成钟乳石的"
+        "{@creature Darkmantle||暗幕魔兽}保持静止，直到它们发起攻击。",
+        "{@b Darkmantles}. Stalactites hang from the 30-foot-high ceiling. Two "
+        "{@creature Darkmantle||darkmantles} disguised as stalactites remain motionless until they attack.",
+        tag="adventure",
+        base_uid=base_uid,
+    )
+
+    assert success is True
+    assert result == (
+        "{@b 暗幕魔兽}。钟乳石悬挂在高达30尺的天花板上。两只伪装成钟乳石的"
+        "{@creature 暗幕魔兽||暗幕魔兽}保持静止，直到它们发起攻击。"
+    )
+
+
+def test_replace_sub_jobs_keeps_format_tag_from_stealing_area_match():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    base_uid = "$.entries[0]"
+    generator.done_jobs = [
+        Job(
+            uid=f"{base_uid}.b[0].0",
+            en_str="Crystal Stalactite",
+            cn_str="水晶钟乳石",
+            tag="b",
+        ),
+        Job(
+            uid=f"{base_uid}.creature[1].0",
+            en_str="githyanki gish",
+            cn_str="吉斯洋基吉什精锐",
+            tag="creature",
+        ),
+        Job(
+            uid=f"{base_uid}.creature[1].1",
+            en_str="MTF",
+            cn_str="MTF",
+            tag="creature",
+        ),
+        Job(
+            uid=f"{base_uid}.area[3].0",
+            en_str="Crystal Stalactites",
+            cn_str="水晶钟乳石",
+            tag="area",
+        ),
+    ]
+    generator._JsonGenerator__build_lookup_cache()
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Crystal Stalactite", "b"): "水晶石笋",
+            ("githyanki gish", "creature"): "吉斯洋基吉什精锐",
+            ("appendix A", "adventure"): "附录A",
+            ("Crystal Stalactites", "area"): "水晶钟乳石",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@b 水晶钟乳石}. 一根10尺长的水晶钟乳石悬挂在一个充满银色雾气的坑上方。"
+        "水晶钟乳石内部封着伊尔梅，一位女性{@creature 吉斯洋基战士|MTF}"
+        "（见{@adventure 附录A|WDMM|25}以获取具体数值；另见"
+        '"{@area 水晶钟乳石|832|x}"）。',
+        "{@b Crystal Stalactite}. A 10-foot-long crystal stalactite hangs above a pit "
+        "filled with silvery mist. Encased in the stalactite is Ilmei, a female "
+        "{@creature githyanki gish|MTF} (see {@adventure appendix A|WDMM|25} "
+        'for statistics; see also "{@area Crystal Stalactites|832|x}").',
+        tag="adventure",
+        base_uid=base_uid,
+    )
+
+    assert success is True
+    assert "{@b 水晶钟乳石}" in result
+    assert "{@creature 吉斯洋基吉什精锐|MTF}" in result
+    assert '"{@area 水晶钟乳石|832|x}"' in result
+
+
+def test_replace_sub_jobs_uses_matched_english_index_for_reordered_same_tag_jobs():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    base_uid = "$.entry"
+    generator.done_jobs = [
+        Job(
+            uid=f"{base_uid}.creature[0].0",
+            en_str="mind flayer",
+            cn_str="夺心魔",
+            tag="creature",
+        ),
+        Job(
+            uid=f"{base_uid}.creature[1].0",
+            en_str="grimlock",
+            cn_str="幽邃盲族",
+            tag="creature",
+        ),
+        Job(
+            uid=f"{base_uid}.creature[1].2",
+            en_str="grimlocks",
+            cn_str="幽邃盲族",
+            tag="creature",
+        ),
+        Job(
+            uid=f"{base_uid}.creature[2].0",
+            en_str="troll",
+            cn_str="巨魔",
+            tag="creature",
+        ),
+        Job(
+            uid=f"{base_uid}.creature[2].2",
+            en_str="trolls",
+            cn_str="巨魔",
+            tag="creature",
+        ),
+    ]
+    generator._JsonGenerator__build_lookup_cache()
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("mind flayer", "creature"): "夺心魔",
+            ("grimlock", "creature"): "幽邃盲族",
+            ("grimlocks", "creature"): "幽邃盲族",
+            ("troll", "creature"): "巨魔",
+            ("trolls", "creature"): "巨魔",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "协调不同种类生物努力的人，例如使用{@creature 幽邃盲族|MM|幽邃盲族}和"
+        "{@creature 巨魔|MM|巨魔}作为代理人的{@creature 巨魔}主谋。",
+        "Someone who coordinates the efforts of different kinds of creatures, such as a "
+        "{@creature mind flayer} mastermind using {@creature grimlock|MM|grimlocks} "
+        "and {@creature troll|MM|trolls} as agents.",
+        tag="deck",
+        base_uid=base_uid,
+    )
+
+    assert success is True
+    assert result == (
+        "协调不同种类生物努力的人，例如使用{@creature 幽邃盲族|MM|幽邃盲族}和"
+        "{@creature 巨魔|MM|巨魔}作为代理人的{@creature 夺心魔}主谋。"
+    )
+
+
+def test_replace_sub_jobs_uses_position_when_mixed_tag_sequence_matches():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Commoner", "creature"): "平民",
+            ("Utilize", "action"): "操作",
+            ("15", "dc"): "15",
+            ("Sleight of Hand", "skill"): "巧手",
+            ("Thieves' Tools", "item"): "盗贼工具",
+            ("Athletics", "skill"): "运动",
+            ("damage threshold", "variantrule"): "伤害阈值",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    en_str = (
+        "Groth kept this gnome named Gooster ({@creature Commoner|XMM}) as a prisoner. "
+        "To free him, the character must take the {@action Utilize|XPHB} action and "
+        "succeed on a {@dc 15} Dexterity ({@skill Sleight of Hand|XPHB}) check using "
+        "{@item Thieves' Tools|XPHB}. A character can also succeed on a {@dc 15} "
+        "Strength ({@skill Athletics|XPHB}) check. The chains have a "
+        "{@variantrule damage threshold|XPHB} of 5."
+    )
+    cn_str = (
+        "格罗斯将这位名叫古斯特的侏儒（{@creature 平民|XMM}）囚禁起来。"
+        "若要解救他，角色必须执行{@action 操作|XPHB}动作，使用{@dc 盗贼工具}"
+        "并成功通过一次{@skill 15|XPHB}敏捷（{@item 巧手|XPHB}）检定。"
+        "角色也可以成功通过一次{@dc 15}力量（{@skill 运动|XPHB}）检定。"
+        "锁链具有{@variantrule 伤害阈值|XPHB} 5。"
+    )
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        cn_str,
+        en_str,
+        tag="adventure",
+    )
+
+    assert success is True
+    assert "{@dc 15}" in result
+    assert "{@skill 巧手|XPHB}" in result
+    assert "{@item 盗贼工具|XPHB}" in result
+    assert "{@variantrule 伤害阈值|XPHB}" in result
+
+
 def test_replace_sub_jobs_keeps_filter_rewards_page_metadata():
     generator = JsonGenerator.__new__(JsonGenerator)
     generator.done_jobs = []
@@ -554,6 +867,83 @@ def test_replace_sub_jobs_keeps_card_source_metadata():
 
     assert success is True
     assert result == "{@card 奥博娜卡|奥姆城诡神|ToA|奥博娜卡的卡片}"
+
+
+def test_replace_sub_jobs_uses_generic_dictionary_for_card_parts():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag="", allow_generic_fallback=False):
+        translations = {
+            ("Artifact", ""): "神器",
+            ("Tarokka Deck", ""): "塔罗卡牌组",
+        }
+        translated = translations.get((value, tag))
+        if translated is None and allow_generic_fallback:
+            translated = translations.get((value, ""))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@card Artifact|Tarokka Deck|CoS}",
+        "{@card Artifact|Tarokka Deck|CoS}",
+    )
+
+    assert success is True
+    assert result == "{@card 神器|塔罗卡牌组|CoS}"
+
+
+def test_replace_sub_jobs_splits_table_name_on_semicolon():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag="", allow_generic_fallback=False):
+        translations = {
+            ("Alignment and Personality", ""): "阵营与个性",
+            ("Personality Traits by Alignment", ""): "根据阵营的个性特征",
+            ("table of brief personality traits", ""): "简要性格特征表",
+        }
+        translated = translations.get((value, tag))
+        if translated is None and allow_generic_fallback:
+            translated = translations.get((value, ""))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@table Alignment and Personality; Personality Traits by Alignment|XPHB|table of brief personality traits}",
+        "{@table Alignment and Personality; Personality Traits by Alignment|XPHB|table of brief personality traits}",
+    )
+
+    assert success is True
+    assert result == "{@table 阵营与个性; 根据阵营的个性特征|XPHB|简要性格特征表}"
+
+
+def test_replace_sub_jobs_prefers_whole_table_name_before_semicolon_split():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag="", allow_generic_fallback=False):
+        translations = {
+            ("Consider the Ideal Climax; Adventure Climax", ""): "安排理想的高潮; 冒险高潮",
+            ("Adventure Climax", ""): "冒险高潮",
+            ("Adventure Climax table", ""): "冒险高潮表",
+        }
+        translated = translations.get((value, tag))
+        if translated is None and allow_generic_fallback:
+            translated = translations.get((value, ""))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@table Consider the Ideal Climax; Adventure Climax||Adventure Climax table}",
+        "{@table Consider the Ideal Climax; Adventure Climax||Adventure Climax table}",
+    )
+
+    assert success is True
+    assert result == "{@table 安排理想的高潮; 冒险高潮||冒险高潮表}"
 
 
 def test_replace_sub_jobs_translates_recipe_display_text_as_plain_text():
@@ -629,6 +1019,30 @@ def test_replace_sub_jobs_restores_subclass_feature_level_metadata():
 
     assert success is True
     assert result == "{@subclassFeature 快手|游荡者||盗贼||3}"
+
+
+def test_replace_sub_jobs_keeps_subclass_source_metadata():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Alchemist", "subclass"): "炼金师",
+            ("Artificer", "subclass"): "奇械师",
+            ("EFA", "subclass"): "艾伯伦：熔炉奇械",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated is not None else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(
+        "{@subclass 炼金师|奇械师|EFA|炼金师}",
+        "{@subclass Alchemist|Artificer|EFA|EFA}",
+    )
+
+    assert success is True
+    assert result == "{@subclass 炼金师|奇械师|EFA|EFA}"
 
 
 def test_json_generator_aligns_stale_cn_tags_when_en_was_already_updated():
@@ -920,3 +1334,198 @@ def test_tag_only_sync_wraps_known_translated_phrase_from_other_job():
     )
 
     assert result == "最快的方式是乘坐{@item 狗拉雪橇|IDRotF}。"
+
+
+def test_tag_only_sync_wraps_new_duplicate_tag_after_existing_same_tag():
+    class FakeDictionary:
+        def get(self, en, tag=""):
+            if en == "Magic" and tag == "action":
+                return "魔法", True
+            return None, False
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+    generator.dictionary = FakeDictionary()
+
+    old_en = (
+        "Finally, a creature in Limbo can take a {@action Magic|XPHB} action "
+        "to make a {@dc 20} Intelligence check to stabilize an area within a "
+        "30-foot-radius {@variantrule Sphere [Area of Effect]|XPHB|Sphere} "
+        "centered on a point it can see on the plane. On a successful check, "
+        "the creature prevents the area from being altered by the plane for "
+        "24 hours or until the creature takes this Magic action again."
+    )
+    new_en = (
+        "Finally, a creature in Limbo can take a {@action Magic|XPHB} action "
+        "to make a {@dc 20} Intelligence check to stabilize an area within a "
+        "30-foot-radius {@variantrule Sphere [Area of Effect]|XPHB|Sphere} "
+        "centered on a point it can see on the plane. On a successful check, "
+        "the creature prevents the area from being altered by the plane for "
+        "24 hours or until the creature takes this {@action Magic|XPHB} action again."
+    )
+    old_cn = (
+        "最后，一名位于混沌海中的生物可以用一个{@action Magic|XPHB}动作"
+        "进行一次{@dc 20} 的智力检定来稳定以位于位面上其可见的一点为中心的 "
+        "30 尺半径{@variantrule Sphere [Area of Effect]|XPHB|Sphere}区域。"
+        "若检定成功，则该生物将避免该区域被位面所改变，持续 24 小时或者直到"
+        "该生物再次使用该魔法动作为止。"
+    )
+
+    result = generator._JsonGenerator__sync_tag_only_cn(
+        old_cn,
+        old_en,
+        new_en,
+        tag="book",
+    )
+
+    assert "再次使用该{@action 魔法|XPHB}动作为止" in result
+    assert result.count("{@") == new_en.count("{@")
+
+
+def test_replace_jobs_syncs_stale_cn_when_database_en_was_already_updated():
+    class FakeDictionary:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, en, tag=""):
+            translations = {
+                ("Magic", "action"): "魔法",
+                ("Sphere [Area of Effect]", ""): "球状 [效应区域]",
+                ("Sphere", ""): "球状",
+            }
+            value = translations.get((en, tag))
+            return (value, True) if value is not None else (None, False)
+
+        def update(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return True
+
+    en_str = (
+        "Finally, a creature in Limbo can take a {@action Magic|XPHB} action "
+        "to make a {@dc 20} Intelligence check to stabilize an area within a "
+        "30-foot-radius {@variantrule Sphere [Area of Effect]|XPHB|Sphere} "
+        "centered on a point it can see on the plane. On a successful check, "
+        "the creature prevents the area from being altered by the plane for "
+        "24 hours or until the creature takes this {@action Magic|XPHB} action again."
+    )
+    stale_cn = (
+        "最后，一名位于混沌海中的生物可以用一个{@action Magic|XPHB}动作"
+        "进行一次{@dc 20} 的智力检定来稳定以位于位面上其可见的一点为中心的 "
+        "30 尺半径{@variantrule Sphere [Area of Effect]|XPHB|Sphere}区域。"
+        "若检定成功，则该生物将避免该区域被位面所改变，持续 24 小时或者直到"
+        "该生物再次使用该魔法动作为止。"
+    )
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = FakeDictionary()
+    generator.update_dictionary_during_generation = True
+    generator.done_jobs = [
+        Job(
+            uid="xdmg",
+            en_str=en_str,
+            cn_str=stale_cn,
+            tag="book",
+            sql_id=349418,
+            is_proofread=True,
+        )
+    ]
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entries": ["{!@ xdmg}"]}
+    )
+
+    assert ok is True
+    assert "再次使用该{@action 魔法|XPHB}动作为止" in cn_obj["entries"][0]
+    assert cn_obj["entries"][0].count("{@") == en_str.count("{@")
+    assert generator.dictionary.calls
+
+
+def test_replace_sub_jobs_preserves_reordered_book_links_by_value_shape():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    en_str = (
+        'Each character gains a charm of heroism (see "{@book Supernatural '
+        'Gifts|DMG|7|Charms}" in the {@book Dungeon Master\'s Guide|DMG}).'
+    )
+    cn_str = (
+        "每个角色获得英雄护咒（参见{@book 城主指南|DMG}中的"
+        "\"{@book 超自然赠礼|DMG|7|护咒}\"）。"
+    )
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Supernatural Gifts", "book"): "超自然赠礼",
+            ("Charms", "book"): "护咒",
+            ("Dungeon Master's Guide", "book"): "城主指南",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(cn_str, en_str)
+
+    assert success is True
+    assert result == cn_str
+
+
+def test_replace_sub_jobs_preserves_reordered_book_links_after_repeated_area_tags():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+    generator.dictionary = None
+    generator._JsonGenerator__build_lookup_cache()
+
+    en_str = (
+        "It contains a tiny portrait of the baron's wife, whom the characters "
+        "might recognize from the larger framed portrait in {@area area C17|10f|x}. "
+        "If this cameo is reunited with the baron (whose remains are interred in "
+        "{@area area C9|0f4|x}), each character responsible for this act gains a "
+        "charm of heroism (see \"{@book Supernatural Gifts|DMG|7|Charms}\" in "
+        "the {@book Dungeon Master's Guide|DMG})."
+    )
+    cn_str = (
+        "它包含男爵夫人的小肖像，角色们可能会从{@area 区域C17|10f|x}中的"
+        "大型裱框肖像中认出她。如果这个浮雕与男爵（其遗骸安葬在"
+        "{@area 区域C9|0f4|x}）重聚，每个为此事负责的角色将获得一个"
+        "英雄魅力（参见{@book 城主指南|DMG}中的“{@book 超自然馈赠|DMG|7|魅力}”）。"
+    )
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(cn_str, en_str)
+
+    assert success is True
+    assert result == cn_str
+
+
+def test_replace_sub_jobs_preserves_reordered_same_shape_creature_links():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+
+    en_str = (
+        "They visit {@creature Traxigor|BGDIA}, a wizard who can use the "
+        "{@spell plane shift} spell. At this wizard's tower, they meet a "
+        "{@creature hollyphant|BGDIA} named {@creature Lulu|BGDIA}."
+    )
+    cn_str = (
+        "他们去拜访{@creature 特拉西戈尔|BGDIA}，一名可以使用"
+        "{@spell 平面转移}法术的法师。在这位法师的法师塔中，"
+        "他们将遇到一只名为{@creature 露露|BGDIA}的"
+        "{@creature 霍利芬特|BGDIA}。"
+    )
+
+    def fake_process_value(value, tag=""):
+        translations = {
+            ("Traxigor", "creature"): "特拉西戈尔",
+            ("plane shift", "spell"): "平面转移",
+            ("hollyphant", "creature"): "霍利芬特",
+            ("Lulu", "creature"): "露露",
+        }
+        translated = translations.get((value, tag))
+        return (translated, True) if translated else (value, False)
+
+    generator._JsonGenerator__process_value = fake_process_value
+
+    result, success = generator._JsonGenerator__replace_sub_jobs(cn_str, en_str)
+
+    assert success is True
+    assert result == cn_str
