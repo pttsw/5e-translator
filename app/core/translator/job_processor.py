@@ -280,14 +280,21 @@ class JobProcessor(Runnable):
                 # 自动模式，检查替换是否正确
                 # 1. 初筛中文的{ 和 }数量与英文相同
                 if cn_str.count('{') != job.en_str.count('{') or cn_str.count('}') != job.en_str.count('}'):
-                    logger.warning(f"翻译文本替换错误:{job}")
                     job.last_answer = cn_str
+                    logger.warning(
+                        f"翻译文本替换错误:{job}\nlast_answer:{job.last_answer}")
                     return None, TranslatorStatus.FAILURE
                 # 2. 检查替换是否正确
-                _ ,ok=  self.__replace_sub_jobs(cn_str,job.en_str,job.tag)
+                _, ok = self.__replace_sub_jobs(
+                    cn_str,
+                    job.en_str,
+                    job.tag,
+                    process_full_value=False,
+                )
                 if not ok:
                     job.last_answer = cn_str
-                    logger.warning(f"翻译文本替换错误:{job}")
+                    logger.warning(
+                        f"翻译文本替换错误:{job}\nlast_answer:{job.last_answer}")
                     return None, TranslatorStatus.FAILURE
                 job.cn_str = cn_str
                 # job.cn_str = replaced_cn
@@ -535,7 +542,14 @@ class JobProcessor(Runnable):
                           en_item["tag"], en_item["value"]))
         return True, paired
 
-    def __replace_sub_jobs(self, cn_str: str, en_str: Optional[str] = None, tag = "", allow_plain_reprocess: bool = False):
+    def __replace_sub_jobs(
+        self,
+        cn_str: str,
+        en_str: Optional[str] = None,
+        tag="",
+        allow_plain_reprocess: bool = False,
+        process_full_value: bool = True,
+    ):
         # print(cn_str)
         processed = False
         if en_str is None:
@@ -548,7 +562,7 @@ class JobProcessor(Runnable):
             return cn_str, False
 
         # 初筛
-        if "{@" in cn_str:
+        if process_full_value and "{@" in cn_str:
             # 初筛，包含@{的，需要继续处理
             p_v, ok = self.__process_value(en_str, tag=tag)
             if ok:

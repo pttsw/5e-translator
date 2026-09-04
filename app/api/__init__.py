@@ -21,3 +21,5 @@ from .chm import api
 api.init_app(api_bp)
 from .term import api
 api.init_app(api_bp)
+from .custom import api
+api.init_app(api_bp)

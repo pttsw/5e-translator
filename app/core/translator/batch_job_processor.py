@@ -267,7 +267,12 @@ class BatchJobProcessor(JobProcessor):
             if cn_str.count('{') != job.en_str.count('{') or cn_str.count('}') != job.en_str.count('}'):
                 job.last_answer = cn_str
                 return False
-            _, ok = self._JobProcessor__replace_sub_jobs(cn_str, job.en_str, job.tag)  # type: ignore[attr-defined]
+            _, ok = self._JobProcessor__replace_sub_jobs(  # type: ignore[attr-defined]
+                cn_str,
+                job.en_str,
+                job.tag,
+                process_full_value=False,
+            )
             if not ok:
                 job.last_answer = cn_str
                 return False

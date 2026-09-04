@@ -6,7 +6,11 @@ from .source import *
 from .source import ensure_word_usage_table_schema
 from .file import *
 from .file import ensure_file_table_schema
+from .file_cache_job import *
+from .file_cache_job import ensure_file_cache_job_table_schema
 from .term import ensure_term_table_schema
 from .user import migrate_plaintext_passwords, ensure_user_table_schema, get_next_user_id
 from .invite_code import ensure_invite_code_table_schema
+from .custom_translation import *
+from .custom_translation import ensure_custom_translation_table_schema
 from .base import db, migrate, session

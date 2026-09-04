@@ -17,6 +17,7 @@ class TestDBDictionaryDump(unittest.TestCase):
             self.dbd.available_list = [True]
             # 初始化测试数据
             self.dbd.dictionary = {}
+            self.dbd.lower_dictionary = {}
             self.dbd.proofread_set = set()
 
     def test_dump_all_records(self):
@@ -57,7 +58,7 @@ class TestDBDictionaryDump(unittest.TestCase):
         self.dbd.dump(file_name='test_file.txt')
 
         # 验证结果
-        self.assertEqual(self.dbd.get('test3', tag='cat2'), '测试3')
+        self.assertEqual(self.dbd.get('test3', tag='cat2')['cn'], '测试3')
         # self.assertNotIn('test3%cat2', self.dbd.proofread_set)
 
     def test_dump_empty_records(self):
@@ -69,6 +70,15 @@ class TestDBDictionaryDump(unittest.TestCase):
         self.dbd.dump()
 
         # 验证结果
+        self.assertEqual(len(self.dbd.dictionary), 0)
+        self.assertEqual(len(self.dbd.proofread_set), 0)
+
+    def test_dump_query_failure_uses_empty_records(self):
+        """测试数据库查询失败时不抛出异常"""
+        self.mock_db.execute_query.return_value = None
+
+        self.dbd.dump(file_names=['test_file.txt'])
+
         self.assertEqual(len(self.dbd.dictionary), 0)
         self.assertEqual(len(self.dbd.proofread_set), 0)
 

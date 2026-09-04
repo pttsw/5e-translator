@@ -1143,20 +1143,33 @@ class DBDictionary:
             return self.lower_dictionary[en][0]
         return None
     
-    def dump(self, file_names=[]):
+    def dump(self, file_names=None, file_name=None):
         """
         file_name: 按照文件名提取，为空时则提取全部
         """
+        if file_names is None:
+            file_names = []
+        elif isinstance(file_names, str):
+            file_names = [file_names]
+        if file_name is not None and not file_names:
+            file_names = [file_name]
+
         self.lock.acquire()
-        if len(file_names) == 0:
-            records = self.db_list[0].select(
-                'words', columns=['cn', 'en', 'version', 'proofread', 'category', 'modified_at', 'is_key'])
-        else:
-            placeholders = ','.join(['%s'] * len(file_names))
-            sql = f"select id, cn, en, version, proofread, category, modified_at, is_key from words where id in (select word_id from word_usage where file in ({placeholders}))"
-            params = tuple(file_names)
-            records = self.db_list[0].execute_query(sql, params)
-        self.lock.release()
+        try:
+            if len(file_names) == 0:
+                records = self.db_list[0].select(
+                    'words', columns=['cn', 'en', 'version', 'proofread', 'category', 'modified_at', 'is_key'])
+            else:
+                placeholders = ','.join(['%s'] * len(file_names))
+                sql = f"select id, cn, en, version, proofread, category, modified_at, is_key from words where id in (select word_id from word_usage where file in ({placeholders}))"
+                params = tuple(file_names)
+                records = self.db_list[0].execute_query(sql, params)
+        finally:
+            self.lock.release()
+
+        if records is None:
+            logger.error(f"导出字典记录失败，按空记录继续: {file_names}")
+            records = []
 
         version_dict = {}
 
@@ -1164,7 +1177,15 @@ class DBDictionary:
             en = s['en']
             cn = s['cn']
             # db_k = en
-            self.__put_redis(en, cn, s['category'], s['proofread'], s['is_key'], s['id'], s['modified_at'])
+            self.__put_redis(
+                en,
+                cn,
+                s.get('category'),
+                s.get('proofread', 0),
+                s.get('is_key', False),
+                s.get('id'),
+                s.get('modified_at', 0),
+            )
                 
             v = version_dict.get(en)
 

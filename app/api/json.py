@@ -11,11 +11,13 @@ from config import SPLITED_5ETOOLS_EN_PATH, logger
 from app.core.utils.parser import get_source_json_to_full
 from app.core.file_progress_service import (
     enqueue_sync_split_file,
+    ensure_cache_runtime_schema,
     ensure_jobs_cache,
     get_sync_task,
     has_jobs_cache,
     load_cached_json_content,
     get_progress_from_jobs,
+    get_cache_refresh_job,
     is_file_marked_stale,
     is_source_file_stale,
     sync_split_file,
@@ -66,6 +68,10 @@ def list_json_entries(rel_dir: str, current_user_id=None):
             FileModule.proofread,
             FileModule.locked,
             FileModule.stale,
+            FileModule.content_revision,
+            FileModule.cache_revision,
+            FileModule.cache_status,
+            FileModule.cache_error,
             FileModule.user_id,
         )
         .filter(FileModule.parent_dir == rel_dir)
@@ -86,6 +92,10 @@ def list_json_entries(rel_dir: str, current_user_id=None):
             'proofread': row.proofread,
             'locked': row.locked,
             'stale': row.stale,
+            'content_revision': int(row.content_revision or 0),
+            'cache_revision': int(row.cache_revision or 0),
+            'cache_status': row.cache_status or 'fresh',
+            'cache_error': row.cache_error or '',
             'user_id': row.user_id or None,
             'claim_nickname': claim_user['nickname'] if claim_user else '',
             'claim_username': claim_user['username'] if claim_user else '',
@@ -167,7 +177,14 @@ class JsonApi(Resource):
     def post(self):
         if not request.is_json:
             return error("请求体必须是JSON")
+        ensure_cache_runtime_schema()
         params = request.get_json()
+        cache_job_id = params.get('cache_job_id', None)
+        if cache_job_id:
+            job = get_cache_refresh_job(cache_job_id)
+            if job is None:
+                return error("缓存刷新任务不存在")
+            return success(data=job)
         task_id = params.get('task_id', '').strip()
         if task_id:
             task = get_sync_task(task_id)
@@ -194,6 +211,7 @@ class JsonApi(Resource):
             return error(f"同步失败: {exc}")
 
     def get(self):
+        ensure_cache_runtime_schema()
         file_name = request.args.get('file', '', str)
         source = request.args.get('source', None, str)
         try:
@@ -263,6 +281,10 @@ class JsonApi(Resource):
                     'translate': progress['translate'],
                     'proofread': progress['proofread'],
                     'stale': db_file.stale,
+                    'content_revision': int(db_file.content_revision or 0),
+                    'cache_revision': int(db_file.cache_revision or 0),
+                    'cache_status': db_file.cache_status or 'fresh',
+                    'cache_error': db_file.cache_error or '',
                     'job_list': job_list,
                     'cn_content': cn_obj,
                     'json_content': json_content,

@@ -5,15 +5,23 @@ import tempfile
 import threading
 import time
 import uuid
+import datetime
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
-from sqlalchemy import case, func
+from sqlalchemy import case, func, text
+try:
+    from flask import current_app, has_app_context
+except Exception:
+    current_app = None
+
+    def has_app_context():
+        return False
 
 from app.core.spliter import split_origin_files
 from app.core.translator import JsonAnalyser, JsonGenerator
 from app.core.utils.loader import write_file_work_infos
-from app.model import FileModule, SourceModel, WordsModel, db, session
+from app.model import FileCacheJobModel, FileModule, SourceModel, WordsModel, db, session
 from config import APP_TEMP_PATH, EN_PATH, HOMEBREW_EN_PATH, SPLITED_5ETOOLS_EN_PATH, UA_EN_PATH, logger
 
 SOURCE_ROOTS = [EN_PATH, HOMEBREW_EN_PATH, UA_EN_PATH]
@@ -22,8 +30,35 @@ SYNC_TASK_LOCK = threading.Lock()
 SYNC_TASKS = {}
 SYNC_TASKS_BY_FILE = {}
 SYNC_SUCCESS_COOLDOWN_SECONDS = 30
+CACHE_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="file-cache")
+CACHE_JOB_DISPATCH_LOCK = threading.Lock()
+CACHE_JOB_RUNNING_TIMEOUT_SECONDS = 15 * 60
+CACHE_JOB_LOCK_TIMEOUT_SECONDS = 1
 JOB_CACHE_LOCK = threading.Lock()
 JOB_CACHE_LOCKS = {}
+CACHE_SCHEMA_LOCK = threading.Lock()
+CACHE_SCHEMA_READY = False
+CACHE_STATUS_FRESH = "fresh"
+CACHE_STATUS_DIRTY = "dirty"
+CACHE_STATUS_REBUILDING = "rebuilding"
+CACHE_STATUS_ERROR = "error"
+
+
+def ensure_cache_runtime_schema():
+    global CACHE_SCHEMA_READY
+    if CACHE_SCHEMA_READY:
+        return
+    with CACHE_SCHEMA_LOCK:
+        if CACHE_SCHEMA_READY:
+            return
+        try:
+            from app.model import ensure_file_cache_job_table_schema, ensure_file_table_schema
+            ensure_file_table_schema()
+            ensure_file_cache_job_table_schema()
+            CACHE_SCHEMA_READY = True
+        except Exception as exc:
+            session.rollback()
+            logger.error(f"缓存一致性运行时迁移失败: {exc}")
 
 
 def get_split_file_path(rel_path: str) -> str:
@@ -98,6 +133,15 @@ def _load_json_file(path: str):
         return json.load(json_file)
 
 
+def _atomic_write_json_file(path: str, data):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temp_path = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    with open(temp_path, "w") as json_file:
+        json.dump(data, json_file, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
+
+
 def _load_split_file_fallback(split_file: str):
     split_path = get_split_file_path(split_file)
     try:
@@ -157,42 +201,44 @@ def update_job_cache_word(
     job_path, _ = get_job_cache_paths(split_file)
     if not os.path.exists(job_path):
         return False
-    try:
-        with open(job_path, "r") as job_file:
-            job_list = json.load(job_file)
-    except Exception as exc:
-        logger.error(f"读取jobs缓存失败: {split_file}, {exc}")
-        return False
+    cache_lock = _get_job_cache_lock(split_file)
+    with cache_lock:
+        try:
+            with open(job_path, "r") as job_file:
+                job_list = json.load(job_file)
+        except Exception as exc:
+            logger.error(f"读取jobs缓存失败: {split_file}, {exc}")
+            return False
 
-    changed = False
-    for job in job_list:
-        has_word_id = int(job.get("sql_id") or 0) == int(word_id)
-        is_missing_word = not job.get("sql_id")
-        has_uid = bool(uid) and job.get("uid") == uid
-        has_en = not uid and bool(en_str) and job.get("en_str") == en_str
-        if not has_word_id and not (is_missing_word and (has_uid or has_en)):
-            continue
-        if not job.get("sql_id"):
-            job["sql_id"] = word_id
-            changed = True
-        for key, value in updates.items():
-            if value is not None:
-                if job.get(key) == value:
-                    continue
-                job[key] = value
+        changed = False
+        for job in job_list:
+            has_word_id = int(job.get("sql_id") or 0) == int(word_id)
+            is_missing_word = not job.get("sql_id")
+            has_uid = bool(uid) and job.get("uid") == uid
+            has_en = not uid and bool(en_str) and job.get("en_str") == en_str
+            if not has_word_id and not (is_missing_word and (has_uid or has_en)):
+                continue
+            if not job.get("sql_id"):
+                job["sql_id"] = word_id
                 changed = True
+            for key, value in updates.items():
+                if value is not None:
+                    if job.get(key) == value:
+                        continue
+                    job[key] = value
+                    changed = True
 
-    if not changed:
-        return False
+        if not changed:
+            return False
 
-    try:
-        with open(job_path, "w") as job_file:
-            json.dump(job_list, job_file, ensure_ascii=False, indent=2)
-        update_file_progress_from_jobs(split_file, job_list)
-        return True
-    except Exception as exc:
-        logger.error(f"写入jobs缓存失败: {split_file}, {exc}")
-        return False
+        try:
+            _atomic_write_json_file(job_path, job_list)
+            update_file_progress_from_jobs(split_file, job_list)
+            return True
+        except Exception as exc:
+            logger.error(f"写入jobs缓存失败: {split_file}, {exc}")
+            mark_file_cache_error(split_file, str(exc))
+            return False
 
 
 def get_source_mtime(source_file: str) -> float:
@@ -217,6 +263,17 @@ def is_file_marked_stale(split_file: str) -> bool:
     return bool(file_row and file_row.stale)
 
 
+def is_file_cache_revision_stale(split_file: str) -> bool:
+    ensure_cache_runtime_schema()
+    file_row = FileModule.query.filter_by(file=split_file).first()
+    if file_row is None:
+        return False
+    return (
+        int(file_row.cache_revision or 0) < int(file_row.content_revision or 0)
+        or (file_row.cache_status or CACHE_STATUS_FRESH) != CACHE_STATUS_FRESH
+    )
+
+
 def is_job_cache_stale(split_file: str) -> bool:
     split_path = get_split_file_path(split_file)
     job_path, cn_path = get_job_cache_paths(split_file)
@@ -225,7 +282,11 @@ def is_job_cache_stale(split_file: str) -> bool:
     if not os.path.exists(job_path) or not os.path.exists(cn_path):
         return True
     split_mtime = os.path.getmtime(split_path)
-    return os.path.getmtime(job_path) < split_mtime or os.path.getmtime(cn_path) < split_mtime
+    return (
+        os.path.getmtime(job_path) < split_mtime
+        or os.path.getmtime(cn_path) < split_mtime
+        or is_file_cache_revision_stale(split_file)
+    )
 
 
 def _load_split_origin_file(split_path: str) -> Optional[str]:
@@ -257,22 +318,73 @@ def _delete_split_file(rel_path: str):
     _delete_cache_file(cn_path)
 
 
-def mark_files_stale(file_paths: List[str]):
+def mark_files_dirty(
+    file_paths: List[str],
+    *,
+    bump_revision: bool = True,
+    status: str = CACHE_STATUS_DIRTY,
+    error_message: str = "",
+    commit: bool = True,
+) -> Dict[str, int]:
+    ensure_cache_runtime_schema()
     file_paths = sorted({file_path for file_path in file_paths if file_path})
     if not file_paths:
+        return {}
+    revisions = {}
+    file_rows = FileModule.query.filter(FileModule.file.in_(file_paths)).all()
+    for file_row in file_rows:
+        if bump_revision:
+            file_row.content_revision = int(file_row.content_revision or 0) + 1
+        file_row.stale = 1
+        file_row.cache_status = status
+        file_row.cache_error = error_message or ""
+        revisions[file_row.file] = int(file_row.content_revision or 0)
+    if commit:
+        session.commit()
+    return revisions
+
+
+def mark_files_stale(file_paths: List[str]):
+    return mark_files_dirty(file_paths)
+
+
+def mark_file_cache_rebuilding(file_path: str, *, commit: bool = True):
+    ensure_cache_runtime_schema()
+    if not file_path:
         return
-    FileModule.query.filter(FileModule.file.in_(file_paths)).update(
-        {FileModule.stale: 1},
-        synchronize_session=False,
-    )
-    session.commit()
+    file_row = FileModule.query.filter_by(file=file_path).first()
+    if file_row is None:
+        return
+    file_row.cache_status = CACHE_STATUS_REBUILDING
+    file_row.cache_error = ""
+    if commit:
+        session.commit()
+
+
+def mark_file_cache_error(file_path: str, error_message: str, *, commit: bool = True):
+    ensure_cache_runtime_schema()
+    if not file_path:
+        return
+    file_row = FileModule.query.filter_by(file=file_path).first()
+    if file_row is None:
+        return
+    file_row.stale = 1
+    file_row.cache_status = CACHE_STATUS_ERROR
+    file_row.cache_error = str(error_message or "")[:1024]
+    if commit:
+        session.commit()
 
 
 def clear_file_stale(file_path: str):
+    ensure_cache_runtime_schema()
     if not file_path:
         return
     FileModule.query.filter_by(file=file_path).update(
-        {FileModule.stale: 0},
+        {
+            FileModule.stale: 0,
+            FileModule.cache_status: CACHE_STATUS_FRESH,
+            FileModule.cache_error: "",
+        },
         synchronize_session=False,
     )
     session.commit()
@@ -292,6 +404,7 @@ def _scan_split_files_by_source(source_file: str, root_dir: str = SPLITED_5ETOOL
 
 
 def refresh_progress_by_files(file_paths: List[str], clear_stale: bool = True) -> Dict[str, Dict[str, int]]:
+    ensure_cache_runtime_schema()
     file_paths = sorted({file_path for file_path in file_paths if file_path})
     if not file_paths:
         return {}
@@ -335,6 +448,9 @@ def refresh_progress_by_files(file_paths: List[str], clear_stale: bool = True) -
         file_row.proofread = stats["proofread"]
         if clear_stale:
             file_row.stale = 0
+            file_row.cache_revision = int(file_row.content_revision or 0)
+            file_row.cache_status = CACHE_STATUS_FRESH
+            file_row.cache_error = ""
         stats_map[file_row.file] = stats
     session.commit()
     return stats_map
@@ -365,7 +481,8 @@ def get_progress_from_jobs(job_list: List[dict]) -> Dict[str, int]:
     }
 
 
-def update_file_progress_from_jobs(split_file: str, job_list: List[dict]) -> Dict[str, int]:
+def update_file_progress_from_jobs(split_file: str, job_list: List[dict], cache_revision: Optional[int] = None) -> Dict[str, int]:
+    ensure_cache_runtime_schema()
     progress = get_progress_from_jobs(job_list)
     file_row = FileModule.query.filter_by(file=split_file).first()
     if file_row is not None:
@@ -373,6 +490,13 @@ def update_file_progress_from_jobs(split_file: str, job_list: List[dict]) -> Dic
         file_row.translate = progress["translate"]
         file_row.proofread = progress["proofread"]
         file_row.stale = 0
+        file_row.cache_revision = (
+            int(cache_revision)
+            if cache_revision is not None
+            else int(file_row.content_revision or 0)
+        )
+        file_row.cache_status = CACHE_STATUS_FRESH
+        file_row.cache_error = ""
         session.commit()
     return progress
 
@@ -434,6 +558,7 @@ def rebuild_split_file(split_file: str):
 
 
 def ensure_jobs_cache(split_file: str):
+    ensure_cache_runtime_schema()
     cache_lock = _get_job_cache_lock(split_file)
     with cache_lock:
         try:
@@ -445,28 +570,40 @@ def ensure_jobs_cache(split_file: str):
                 pass
 
             if is_job_cache_stale(split_file):
+                file_row = FileModule.query.filter_by(file=split_file).first()
+                target_revision = int(file_row.content_revision or 0) if file_row is not None else None
+                mark_file_cache_rebuilding(split_file)
                 job_list, cn_obj = rebuild_split_file(split_file)
                 if job_list:
+                    update_file_progress_from_jobs(split_file, job_list, cache_revision=target_revision)
                     return job_list, cn_obj
                 if cached_job_list:
                     logger.warning(f"重建jobs缓存为空，保留已有缓存: {split_file}")
+                    mark_files_dirty([split_file], bump_revision=False)
                     return cached_job_list, cached_cn_obj
                 if cn_obj is not None:
+                    update_file_progress_from_jobs(split_file, job_list, cache_revision=target_revision)
                     return job_list, cn_obj
             job_list, cn_obj = _read_jobs_cache_files(split_file)
             if _contains_job_placeholder(cn_obj):
                 cached_job_list, cached_cn_obj = job_list, cn_obj
+                file_row = FileModule.query.filter_by(file=split_file).first()
+                target_revision = int(file_row.content_revision or 0) if file_row is not None else None
+                mark_file_cache_rebuilding(split_file)
                 job_list, cn_obj = rebuild_split_file(split_file)
                 if job_list:
+                    update_file_progress_from_jobs(split_file, job_list, cache_revision=target_revision)
                     return job_list, cn_obj
                 if cached_job_list:
                     logger.warning(f"重建jobs缓存为空，保留已有缓存: {split_file}")
+                    mark_files_dirty([split_file], bump_revision=False)
                     return cached_job_list, cached_cn_obj
                 if cn_obj is not None:
                     return job_list, cn_obj
                 job_list, cn_obj = _read_jobs_cache_files(split_file)
             return job_list, cn_obj
         except Exception as exc:
+            mark_file_cache_error(split_file, str(exc))
             return _fallback_jobs_cache(split_file, exc)
 
 
@@ -477,11 +614,264 @@ def rebuild_jobs_by_source(source_file: str):
     return split_files
 
 
-def refresh_file_runtime(split_file: str):
-    job_list, _ = rebuild_split_file(split_file)
-    progress = update_file_progress_from_jobs(split_file, job_list)
-    clear_file_stale(split_file)
+def refresh_file_runtime(split_file: str, cache_revision: Optional[int] = None):
+    ensure_cache_runtime_schema()
+    file_row = FileModule.query.filter_by(file=split_file).first()
+    target_revision = (
+        int(cache_revision)
+        if cache_revision is not None
+        else (int(file_row.content_revision or 0) if file_row is not None else None)
+    )
+    mark_file_cache_rebuilding(split_file)
+    try:
+        job_list, _ = rebuild_split_file(split_file)
+        progress = update_file_progress_from_jobs(split_file, job_list, cache_revision=target_revision)
+    except Exception as exc:
+        mark_file_cache_error(split_file, str(exc))
+        raise
     return {split_file: progress}
+
+
+def _active_cache_job_for_file(file_path: str):
+    return (
+        FileCacheJobModel.query
+        .filter(FileCacheJobModel.file == file_path)
+        .filter(FileCacheJobModel.status.in_(["queued", "running"]))
+        .order_by(
+            case((FileCacheJobModel.status == "queued", 0), else_=1),
+            FileCacheJobModel.id.desc(),
+        )
+        .first()
+    )
+
+
+def _cache_job_dict(job):
+    return job.to_dict() if job is not None else {}
+
+
+def _resolve_flask_app(flask_app=None):
+    if flask_app is not None:
+        return flask_app
+    if has_app_context() and current_app is not None:
+        return current_app._get_current_object()
+    return None
+
+
+def enqueue_cache_refresh_jobs(
+    file_revisions: Dict[str, int],
+    *,
+    exclude_files: Optional[List[str]] = None,
+    reason: str = "cache-dirty",
+    priority: int = 100,
+    flask_app=None,
+) -> List[Dict[str, object]]:
+    ensure_cache_runtime_schema()
+    excluded = {
+        file_path.strip("/")
+        for file_path in (exclude_files or [])
+        if file_path
+    }
+    wanted = {
+        (file_path or "").strip("/"): int(revision or 0)
+        for file_path, revision in (file_revisions or {}).items()
+        if file_path and file_path.strip("/") not in excluded
+    }
+    if not wanted:
+        return []
+
+    queued_jobs = []
+    try:
+        for file_path, target_revision in sorted(wanted.items()):
+            job = _active_cache_job_for_file(file_path)
+            if job is not None and job.status == "queued":
+                job.target_revision = max(int(job.target_revision or 0), target_revision)
+                job.priority = min(int(job.priority or priority), priority)
+                job.reason = reason or job.reason
+                job.message = "已合并刷新任务"
+            elif job is not None and job.status == "running":
+                queued = FileCacheJobModel(
+                    file=file_path,
+                    target_revision=target_revision,
+                    reason=reason,
+                    priority=priority,
+                    status="queued",
+                    message="运行中任务之后继续刷新",
+                )
+                session.add(queued)
+                job = queued
+            else:
+                job = FileCacheJobModel(
+                    file=file_path,
+                    target_revision=target_revision,
+                    reason=reason,
+                    priority=priority,
+                    status="queued",
+                    message="已加入刷新队列",
+                )
+                session.add(job)
+            queued_jobs.append(job)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error(f"缓存刷新任务入队失败: {exc}")
+        return []
+
+    app = _resolve_flask_app(flask_app)
+    if app is not None:
+        dispatch_cache_refresh_jobs(app)
+    return [_cache_job_dict(job) for job in queued_jobs]
+
+
+def dispatch_cache_refresh_jobs(flask_app=None):
+    app = _resolve_flask_app(flask_app)
+    if app is None:
+        return False
+    with CACHE_JOB_DISPATCH_LOCK:
+        CACHE_JOB_EXECUTOR.submit(_run_cache_refresh_jobs, app)
+    return True
+
+
+def get_cache_refresh_job(job_id: int) -> Optional[Dict[str, object]]:
+    ensure_cache_runtime_schema()
+    job = FileCacheJobModel.query.get(job_id)
+    return _cache_job_dict(job) if job is not None else None
+
+
+def recover_stale_cache_jobs(timeout_seconds: int = CACHE_JOB_RUNNING_TIMEOUT_SECONDS) -> int:
+    ensure_cache_runtime_schema()
+    cutoff = datetime.datetime.now() - datetime.timedelta(seconds=timeout_seconds)
+    try:
+        count = (
+            FileCacheJobModel.query
+            .filter(FileCacheJobModel.status == "running")
+            .filter(FileCacheJobModel.started_at < cutoff)
+            .update(
+                {
+                    FileCacheJobModel.status: "queued",
+                    FileCacheJobModel.message: "运行超时，已重新入队",
+                },
+                synchronize_session=False,
+            )
+        )
+        session.commit()
+        return int(count or 0)
+    except Exception as exc:
+        session.rollback()
+        logger.error(f"恢复超时缓存任务失败: {exc}")
+        return 0
+
+
+def _is_mysql_session():
+    try:
+        return session.get_bind().dialect.name == "mysql"
+    except Exception:
+        return False
+
+
+def _cache_file_lock_name(file_path: str) -> str:
+    return f"5e-translator:file-cache:{file_path}"[:64]
+
+
+def _acquire_cache_file_lock(file_path: str) -> bool:
+    if not _is_mysql_session():
+        return True
+    result = session.execute(
+        text("SELECT GET_LOCK(:lock_name, :timeout)"),
+        {
+            "lock_name": _cache_file_lock_name(file_path),
+            "timeout": CACHE_JOB_LOCK_TIMEOUT_SECONDS,
+        },
+    ).scalar()
+    return int(result or 0) == 1
+
+
+def _release_cache_file_lock(file_path: str):
+    if not _is_mysql_session():
+        return
+    try:
+        session.execute(
+            text("SELECT RELEASE_LOCK(:lock_name)"),
+            {"lock_name": _cache_file_lock_name(file_path)},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+
+
+def _claim_next_cache_job():
+    while True:
+        job = (
+            FileCacheJobModel.query
+            .filter(FileCacheJobModel.status == "queued")
+            .order_by(FileCacheJobModel.priority.asc(), FileCacheJobModel.id.asc())
+            .first()
+        )
+        if job is None:
+            return None
+        updated = (
+            FileCacheJobModel.query
+            .filter(FileCacheJobModel.id == job.id)
+            .filter(FileCacheJobModel.status == "queued")
+            .update(
+                {
+                    FileCacheJobModel.status: "running",
+                    FileCacheJobModel.attempts: int(job.attempts or 0) + 1,
+                    FileCacheJobModel.message: "刷新中",
+                    FileCacheJobModel.started_at: datetime.datetime.now(),
+                    FileCacheJobModel.finished_at: None,
+                },
+                synchronize_session=False,
+            )
+        )
+        session.commit()
+        if updated:
+            return FileCacheJobModel.query.get(job.id)
+
+
+def _finish_cache_job(job, status: str, message: str = ""):
+    job.status = status
+    job.message = str(message or "")[:1024]
+    job.finished_at = datetime.datetime.now()
+    session.commit()
+
+
+def _run_cache_refresh_jobs(flask_app):
+    with flask_app.app_context():
+        recover_stale_cache_jobs()
+        while True:
+            job = _claim_next_cache_job()
+            if job is None:
+                break
+            has_lock = False
+            try:
+                has_lock = _acquire_cache_file_lock(job.file)
+                if not has_lock:
+                    job.status = "queued"
+                    job.message = "等待同文件刷新锁"
+                    session.commit()
+                    break
+                file_row = FileModule.query.filter_by(file=job.file).first()
+                if file_row is None:
+                    _finish_cache_job(job, "success", "文件已不存在")
+                    continue
+                current_revision = int(file_row.content_revision or 0)
+                target_revision = max(int(job.target_revision or 0), current_revision)
+                if (
+                    int(file_row.cache_revision or 0) >= target_revision
+                    and (file_row.cache_status or CACHE_STATUS_FRESH) == CACHE_STATUS_FRESH
+                ):
+                    _finish_cache_job(job, "success", "缓存已由其他任务刷新")
+                    continue
+                refresh_file_runtime(job.file, cache_revision=target_revision)
+                _finish_cache_job(job, "success", "刷新完成")
+            except Exception as exc:
+                logger.error(f"后台刷新文件缓存失败: {job.file}, {exc}")
+                mark_file_cache_error(job.file, str(exc))
+                _finish_cache_job(job, "error", str(exc))
+            finally:
+                if has_lock:
+                    _release_cache_file_lock(job.file)
+        db.session.remove()
 
 
 def _copy_single_split_file(temp_split_dir: str, split_file: str) -> bool:
@@ -534,8 +924,9 @@ def sync_split_file(split_file: str, rebuild_jobs: bool = True) -> Dict[str, obj
         }
 
     try:
+        dirty_revisions = mark_files_dirty([split_file])
         if rebuild_jobs:
-            refresh_file_runtime(split_file)
+            refresh_file_runtime(split_file, cache_revision=dirty_revisions.get(split_file))
         else:
             file_work_infos = list((JsonAnalyser()).invoke(
                 [get_split_file_path(split_file)], {"metadata": {"mode": "splited"}}
@@ -555,7 +946,12 @@ def sync_split_file(split_file: str, rebuild_jobs: bool = True) -> Dict[str, obj
             .filter(FileModule.file != split_file)
             .all()
         ]
-        mark_files_stale(sibling_files)
+        sibling_revisions = mark_files_dirty(sibling_files)
+        enqueue_cache_refresh_jobs(
+            sibling_revisions,
+            reason="source-sync-sibling",
+            priority=80,
+        )
     return {
         "source_file": source_file,
         "file": split_file,
@@ -600,8 +996,9 @@ def sync_source_file(source_file: str, rebuild_jobs: bool = True) -> Dict[str, L
 
     for split_file in new_files:
         try:
+            dirty_revisions = mark_files_dirty([split_file])
             if rebuild_jobs:
-                rebuild_split_file(split_file)
+                refresh_file_runtime(split_file, cache_revision=dirty_revisions.get(split_file))
             else:
                 list((JsonAnalyser()).invoke(
                     [get_split_file_path(split_file)], {"metadata": {"mode": "splited"}}

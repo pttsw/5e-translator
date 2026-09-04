@@ -93,3 +93,38 @@ def test_processor_only_queues_jobs_that_need_translation():
     assert processor.done_jobs == [ready]
     assert fake_factory.started is True
     assert fake_factory.jobs == [pending]
+
+
+def test_processor_validates_llm_answer_without_reloading_stale_parent_translation():
+    en_str = (
+        "Creatures from the {@table Elemental Earth Encounters|BGG} table "
+        "arrive (see {@book chapter 3|BGG|3})."
+    )
+    stale_cn = (
+        "来自{@book Elemental Earth Encounters table|BGG|3|元素土遭遇表}中的"
+        "生物出现了（见{@book chapter 3|BGG|3}）。"
+    )
+    llm_answer = (
+        "来自{@table Elemental Earth Encounters|BGG}表格中的生物出现了"
+        "（见{@book chapter 3|BGG|3}）。"
+    )
+
+    processor = JobProcessor.__new__(JobProcessor)
+    processor.done_jobs = [
+        Job("parent", en_str, stale_cn, tag="book", sql_id=265051)
+    ]
+    processor.dictionary = type(
+        "FakeDictionary",
+        (),
+        {"get": lambda self, en, tag="": (None, False)},
+    )()
+
+    result, ok = processor._JobProcessor__replace_sub_jobs(
+        llm_answer,
+        en_str,
+        tag="book",
+        process_full_value=False,
+    )
+
+    assert ok is True
+    assert result == llm_answer

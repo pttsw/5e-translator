@@ -547,7 +547,7 @@ def test_batch_job_processor_rejects_duplicate_uid_in_response():
 def test_batch_job_processor_applies_reordered_items_by_uid():
     processor = BatchJobProcessor.__new__(BatchJobProcessor)
     processor.cache = False
-    processor._JobProcessor__replace_sub_jobs = lambda cn_str, en_str=None, tag="": (cn_str, True)
+    processor._JobProcessor__replace_sub_jobs = lambda cn_str, en_str=None, tag="", **kwargs: (cn_str, True)
 
     job_one = make_job(
         "$.spell[0].entries[0]",
@@ -591,7 +591,7 @@ def test_batch_job_processor_applies_reordered_items_by_uid():
 def test_batch_job_processor_rejects_brace_count_mismatch():
     processor = BatchJobProcessor.__new__(BatchJobProcessor)
     processor.cache = False
-    processor._JobProcessor__replace_sub_jobs = lambda cn_str, en_str=None, tag="": (cn_str, True)
+    processor._JobProcessor__replace_sub_jobs = lambda cn_str, en_str=None, tag="", **kwargs: (cn_str, True)
 
     job = make_job(
         "$.spell[0].entries[1]",

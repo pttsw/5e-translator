@@ -18,6 +18,7 @@ class MySQLDatabase:
     def connect(self):
         """建立数据库连接"""
         try:
+            self.close()
             self.connection = pymysql.connect(
                 host=self.host,
                 user=self.user,
@@ -33,6 +34,14 @@ class MySQLDatabase:
         except pymysql.MySQLError as e:
             print(f"连接失败，错误原因: {e}")
             self.ok = False
+
+    def _ensure_connection(self):
+        if not self.connection or not self.connection.open:
+            self.connect()
+        else:
+            self.connection.ping(reconnect=True)
+            self.cursor = self.connection.cursor()
+        return self.ok
             
     def close(self):
         """关闭数据库连接"""
@@ -44,12 +53,19 @@ class MySQLDatabase:
 
     def execute_query(self, query, params=None):
         """执行查询语句"""
-        try:
-            self.cursor.execute(query, params)
-            return self.cursor.fetchall()
-        except pymysql.MySQLError as e:
-            logger.error(f"查询失败，SQL:{query} 错误原因: {e}")
-            return None
+        for attempt in range(2):
+            try:
+                if not self._ensure_connection():
+                    return None
+                self.cursor.execute(query, params)
+                return self.cursor.fetchall()
+            except pymysql.MySQLError as e:
+                if attempt == 0:
+                    logger.warning(f"查询连接异常，尝试重连后重试，SQL:{query} 错误原因: {e}")
+                    self.connect()
+                    continue
+                logger.error(f"查询失败，SQL:{query} 错误原因: {e}")
+                return None
 
     def execute_non_query(self, query, params=None):
         """执行非查询语句（增、删、改）"""

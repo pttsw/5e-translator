@@ -459,6 +459,146 @@ def test_tag_only_sync_replaces_changed_tag_type_using_old_cn_display():
     )
 
 
+def test_tag_only_sync_matches_reordered_cn_tags_by_translated_display():
+    class FakeDictionary:
+        def get(self, en, tag=""):
+            translations = {
+                ("Fellow Students", "adventure"): "同学",
+                ("chapter 3", "adventure"): "第三章",
+            }
+            value = translations.get((en, tag))
+            return (value, True) if value is not None else (None, False)
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+    generator.dictionary = FakeDictionary()
+
+    old_en = (
+        'If a character is Friends with Zanther Bowen (see the "'
+        '{@adventure Fellow Students|SCC-CK|0|Fellow Students}" section in '
+        '{@adventure chapter 3|SCC-CK|0}), these students eagerly help.'
+    )
+    new_en = (
+        'If a character is Friends with Zanther Bowen (see the "'
+        '{@book Fellow Students|SCC|3|Fellow Students}" section in '
+        '{@adventure chapter 3|SCC-CK|0}), these students eagerly help.'
+    )
+    old_cn = (
+        "如果角色与赞瑟·鲍文是朋友（参见{@adventure 第三章|SCC-CK|0}中的"
+        "“{@adventure 同学|SCC-CK|0|同学}”部分），这些学生会热切地提供帮助。"
+    )
+
+    result = generator._JsonGenerator__sync_tag_only_cn(
+        old_cn,
+        old_en,
+        new_en,
+        tag="adventure",
+    )
+
+    assert result == (
+        "如果角色与赞瑟·鲍文是朋友（参见{@adventure 第三章|SCC-CK|0}中的"
+        "“{@book 同学|SCC|3|Fellow Students}”部分），这些学生会热切地提供帮助。"
+    )
+
+
+def test_tag_only_sync_matches_book_anchor_when_table_suffix_moves_outside_tag():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.done_jobs = []
+    generator.dictionary = type(
+        "FakeDictionary",
+        (),
+        {"get": lambda self, en, tag="": (None, False)},
+    )()
+
+    old_en = (
+        "Creatures from the {@book Elemental Earth Encounters table|BGG|3|"
+        "Elemental Earth Encounters} arrive (see {@book chapter 3|BGG|3})."
+    )
+    new_en = (
+        "Creatures from the {@table Elemental Earth Encounters|BGG} table "
+        "arrive (see {@book chapter 3|BGG|3})."
+    )
+    old_cn = (
+        "来自{@book Elemental Earth Encounters table|BGG|3|元素土遭遇表}中的"
+        "生物出现了（见{@book chapter 3|BGG|3}）。"
+    )
+
+    result = generator._JsonGenerator__sync_tag_only_cn(
+        old_cn,
+        old_en,
+        new_en,
+        tag="book",
+    )
+
+    assert result == (
+        "来自{@table 元素土遭遇表|BGG}中的生物出现了"
+        "（见{@book chapter 3|BGG|3}）。"
+    )
+
+
+def test_replace_jobs_migrates_book_encounter_link_to_table_with_child_jobs():
+    old_en = (
+        "The {@creature unicorn} and her {@creature centaur} subjects fight "
+        "{@creature Displacer Beast||displacer beasts} and creatures from the "
+        "{@book Elemental Earth Encounters table|BGG|3|Elemental Earth Encounters} "
+        "(see {@book chapter 3|BGG|3})."
+    )
+    new_en = (
+        "The {@creature unicorn} and her {@creature centaur} subjects fight "
+        "{@creature Displacer Beast||displacer beasts} and creatures from the "
+        "{@table Elemental Earth Encounters|BGG} table "
+        "(see {@book chapter 3|BGG|3})."
+    )
+    old_cn = (
+        "{@creature unicorn}和其{@creature centaur}臣子对抗"
+        "{@creature Displacer Beast||移位兽}和来自"
+        "{@book Elemental Earth Encounters table|BGG|3|元素土遭遇表}中的生物"
+        "（见{@book chapter 3|BGG|3}）。"
+    )
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = type(
+        "FakeDictionary",
+        (),
+        {
+            "get": lambda self, en, tag="": (None, False),
+            "update": lambda self, *args, **kwargs: True,
+        },
+    )()
+    generator.update_dictionary_during_generation = False
+    generator.done_jobs = [
+        Job(
+            uid="encounter",
+            en_str=new_en,
+            cn_str=old_cn,
+            tag="book",
+            sql_id=265051,
+            tag_sync_required=True,
+            old_en_str=old_en,
+        ),
+        Job(uid="encounter.creature[0].0", en_str="unicorn", cn_str="独角兽", tag="creature"),
+        Job(uid="encounter.creature[1].0", en_str="centaur", cn_str="人马", tag="creature"),
+        Job(uid="encounter.creature[2].0", en_str="Displacer Beast", cn_str="移位兽", tag="creature"),
+        Job(uid="encounter.creature[2].2", en_str="displacer beasts", cn_str="移位兽", tag="creature"),
+        Job(uid="encounter.table[3].0", en_str="Elemental Earth Encounters", cn_str="土元素遭遇", tag="table"),
+        Job(uid="encounter.book[4].0", en_str="chapter 3", cn_str="第三章", tag="book"),
+        Job(uid="encounter.book[4].1", en_str="BGG", cn_str="BGG", tag="book"),
+    ]
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entries": ["{!@ encounter}"]}
+    )
+
+    assert ok is True
+    assert cn_obj == {
+        "entries": [
+            "{@creature 独角兽}和其{@creature 人马}臣子对抗"
+            "{@creature 移位兽||移位兽}和来自{@table 土元素遭遇|BGG}中的生物"
+            "（见{@book 第三章|BGG|3}）。"
+        ]
+    }
+
+
 def test_tag_only_sync_keeps_quickref_metadata_index():
     generator = JsonGenerator.__new__(JsonGenerator)
     generator.done_jobs = [
@@ -1529,3 +1669,65 @@ def test_replace_sub_jobs_preserves_reordered_same_shape_creature_links():
 
     assert success is True
     assert result == cn_str
+
+
+def test_replace_jobs_continues_after_position_alignment_without_parent_cache_reset():
+    class FakeDictionary:
+        def get(self, en, tag=""):
+            translations = {
+                ("Lorehold apprentice", "creature"): "衡鉴学徒",
+                ("chapter 3", "book"): "第三章",
+                ("Greta Gorunn", "book"): "格丽塔·戈伦",
+                ("belt of dwarvenkind", "item"): "矮人腰带",
+            }
+            value = translations.get((en, tag))
+            return (value, True) if value is not None else (None, False)
+
+        def update(self, *args, **kwargs):
+            return True
+
+    en_str = (
+        "Further, Greta Gorunn (chaotic good dwarf "
+        "{@creature Lorehold apprentice|SCC}; see "
+        "{@book chapter 3|SCC|3|Greta Gorunn}) has offered a "
+        "{@item belt of dwarvenkind} as the prize for this contest."
+    )
+    stale_cn = (
+        "此外，Greta Gorunn（混乱善良矮人{@creature Lorehold apprentice|SCC}; "
+        "见{@adventure 第3章|SCC-CK|0|Greta Gorunn}）提供了一条"
+        "{@item 矮人族腰带}作为这次比赛的奖品。"
+    )
+
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = FakeDictionary()
+    generator.update_dictionary_during_generation = False
+    generator.done_jobs = [
+        Job(
+            uid="contest",
+            en_str=en_str,
+            cn_str=stale_cn,
+            tag="adventure",
+            sql_id=223739,
+            is_proofread=False,
+        )
+    ]
+    generator.done_jobs[0].old_en_str = (
+        "Further, Greta Gorunn (chaotic good dwarf "
+        "{@creature Lorehold apprentice|SCC}; see "
+        "{@adventure chapter 3|SCC-CK|0|Greta Gorunn}) has offered a "
+        "{@item belt of dwarvenkind} as the prize for this contest."
+    )
+    generator.done_jobs[0].tag_sync_required = True
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entries": ["{!@ contest}"]}
+    )
+
+    assert ok is True
+    assert cn_obj == {
+        "entries": [
+            "此外，Greta Gorunn（混乱善良矮人{@creature 衡鉴学徒|SCC}; "
+            "见{@book 第三章|SCC|3|格丽塔·戈伦}）提供了一条"
+            "{@item 矮人腰带}作为这次比赛的奖品。"
+        ]
+    }

@@ -5,11 +5,34 @@ import copy
 from collections import Counter
 from config import logger,KEY_MATCHED_TAG
 from typing import List, Optional
-from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path, replace_split_values, process_filter_split_values, process_post_filter_split_values, FILTER_SUPPORT_PAGES
+from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path, replace_split_values, process_filter_split_values, process_post_filter_split_values, FILTER_SUPPORT_PAGES, normalize_tagless_text
 from app.core.database import DBDictionary
 # 添加jsonpath_ng的导入
 from jsonpath_ng import parse
 from jsonpath_ng.ext import parse as ext_parse
+
+
+class _LockedTagDictionaryAdapter:
+    def __init__(self, dictionary: DBDictionary):
+        self.dictionary = dictionary
+
+    def get(self, value: str, tag: str = ""):
+        bean = self.dictionary.get(
+            value,
+            load_from_sql=True,
+            ignore_case=True,
+            tag=tag,
+        )
+        if bean is None and tag:
+            bean = self.dictionary.get(
+                value,
+                load_from_sql=True,
+                ignore_case=True,
+                tag="",
+            )
+        if bean is None:
+            return None, False
+        return bean["cn"], True
 
 
 class BaseAnalyser:
@@ -31,6 +54,7 @@ class BaseAnalyser:
         self._jobs_by_uid = {}
         self._jobs_by_key_path = {}
         self._dictionary_exact_cache = {}
+        self._locked_tag_sync_generator = None
 
     @staticmethod
     def _stable_path_token(value) -> str:
@@ -400,7 +424,70 @@ class BaseAnalyser:
         cn_json = self.locked_entries[file_name].get('cn_json')
         if cn_json is None:
             return None, False
-        return self._sync_locked_table_tags(obj, copy.deepcopy(cn_json)), True
+        old_en_json = self.locked_entries[file_name].get('en_json')
+        synced_cn = self._sync_locked_tag_changes(
+            old_en_json,
+            obj,
+            copy.deepcopy(cn_json),
+        )
+        return self._sync_locked_table_tags(obj, synced_cn), True
+
+    def _get_locked_tag_sync_generator(self):
+        if self._locked_tag_sync_generator is None:
+            from ..json_generator import JsonGenerator
+
+            generator = JsonGenerator.__new__(JsonGenerator)
+            generator.dictionary = _LockedTagDictionaryAdapter(self.dictionary)
+            generator.done_jobs = []
+            self._locked_tag_sync_generator = generator
+        return self._locked_tag_sync_generator
+
+    def _sync_locked_tag_changes(self, old_en_obj, new_en_obj, cn_obj):
+        if (
+            isinstance(old_en_obj, str)
+            and isinstance(new_en_obj, str)
+            and isinstance(cn_obj, str)
+        ):
+            if (
+                old_en_obj == new_en_obj
+                or normalize_tagless_text(old_en_obj)
+                != normalize_tagless_text(new_en_obj)
+            ):
+                return cn_obj
+            generator = self._get_locked_tag_sync_generator()
+            return generator._JsonGenerator__sync_tag_only_cn(
+                cn_obj,
+                old_en_obj,
+                new_en_obj,
+                tag=self.name_tag,
+            )
+        if (
+            isinstance(old_en_obj, dict)
+            and isinstance(new_en_obj, dict)
+            and isinstance(cn_obj, dict)
+        ):
+            for key, value in cn_obj.items():
+                if key in old_en_obj and key in new_en_obj:
+                    cn_obj[key] = self._sync_locked_tag_changes(
+                        old_en_obj[key],
+                        new_en_obj[key],
+                        value,
+                    )
+            return cn_obj
+        if (
+            isinstance(old_en_obj, list)
+            and isinstance(new_en_obj, list)
+            and isinstance(cn_obj, list)
+        ):
+            for index, value in enumerate(cn_obj):
+                if index < len(old_en_obj) and index < len(new_en_obj):
+                    cn_obj[index] = self._sync_locked_tag_changes(
+                        old_en_obj[index],
+                        new_en_obj[index],
+                        value,
+                    )
+            return cn_obj
+        return cn_obj
 
     def _translate_locked_tag_value(self, value: str, tag: str):
         bean = self.dictionary.get(

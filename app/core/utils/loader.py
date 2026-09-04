@@ -11,6 +11,7 @@ import os
 import json
 import re
 import subprocess
+import uuid
 from datetime import date, datetime
 from config import *
 from langchain_core.runnables import RunnableLambda
@@ -202,6 +203,15 @@ def clean_5etools_json(obj):
         except (OSError, subprocess.CalledProcessError):
             pass
     return _clean_json_with_python_fallback(obj)
+
+
+def _atomic_write_text(path: str, content: str):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temp_path = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    with open(temp_path, 'w') as file:
+        file.write(content)
+    os.replace(temp_path, path)
         
 def write_file_work_infos(file_work_info:FileWorkInfo, out_path:str=OUT_PATH):
     out_file_path = os.path.join(out_path, file_work_info.out_path)  # 输出目录
@@ -212,15 +222,12 @@ def write_file_work_infos(file_work_info:FileWorkInfo, out_path:str=OUT_PATH):
         os.makedirs(rel_out_dir)
 
     # 写入替换好Job uuid的Json文件
-    with open(out_file_path + '.en', 'w') as file:
-        file.write(clean_5etools_json(file_work_info.json_obj))
+    _atomic_write_text(out_file_path + '.en', clean_5etools_json(file_work_info.json_obj))
     if file_work_info.cn_obj is not None:
         file_work_info.cn_obj = order_cn_entity_fields(file_work_info.cn_obj)
-        with open(out_file_path, 'w') as file:
-            file.write(clean_5etools_json(file_work_info.cn_obj))
+        _atomic_write_text(out_file_path, clean_5etools_json(file_work_info.cn_obj))
     # 写入Job列表文件
-    with open(out_file_path+'.jobs', 'w') as file:
-        file.write(clean_5etools_json(file_work_info.job_list))
+    _atomic_write_text(out_file_path+'.jobs', clean_5etools_json(file_work_info.job_list))
     file_work_info.json_path = out_file_path
     return file_work_info
     

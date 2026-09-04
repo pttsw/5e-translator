@@ -15,6 +15,7 @@ from .books_analyser import BooksAnalyser
 from .adventures_analyser import AdventuresAnalyser
 from .backgrounds_analyser import BackgroundsAnalyser
 from .items_analyser import ItemsAnalyser
+from .decks_analyser import DecksAnalyser
 
 
 class JsonAnalyser(Runnable):
@@ -225,6 +226,9 @@ class JsonAnalyser(Runnable):
                 self.dictionary, self.rel_path).process(en_json_obj)
         elif self.rel_path == "items.json":
             obj, self.job_list = ItemsAnalyser(
+                self.dictionary, self.rel_path).process(en_json_obj)
+        elif self.rel_path == "decks.json":
+            obj, self.job_list = DecksAnalyser(
                 self.dictionary, self.rel_path).process(en_json_obj)
         else:  # 正常处理文本逻辑
             if self.mode == 'plu':

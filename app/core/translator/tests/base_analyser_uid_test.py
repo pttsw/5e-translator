@@ -1,5 +1,6 @@
 from app.core.database.memory_db_dictionary import MemoryDBDictionary
 from app.core.translator.analyser.base_analyser import BaseAnalyser
+from app.core.translator.analyser.decks_analyser import DecksAnalyser
 
 
 def reset_memory_db(db):
@@ -106,6 +107,38 @@ def test_card_tag_source_segment_is_not_translated_as_job():
         "Omu's Trickster Gods",
         "Obo'laka's card",
     }.issubset(job_texts)
+
+
+def test_decks_analyser_translates_innermost_outcome_card_uid_keys():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+    db._insert_record("Artifact", "神器", "decks.json", tag="card")
+    db._insert_record("Tarokka Deck", "塔罗卡牌组", "decks.json", tag="card")
+    analyser = DecksAnalyser(db, "decks.json")
+
+    result, _ = analyser.process({
+        "deck": [
+            {
+                "name": "Tarokka Deck",
+                "source": "CoS",
+                "spreads": [
+                    {
+                        "name": "Card Reading",
+                        "outcomes": {
+                            "adventure": {
+                                "CoS": {
+                                    "artifact|tarokka deck|cos": "7fe"
+                                }
+                            }
+                        },
+                    }
+                ],
+            }
+        ]
+    })
+
+    outcomes = result["deck"][0]["spreads"][0]["outcomes"]["adventure"]["CoS"]
+    assert outcomes == {"神器|塔罗卡牌组|cos": "7fe"}
 
 
 def test_class_tag_source_and_level_segments_are_not_translated_as_jobs():
@@ -371,3 +404,57 @@ def test_split_file_word_usage_does_not_cross_chapter_uid_collision():
 
     assert next(job for job in first_jobs if job.uid == Context.uid).cn_str == "第一章"
     assert next(job for job in second_jobs if job.uid == Context.uid).cn_str == "第二章"
+
+
+def test_locked_entry_syncs_book_link_to_feat_without_retranslating_section():
+    db = MemoryDBDictionary()
+    reset_memory_db(db)
+    db._insert_record(
+        "Ability Score Improvement",
+        "属性值提升",
+        "book/book-xphb.json",
+        tag="book",
+    )
+    old_entry = {
+        "type": "section",
+        "name": "Chapter 5: Feats",
+        "id": "4f6",
+        "entries": [
+            "Your class gives you the {@book Ability Score Improvement|XPHB|5|"
+            "Ability Score Improvement} feat."
+        ],
+    }
+    new_entry = {
+        "type": "section",
+        "name": "Chapter 5: Feats",
+        "id": "4f6",
+        "entries": [
+            "Your class gives you the {@feat Ability Score Improvement|XPHB} feat."
+        ],
+    }
+    cn_entry = {
+        "type": "section",
+        "name": "第五章：专长",
+        "id": "4f6",
+        "entries": [
+            "你的职业会为你提供{@book 属性值提升|XPHB|5|属性值提升}专长。"
+        ],
+    }
+    analyser = BaseAnalyser(db, "book/book-xphb.json")
+    analyser.locked_entries = {
+        "xphb/data/4f6.json": {
+            "en_json": old_entry,
+            "cn_json": cn_entry,
+        }
+    }
+
+    cn_obj, ok = analyser.process_locked_entry(
+        new_entry,
+        "data",
+        source="xphb",
+    )
+
+    assert ok is True
+    assert cn_obj["entries"] == [
+        "你的职业会为你提供{@feat 属性值提升|XPHB}专长。"
+    ]

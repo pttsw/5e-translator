@@ -156,6 +156,12 @@ class FileApi(Resource, BaseApi):
         print(item.to_dict())
         if item.update(commit=True,  updateFunc=self._update, cn_json=json.dumps(params['cn_json'], ensure_ascii=False), locked=1) is None:
             return error(f"更新失败：数据库更新失败")
+        item.content_revision = int(item.content_revision or 0) + 1
+        item.cache_revision = int(item.content_revision or 0)
+        item.cache_status = 'fresh'
+        item.cache_error = ''
+        item.stale = 0
+        db.session.commit()
         return success(message=f"文件 {item.file} 已更新。", data = item.to_dict())
 
     @login_required

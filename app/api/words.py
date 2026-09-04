@@ -3,7 +3,7 @@ from flask_restful import Resource, Api, request
 from .restful_utils import *
 from app.model import WordsModel, SourceModel, ProofreadModel, session
 from .base import BaseApi
-from app.core.file_progress_service import refresh_file_runtime
+from app.core.file_progress_service import enqueue_cache_refresh_jobs, mark_file_cache_error, mark_files_dirty, refresh_file_runtime
 import json
 from sqlalchemy import text
 
@@ -137,17 +137,30 @@ class IndependentTranslationApi(Resource):
                 session.delete(current_source)
             else:
                 session.delete(current_source)
+            dirty_revisions = mark_files_dirty([current_file], commit=False)
             session.commit()
         except Exception as exc:
             session.rollback()
             print(f"新增独立翻译失败: {exc}")
             return error("新增独立翻译失败：数据库更新失败")
 
+        cache_error = ""
         try:
-            progress = refresh_file_runtime(current_file)
+            progress = refresh_file_runtime(
+                current_file,
+                cache_revision=dirty_revisions.get(current_file),
+            )
         except Exception as exc:
             print(f"新增独立翻译缓存重建失败: {exc}")
-            return error("独立翻译已写入数据库，但预览缓存重建失败，请同步当前文件")
+            cache_error = "独立翻译已写入数据库，但预览缓存重建失败，请同步当前文件"
+            mark_file_cache_error(current_file, cache_error)
+            progress = {}
+        cache_jobs = enqueue_cache_refresh_jobs(
+            dirty_revisions,
+            exclude_files=[current_file],
+            reason="independent-translation",
+            priority=50,
+        )
 
         return success(data={
             'reused': reused,
@@ -160,6 +173,15 @@ class IndependentTranslationApi(Resource):
                 'category': target_word.category,
             },
             'progress': progress,
+            'cache_jobs': cache_jobs,
+            'changeset': {
+                'changed_word_ids': [target_word.id],
+                'affected_files': [current_file],
+                'current_file': current_file,
+                'revisions': dirty_revisions,
+            },
+            'cache_status': 'error' if cache_error else 'fresh',
+            'cache_error': cache_error,
         })
 
 # @api.resource('/relations')

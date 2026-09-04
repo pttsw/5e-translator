@@ -24,6 +24,10 @@ class FileModule(db.Model, CRUDMixin):
     cn_json = Column(String)
     locked = Column(TINYINT, default=0)
     stale = Column(TINYINT, default=0)
+    content_revision = Column(Integer, default=0)
+    cache_revision = Column(Integer, default=0)
+    cache_status = Column(String(32), default='fresh')
+    cache_error = Column(String(1024), default='')
     user_id = Column(Integer)
     modified_at = Column(
         TIMESTAMP, server_default="CURRENT_TIMESTAMP()", onupdate=datetime.datetime.now)
@@ -53,6 +57,10 @@ class FileModule(db.Model, CRUDMixin):
             "en_json": self.en_json,
             "cn_json": self.cn_json,
             "stale": self.stale,
+            "content_revision": int(self.content_revision or 0),
+            "cache_revision": int(self.cache_revision or 0),
+            "cache_status": self.cache_status or 'fresh',
+            "cache_error": self.cache_error or '',
             "user_id": self.user_id,
             "modified_at": str(self.modified_at),
             "modified_by": self.modified_by,
@@ -71,10 +79,15 @@ class FileModule(db.Model, CRUDMixin):
 def ensure_file_table_schema():
     statements = [
         "ALTER TABLE `file` ADD COLUMN `stale` TINYINT DEFAULT 0",
+        "ALTER TABLE `file` ADD COLUMN `content_revision` INT NOT NULL DEFAULT 0",
+        "ALTER TABLE `file` ADD COLUMN `cache_revision` INT NOT NULL DEFAULT 0",
+        "ALTER TABLE `file` ADD COLUMN `cache_status` VARCHAR(32) NOT NULL DEFAULT 'fresh'",
+        "ALTER TABLE `file` ADD COLUMN `cache_error` VARCHAR(1024) NOT NULL DEFAULT ''",
         "ALTER TABLE `file` ADD COLUMN `parent_dir` VARCHAR(255) DEFAULT ''",
         "CREATE INDEX `idx_file_parent_dir` ON `file` (`parent_dir`)",
         "CREATE INDEX `idx_file_source_file` ON `file` (`source_file`)",
         "CREATE INDEX `idx_file_stale` ON `file` (`stale`)",
+        "CREATE INDEX `idx_file_cache_status` ON `file` (`cache_status`)",
     ]
     for statement in statements:
         try:

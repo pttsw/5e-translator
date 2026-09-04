@@ -159,6 +159,42 @@ class JsonGenerator(Runnable):
                 return value, False
         return value, True
 
+    def __get_tag_match_texts(self, value: str, tag: str) -> set[str]:
+        """Return semantic text candidates used to identify the same tag link."""
+        if not isinstance(value, str):
+            return set()
+        parts = value.split("|")
+        candidates = [get_tag_display_text(value, tag)]
+        if tag in {"adventure", "book"} and len(parts) >= 4:
+            candidates.append(parts[-1])
+        return {
+            candidate.strip().lower()
+            for candidate in candidates
+            if isinstance(candidate, str) and candidate.strip()
+        }
+
+    def __get_tag_translation_by_match_text(
+        self,
+        en_value: str,
+        en_tag: str,
+        cn_value: str,
+        cn_tag: str,
+    ) -> dict[str, str]:
+        translations = {
+            get_tag_display_text(en_value, en_tag).strip().lower():
+                get_tag_display_text(cn_value, cn_tag)
+        }
+        en_parts = en_value.split("|")
+        cn_parts = cn_value.split("|")
+        if (
+            en_tag in {"adventure", "book"}
+            and len(en_parts) >= 4
+            and len(cn_parts) == len(en_parts)
+            and en_parts[-1].strip()
+        ):
+            translations[en_parts[-1].strip().lower()] = cn_parts[-1]
+        return translations
+
     def __match_tag_values_by_priority(self, cn_match_k, cn_match_v, en_match_k, en_match_v):
         """按优先级匹配cn/en中的{@tag value}对，避免顺序错位。"""
         cn_items = [{"idx": i, "tag": k, "value": v}
@@ -210,16 +246,18 @@ class JsonGenerator(Runnable):
                     used_en.add(en_item["idx"])
                     break
 
-        # 2) 可见文本完全一致。用于修复之前按位置对齐导致tag类型被污染的旧数据。
+        # 2) 可见文本或链接语义标识完全一致。
         for cn_item in cn_items:
             if cn_item["idx"] in matches:
                 continue
-            cn_display = get_tag_display_text(cn_item["value"], cn_item["tag"]).strip().lower()
-            if not cn_display:
+            cn_match_texts = self.__get_tag_match_texts(
+                cn_item["value"], cn_item["tag"])
+            if not cn_match_texts:
                 continue
             for en_item in _candidate_en_items(cn_item, protect_other_tag=True):
-                en_display = get_tag_display_text(en_item["value"], en_item["tag"]).strip().lower()
-                if cn_display == en_display:
+                en_match_texts = self.__get_tag_match_texts(
+                    en_item["value"], en_item["tag"])
+                if cn_match_texts & en_match_texts:
                     matches[cn_item["idx"]] = en_item["idx"]
                     used_en.add(en_item["idx"])
                     break
@@ -577,18 +615,33 @@ class JsonGenerator(Runnable):
         cn_tags, cn_values, cn_valid = parse_custom_format(cn_str, False)
         old_cn_links = []
         if cn_valid and len(cn_values) == len(old_values):
-            old_cn_links = [
-                {
-                    "old_tag": old_tag,
-                    "old_value": old_value,
-                    "old_display": get_tag_display_text(old_value, old_tag),
-                    "cn_tag": cn_tag,
-                    "cn_value": cn_value,
-                    "cn_display": get_tag_display_text(cn_value, cn_tag),
-                }
-                for old_tag, old_value, cn_tag, cn_value in zip(
-                    old_tags, old_values, cn_tags, cn_values)
-            ]
+            matched, matched_pairs = self.__match_tag_values_by_priority(
+                cn_tags,
+                cn_values,
+                old_tags,
+                old_values,
+            )
+            if matched:
+                old_cn_links = [
+                    {
+                        "old_tag": old_tag,
+                        "old_value": old_value,
+                        "old_display": get_tag_display_text(old_value, old_tag),
+                        "old_match_texts": self.__get_tag_match_texts(
+                            old_value, old_tag),
+                        "cn_by_old_match_text":
+                            self.__get_tag_translation_by_match_text(
+                                old_value,
+                                old_tag,
+                                cn_value,
+                                cn_tag,
+                            ),
+                        "cn_tag": cn_tag,
+                        "cn_value": cn_value,
+                        "cn_display": get_tag_display_text(cn_value, cn_tag),
+                    }
+                    for cn_tag, cn_value, old_tag, old_value, _ in matched_pairs
+                ]
 
         old_pairs = list(zip(old_tags, old_values))
         old_cn_links_remaining = list(old_cn_links)
@@ -608,11 +661,24 @@ class JsonGenerator(Runnable):
                 return True
             return False
 
-        def _take_old_cn_link(display_text: str):
+        def _take_old_cn_link(new_tag: str, new_value: str):
+            new_match_texts = self.__get_tag_match_texts(new_value, new_tag)
+            new_display = get_tag_display_text(
+                new_value, new_tag).strip().lower()
             for link_index, link in enumerate(old_cn_links_remaining):
-                if link["old_display"] == display_text:
-                    return old_cn_links_remaining.pop(link_index)
-            return None
+                shared_texts = link["old_match_texts"] & new_match_texts
+                if not shared_texts:
+                    continue
+                link = old_cn_links_remaining.pop(link_index)
+                matched_text = (
+                    new_display
+                    if new_display in shared_texts
+                    else next(iter(shared_texts))
+                )
+                cn_display = link["cn_by_old_match_text"].get(
+                    matched_text, link["cn_display"])
+                return link, cn_display
+            return None, None
 
         replaced_existing_tag = False
         inserted_plain_tag = False
@@ -620,11 +686,11 @@ class JsonGenerator(Runnable):
             if _consume_old_pair(new_tag, new_value):
                 continue
             display_text = get_tag_display_text(new_value, new_tag)
-            old_cn_link = _take_old_cn_link(display_text)
+            old_cn_link, cn_display = _take_old_cn_link(new_tag, new_value)
             if old_cn_link is not None:
                 old_cn_tag = f"{{@{old_cn_link['cn_tag']} {old_cn_link['cn_value']}}}"
                 new_cn_value = self.__build_cn_tag_value(
-                    new_value, new_tag, old_cn_link["cn_display"])
+                    new_value, new_tag, cn_display)
                 cn_str = cn_str.replace(old_cn_tag, f"{{@{new_tag} {new_cn_value}}}", 1)
                 replaced_existing_tag = True
                 continue
@@ -821,7 +887,12 @@ class JsonGenerator(Runnable):
                             )
                             j.tag_sync_required = False
                         j.cn_str, ok = self.__replace_sub_jobs(
-                            j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
+                            j.cn_str,
+                            j.en_str,
+                            tag=j.tag,
+                            base_uid=j.uid,
+                            process_full_value=False,
+                        )
                     else:
                         original_cn = j.cn_str
                         en_tags, en_values, en_valid = parse_custom_format(j.en_str, False)
@@ -863,7 +934,12 @@ class JsonGenerator(Runnable):
                                         tag=j.tag,
                                     )
                                 replaced_cn, ok = self.__replace_sub_jobs(
-                                    j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
+                                    j.cn_str,
+                                    j.en_str,
+                                    tag=j.tag,
+                                    base_uid=j.uid,
+                                    process_full_value=False,
+                                )
                         if not ok:
                             synced_cn = self.__sync_tag_only_cn(
                                 j.cn_str,

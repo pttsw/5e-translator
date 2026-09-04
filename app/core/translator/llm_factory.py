@@ -92,7 +92,11 @@ class LLMFactory:
                 self.failed_jobs.append(job)
             except Exception:
                 pass
-            logger.error(f"解析JOB超过最大重试次数，跳过JOB：{job}")
+            last_answer = getattr(job, "last_answer", "")
+            logger.error(
+                f"解析JOB超过最大重试次数，跳过JOB：{job}"
+                f"\nlast_answer:{last_answer}"
+            )
         self.lock.release()
         self._render_progress()
 

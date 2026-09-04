@@ -6,9 +6,12 @@ from .base import BaseApi
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from sqlalchemy import text
 from sqlalchemy.sql import func
-from app.core.file_progress_service import clear_file_stale, mark_files_stale, refresh_file_runtime, refresh_progress_by_files, update_job_cache_word
-
-import json
+from app.core.file_progress_service import (
+    enqueue_cache_refresh_jobs,
+    mark_file_cache_error,
+    mark_files_dirty,
+    refresh_file_runtime,
+)
 
 api = Api()
 
@@ -32,26 +35,376 @@ def _get_file_progress(file_path: str):
     }
 
 
-def _word_candidate_dict(word, input_cn=''):
-    data = word.to_dict()
-    data['matches_input'] = word.cn == input_cn
-    return data
+PROOFREAD_NOTE = "专业术语可能出现译文不同的情况，请以最新的译文版本为准。"
 
 
-def _get_confirmed_replacement_data(word, input_cn=''):
-    candidates = (
-        WordsModel.query
-        .filter(WordsModel.en == word.en)
-        .order_by(WordsModel.proofread.desc(), WordsModel.modified_at.desc(), WordsModel.id.asc())
+def _db_bool(value):
+    return int(value or 0) == 1
+
+
+def _source_files_for_words(word_ids):
+    word_ids = [word_id for word_id in word_ids if word_id]
+    if not word_ids:
+        return []
+    rows = (
+        session.query(SourceModel.file)
+        .filter(SourceModel.word_id.in_(word_ids))
+        .distinct()
         .all()
     )
-    has_input_match = any(candidate.cn == input_cn for candidate in candidates)
+    files = []
+    seen = set()
+    for row in rows:
+        file_path = (row[0] or '').strip('/')
+        key = file_path.lower()
+        if not file_path or key in seen:
+            continue
+        seen.add(key)
+        files.append(file_path)
+    return files
+
+
+def _build_changeset(changed_word_ids=None, affected_files=None, current_file='', revisions=None):
+    affected_files = sorted({
+        (file_path or '').strip('/')
+        for file_path in (affected_files or [])
+        if file_path
+    })
     return {
+        'changed_word_ids': sorted({int(word_id) for word_id in (changed_word_ids or []) if word_id}),
+        'affected_files': affected_files,
+        'current_file': current_file,
+        'revisions': revisions or {},
+    }
+
+
+def _resolve_word(word_id=None, current_file='', en_str='', uid=''):
+    word = WordsModel.query.get(word_id) if word_id is not None else None
+    if word is not None:
+        return word
+    query = (
+        WordsModel.query
+        .join(SourceModel, SourceModel.word_id == WordsModel.id)
+        .filter(SourceModel.file == current_file)
+    )
+    if uid:
+        word = query.filter(SourceModel.uid == uid).first()
+        if word is not None:
+            return word
+    if en_str:
+        return query.filter(WordsModel.en == en_str).first()
+    return None
+
+
+def _current_usage(word, current_file='', uid=''):
+    if not current_file:
+        return None
+    if uid:
+        usage = SourceModel.query.filter_by(file=current_file, uid=uid).first()
+        if usage is not None:
+            return usage
+    if word is None:
+        return None
+    return SourceModel.query.filter_by(word_id=word.id, file=current_file).first()
+
+
+def _matching_word(en_str, cn):
+    return (
+        WordsModel.query
+        .filter(text("BINARY words.en = BINARY :matching_en"))
+        .filter(WordsModel.cn == cn)
+        .params(matching_en=en_str)
+        .order_by(WordsModel.proofread.desc(), WordsModel.is_key.desc(), WordsModel.id.asc())
+        .first()
+    )
+
+
+def _decision_buttons(*actions):
+    labels = {
+        'global': '统一修改',
+        'local': '仅修改此处',
+        'modify': '修改',
+        'cancel': '取消',
+    }
+    return [{'action': action, 'label': labels[action]} for action in actions]
+
+
+def _build_proofread_decision(word, cn, current_file='', uid='', en_str=''):
+    if word is None:
+        return {
+            'requires_confirmation': False,
+            'blocked': False,
+            'default_action': 'normal',
+        }
+
+    is_key = _db_bool(word.is_key)
+    is_confirmed = _db_bool(word.proofread)
+    usage_count = SourceModel.query.filter_by(word_id=word.id).count()
+    multiple = usage_count > 1
+    is_admin = _is_admin_user()
+    has_current_file = bool(current_file)
+
+    message = ''
+    buttons = []
+    blocked = False
+    if is_key and is_confirmed and not multiple and (not is_admin):
+        blocked = True
+        message = "此条目已被管理员确认，无法修改。如确定现有译文有误，请在群内@管理员"
+    elif is_confirmed and multiple and (not is_admin) and (not has_current_file):
+        blocked = True
+        message = "此条目已被管理员确认，无法修改。如确定现有译文有误，请在群内@管理员"
+    elif (not is_key) and is_confirmed and multiple and (not is_admin):
+        blocked = True
+        message = "此条目已被管理员确认，无法修改。如确定现有译文有误，请在群内@管理员"
+    elif (not is_key) and is_confirmed and (not multiple) and (not is_admin):
+        blocked = True
+        message = "此条目已被管理员确认，无法修改。如确定现有译文有误，请在群内@管理员"
+    elif multiple and is_confirmed and is_admin and has_current_file:
+        message = "此条目在其他文件中被引用，是否统一修改？"
+        buttons = _decision_buttons('global', 'local', 'cancel')
+    elif multiple and is_confirmed and is_admin:
+        message = "此条目在其他文件中被引用，是否统一修改？"
+        buttons = _decision_buttons('global', 'cancel')
+    elif multiple and is_confirmed and (not is_admin) and has_current_file:
+        message = "此条目已被管理员确认，且在其他文件中被引用，仅可单独修改此处。"
+        buttons = _decision_buttons('local', 'cancel')
+    elif multiple and is_key and (not is_confirmed) and has_current_file:
+        message = "此条目已有校对，且在其他文件中被引用，是否统一修改？"
+        buttons = _decision_buttons('global', 'local', 'cancel')
+    elif multiple and is_key and (not is_confirmed):
+        message = "此条目已有校对，且在其他文件中被引用，是否统一修改？"
+        buttons = _decision_buttons('global', 'cancel')
+    elif (not multiple) and is_confirmed and is_admin:
+        message = "此条目已被管理员确认，是否修改？"
+        buttons = _decision_buttons('modify', 'cancel')
+    elif (not multiple) and is_key and (not is_confirmed) and (not is_admin):
+        message = "此条目已有校对，是否修改？"
+        buttons = _decision_buttons('modify', 'cancel')
+
+    item = {
         'word_id': word.id,
-        'en': word.en,
-        'cn': input_cn,
-        'items': [_word_candidate_dict(candidate, input_cn) for candidate in candidates],
-        'has_input_match': has_input_match,
+        'uid': uid,
+        'en_str': word.en or en_str,
+        'current_cn': word.cn,
+        'new_cn': cn,
+        'source_files': _source_files_for_words([word.id]),
+        'current_file': current_file,
+    }
+    state = {
+        'is_key': is_key,
+        'proofread': is_confirmed,
+        'usage_count': usage_count,
+        'multiple_usage': multiple,
+        'is_admin': is_admin,
+    }
+    return {
+        'requires_confirmation': bool(buttons),
+        'blocked': blocked,
+        'message': message,
+        'note': PROOFREAD_NOTE if (buttons or blocked) else '',
+        'buttons': buttons,
+        'default_action': 'normal',
+        'state': state,
+        'item': item,
+    }
+
+
+def _ensure_word_for_submit(word, user_id, current_file='', en_str='', uid='', tag=''):
+    if word is not None:
+        return word, False
+    if not current_file or not en_str:
+        raise ValueError("缺少创建词条所需的文件或英文原文")
+    word = WordsModel(
+        en=en_str,
+        cn=en_str,
+        json_file=current_file,
+        modified_by=user_id,
+        source="",
+        version="0",
+    )
+    word.category = tag
+    word.is_key = 0
+    word.proofread = 0
+    session.add(word)
+    session.flush()
+    source = SourceModel(word.id, current_file, word.version or "0", uid=uid or "")
+    session.add(source)
+    return word, True
+
+
+def _relink_current_usage(source_word, target_word, current_file='', uid=''):
+    usage = _current_usage(source_word, current_file, uid)
+    if usage is None:
+        if not current_file:
+            raise ValueError("缺少当前文件，无法仅修改此处")
+        usage = SourceModel(target_word.id, current_file, target_word.version or "0", uid=uid or "")
+        session.add(usage)
+    else:
+        usage.word_id = target_word.id
+        usage.version = target_word.version or usage.version or "0"
+        if uid and not usage.uid:
+            usage.uid = uid
+    return usage
+
+
+def _execute_proofread_action(
+    word,
+    cn,
+    user_id,
+    current_file='',
+    uid='',
+    en_str='',
+    tag='',
+    action='normal',
+    refresh_current=True,
+    enqueue_related=True,
+):
+    if action not in {'normal', 'global', 'local', 'modify'}:
+        raise ValueError("未知校对动作")
+
+    word, created_word = _ensure_word_for_submit(word, user_id, current_file, en_str, uid, tag)
+    original_word_id = word.id
+    affected_word_ids = {word.id}
+    affected_files = set(_source_files_for_words([word.id]))
+    if current_file:
+        affected_files.add(current_file)
+    degraded_to_local = False
+    proofread_item = None
+    target_word = word
+
+    if action == 'local':
+        matched_word = _matching_word(word.en, cn)
+        if matched_word is not None:
+            target_word = matched_word
+            affected_word_ids.add(matched_word.id)
+            affected_files.update(_source_files_for_words([matched_word.id]))
+        else:
+            target_word = WordsModel(
+                en=word.en,
+                cn=cn,
+                json_file=current_file or word.json_file,
+                modified_by=user_id,
+                source=word.source or "",
+                version=word.version or "0",
+            )
+            target_word.category = word.category or tag
+            target_word.is_key = 1
+            target_word.proofread = 0
+            session.add(target_word)
+            session.flush()
+            affected_word_ids.add(target_word.id)
+            proofread_item = ProofreadModel(
+                word_id=target_word.id,
+                cn=cn,
+                modified_by=user_id,
+                accepted=0,
+            )
+            session.add(proofread_item)
+        _relink_current_usage(word, target_word, current_file, uid)
+    else:
+        matched_word = _matching_word(word.en, cn)
+        if matched_word is not None and matched_word.id != word.id:
+            if current_file:
+                target_word = matched_word
+                affected_word_ids.add(matched_word.id)
+                affected_files.update(_source_files_for_words([matched_word.id]))
+                degraded_to_local = True
+                _relink_current_usage(word, matched_word, current_file, uid)
+            else:
+                proofread_item = ProofreadModel(
+                    word_id=word.id,
+                    cn=cn,
+                    modified_by=user_id,
+                    accepted=0,
+                )
+                session.add(proofread_item)
+                word.cn = cn
+                word.proofread = 0
+                word.is_key = 1
+                word.modified_by = user_id
+        else:
+            proofread_item = ProofreadModel(
+                word_id=word.id,
+                cn=cn,
+                modified_by=user_id,
+                accepted=0,
+            )
+            session.add(proofread_item)
+            word.cn = cn
+            word.proofread = 0
+            word.is_key = 1
+            word.modified_by = user_id
+
+    if current_file:
+        usage = _current_usage(word, current_file, uid)
+        if usage is None:
+            _relink_current_usage(word, target_word, current_file, uid)
+
+    affected_files.update(_source_files_for_words(list(affected_word_ids)))
+    dirty_revisions = mark_files_dirty(list(affected_files), commit=False)
+    session.commit()
+
+    progress = {}
+    cache_error = ""
+    if refresh_current:
+        try:
+            progress = (
+                refresh_file_runtime(current_file, cache_revision=dirty_revisions.get(current_file))
+                if current_file else {}
+            )
+        except Exception as exc:
+            print(f"提交校对缓存重建失败: {exc}")
+            cache_error = "校对已写入数据库，但预览缓存重建失败，请刷新文件缓存"
+            mark_file_cache_error(current_file, cache_error)
+    elif current_file:
+        progress = _get_file_progress(current_file)
+
+    stale_files = [
+        file_path for file_path in affected_files
+        if file_path and file_path != current_file
+    ]
+    cache_jobs = (
+        enqueue_cache_refresh_jobs(
+            dirty_revisions,
+            exclude_files=[current_file],
+            reason=f"proofread:{action}",
+            priority=50,
+        )
+        if enqueue_related else []
+    )
+    status_message = (
+        "系统发现与新译文相同的条目，为防止过度修改，降级为：“仅修改此处”"
+        if degraded_to_local else
+        "校对成功"
+    )
+    return {
+        'proofread': proofread_item.to_dict() if proofread_item is not None else {},
+        'word': target_word.to_dict(),
+        'item': {
+            'uid': uid,
+            'en_str': target_word.en,
+            'cn_str': target_word.cn,
+            'sql_id': target_word.id,
+            'is_key': target_word.is_key,
+            'is_proofread': target_word.proofread,
+            'previous_word_id': original_word_id,
+        },
+        'auto_accepted': False,
+        'progress': progress,
+        'stale_files': stale_files,
+        'cache_jobs': cache_jobs,
+        'changeset': _build_changeset(
+            changed_word_ids=affected_word_ids,
+            affected_files=affected_files,
+            current_file=current_file,
+            revisions=dirty_revisions,
+        ),
+        'cache_status': 'error' if cache_error else 'fresh',
+        'cache_error': cache_error,
+        'degraded_to_local': degraded_to_local,
+        'status_message': status_message,
+        'action': action,
+        'created_word': created_word,
     }
 
 @api.resource('/proofread')
@@ -143,125 +496,56 @@ class ProofreadApi(Resource, BaseApi):
         user_id = current_user.get_id()
         if request.is_json:
             data = request.get_json()
-            current_file = data.pop('current_file', '').strip('/')
+            current_file = str(data.get('current_file') or '').strip('/')
             word_id = data.get('word_id')
-            cn = data.get('cn')
+            cn = str(data.get('cn') or '').strip()
             en_str = data.get('en_str')
             uid = data.get('uid')
             tag = data.get('tag')
-            if cn is None:
+            action = str(data.get('action') or '').strip()
+            if not cn:
                 return error("新增失败：cn不能为空")
 
-            word = WordsModel.query.get(word_id) if word_id is not None else None
+            word = _resolve_word(word_id, current_file, en_str, uid)
             if word is None and word_id is not None:
                 return error("新增失败：没有找到相关词条")
-            if word is None:
-                if not current_file or not en_str:
-                    return error("新增失败：缺少创建词条所需的文件或英文原文")
-                word = (
-                    WordsModel.query
-                    .join(SourceModel, SourceModel.word_id == WordsModel.id)
-                    .filter(SourceModel.file == current_file)
-                    .filter(WordsModel.en == en_str)
-                    .first()
-                )
-            if word is not None and int(word.proofread or 0) == 1:
-                usage_count = SourceModel.query.filter_by(word_id=word.id).count()
-                if usage_count > 1:
-                    replacement_data = _get_confirmed_replacement_data(word, cn)
-                    replacement_data['requires_replacement'] = True
-                    replacement_data['usage_count'] = usage_count
-                    replacement_data['can_direct_update'] = False
-                    return success(message="此已确认Job被多处引用，请选择替换目标", data=replacement_data)
-                if not _is_admin_user():
-                    return error("已确认内容仅管理员可直接修改，请联系管理员")
+            decision = _build_proofread_decision(word, cn, current_file, uid, en_str)
+            if decision.get('blocked'):
+                return success(message=decision.get('message'), data=decision)
+            allowed_actions = {
+                button['action']
+                for button in decision.get('buttons', [])
+                if button.get('action') != 'cancel'
+            }
+            if not action and decision.get('requires_confirmation'):
+                return success(message=decision.get('message'), data=decision)
+            if action:
+                if action == 'cancel':
+                    return error("已取消校对")
+                if decision.get('requires_confirmation') and action not in allowed_actions:
+                    return error("新增失败：当前状态不允许此校对动作")
+            else:
+                action = decision.get('default_action') or 'normal'
 
-            # if ProofreadModel.query.filter_by(word_id = data['word_id']).filter_by(cn = data['cn']).first():
-            #     return error("请勿重复提交已存在的翻译！")
-
-            created_word = False
-            created_source = False
             try:
-                if word is None:
-                    word = WordsModel(
-                        en=en_str,
-                        cn=en_str,
-                        json_file=current_file,
-                        modified_by=user_id,
-                        source="",
-                        version="0",
-                    )
-                    word.category = tag
-                    word.is_key = 0
-                    word.proofread = 0
-                    session.add(word)
-                    session.flush()
-                    created_word = True
-                word_id = word.id
-                source = None
-                if current_file:
-                    if uid:
-                        source = SourceModel.query.filter_by(file=current_file, uid=uid).first()
-                    if source is None:
-                        source = SourceModel.query.filter_by(
-                            word_id=word_id, file=current_file
-                        ).first()
-                if current_file and source is None:
-                    session.add(SourceModel(word_id, current_file, word.version or "0", uid=uid or ""))
-                    created_source = True
-                item = self.model(
-                    word_id=word_id,
-                    cn=cn,
-                    modified_by=user_id,
-                    accepted=0,
+                result = _execute_proofread_action(
+                    word,
+                    cn,
+                    user_id,
+                    current_file=current_file,
+                    uid=uid,
+                    en_str=en_str,
+                    tag=tag,
+                    action=action,
                 )
-                session.add(item)
-                word.cn = cn
-                word.proofread = 0
-                word.is_key = 1
-                word.modified_by = user_id
-                session.commit()
+                return success(message=result['status_message'], data=result)
+            except RuntimeError as exc:
+                session.rollback()
+                return error(str(exc))
             except Exception as e:
                 session.rollback()
                 print(f"提交校对失败: {e}")
                 return error("新增失败：数据库更新失败")
-
-            related_files = [
-                row[0] for row in session.query(SourceModel.file)
-                .filter(SourceModel.word_id == item.word_id)
-                .distinct()
-                .all()
-            ]
-            if current_file:
-                try:
-                    if created_word or created_source:
-                        progress = refresh_file_runtime(current_file)
-                    else:
-                        update_job_cache_word(
-                            current_file,
-                            item.word_id,
-                            uid=uid,
-                            en_str=en_str,
-                            is_key=1,
-                            is_proofread=0,
-                            cn_str=item.cn
-                        )
-                        clear_file_stale(current_file)
-                        progress = _get_file_progress(current_file)
-                except Exception as exc:
-                    print(f"提交校对缓存重建失败: {exc}")
-                    return error("校对已写入数据库，但预览缓存重建失败，请刷新文件缓存")
-            else:
-                progress = {}
-            stale_files = [file_path for file_path in related_files if file_path and file_path != current_file]
-            mark_files_stale(stale_files)
-            return success(message=f"新增成功", data={
-                'proofread': item.to_dict(),
-                'word': word.to_dict(),
-                'auto_accepted': False,
-                'progress': progress,
-                'stale_files': stale_files,
-            })
         else:
             return error("The request payload is not in JSON format")
     def _create(self, words):
@@ -277,139 +561,6 @@ class ProofreadApi(Resource, BaseApi):
     def _update(self,words):
         if words is None:
             raise Exception("words is none")            
-
-
-@api.resource('/proofread/confirmed-replacement-options')
-class ConfirmedReplacementOptionsApi(Resource):
-    @login_required
-    def post(self):
-        if not current_user.is_authenticated:
-            return error('请先登录！')
-        if not request.is_json:
-            return error("请求参数必须为JSON")
-
-        data = request.get_json()
-        word_id = data.get('word_id')
-        cn = str(data.get('cn') or '').strip()
-        if not word_id:
-            return error("检查失败：word_id不能为空")
-        word = WordsModel.query.get(word_id)
-        if word is None:
-            return error("检查失败：没有找到相关词条")
-
-        usage_count = SourceModel.query.filter_by(word_id=word.id).count()
-        if usage_count <= 1:
-            return success(data={
-                'word_id': word.id,
-                'en': word.en,
-                'cn': cn,
-                'usage_count': usage_count,
-                'requires_replacement': False,
-                'can_direct_update': _is_admin_user(),
-            })
-
-        replacement_data = _get_confirmed_replacement_data(word, cn)
-        replacement_data['usage_count'] = usage_count
-        replacement_data['requires_replacement'] = True
-        replacement_data['can_direct_update'] = False
-        return success(data=replacement_data)
-
-
-@api.resource('/proofread/confirmed-replacement')
-class ConfirmedReplacementApi(Resource):
-    @login_required
-    def post(self):
-        if not current_user.is_authenticated:
-            return error('请先登录！')
-        if not request.is_json:
-            return error("请求参数必须为JSON")
-
-        data = request.get_json()
-        current_file = str(data.get('current_file') or '').strip('/')
-        uid = str(data.get('uid') or '').strip()
-        word_id = data.get('word_id')
-        target_word_id = data.get('target_word_id')
-        cn = str(data.get('cn') or '').strip()
-        if not current_file or not uid or not word_id:
-            return error("替换失败：current_file、uid、word_id不能为空")
-
-        current_word = WordsModel.query.get(word_id)
-        if current_word is None:
-            return error("替换失败：当前词条不存在")
-        if int(current_word.proofread or 0) != 1:
-            return error("替换失败：当前词条不是已确认Job")
-        if SourceModel.query.filter_by(word_id=current_word.id).count() <= 1:
-            return error("替换失败：当前Job未被多处引用")
-        usage = SourceModel.query.filter_by(
-            file=current_file,
-            uid=uid,
-            word_id=current_word.id,
-        ).first()
-        if usage is None:
-            return error("替换失败：没有找到当前Job对应的使用记录")
-
-        target_word = None
-        created = False
-        if target_word_id:
-            target_word = WordsModel.query.get(target_word_id)
-            if target_word is None:
-                return error("替换失败：选择的词条不存在")
-            if target_word.en != current_word.en:
-                return error("替换失败：选择的词条英文原文不一致")
-        else:
-            if not cn:
-                return error("替换失败：新增翻译不能为空")
-            target_word = (
-                WordsModel.query
-                .filter(WordsModel.en == current_word.en)
-                .filter(WordsModel.cn == cn)
-                .order_by(WordsModel.id.asc())
-                .first()
-            )
-
-        try:
-            if target_word is None:
-                target_word = WordsModel(
-                    en=current_word.en,
-                    cn=cn,
-                    json_file=current_file,
-                    modified_by=current_user.get_id(),
-                    source=current_word.source or "",
-                    version=current_word.version or "0",
-                )
-                target_word.category = current_word.category
-                target_word.is_key = 1
-                target_word.proofread = 1
-                session.add(target_word)
-                session.flush()
-                created = True
-
-            proofread = ProofreadModel(
-                word_id=target_word.id,
-                cn=target_word.cn,
-                modified_by=current_user.get_id(),
-                accepted=1,
-            )
-            session.add(proofread)
-            usage.word_id = target_word.id
-            usage.version = usage.version or target_word.version or "0"
-            session.commit()
-        except Exception as exc:
-            session.rollback()
-            print(f"替换已确认Job失败: {exc}")
-            return error("替换失败：数据库更新失败")
-
-        try:
-            progress = refresh_file_runtime(current_file)
-        except Exception as exc:
-            print(f"替换已确认Job缓存重建失败: {exc}")
-            return error("替换已写入数据库，但预览缓存重建失败，请刷新文件缓存")
-
-        return success(message="替换成功", data={
-            'created': created,
-            'word': target_word.to_dict(),
-            'progress': progress,
-        })
 
 
 @api.resource('/proofread/batch')
@@ -433,103 +584,110 @@ class BatchProofreadApi(Resource, BaseApi):
 
         user_id = current_user.get_id()
         results = []
-        related_word_ids = []
-        try:
-            for data in items:
-                cn = str(data.get('cn') or '').strip()
-                en_str = data.get('en_str')
-                uid = data.get('uid')
-                tag = data.get('tag')
-                word_id = data.get('word_id')
-                if not cn or not en_str or not uid:
-                    raise ValueError("条目缺少cn、en_str或uid")
+        pending_confirmations = []
+        stale_files = []
+        cache_jobs = []
+        changed_word_ids = []
+        affected_files = []
+        revisions = {}
+        progress = {}
+        for index, data in enumerate(items):
+            cn = str(data.get('cn') or '').strip()
+            en_str = data.get('en_str')
+            uid = data.get('uid')
+            tag = data.get('tag')
+            word_id = data.get('word_id')
+            if not cn or not en_str or not uid:
+                return error("批量校对失败：条目缺少cn、en_str或uid")
 
-                word = WordsModel.query.get(word_id) if word_id is not None else None
-                if word is None and word_id is not None:
-                    raise ValueError(f"没有找到词条：{word_id}")
-                if word is None:
-                    word = (
-                        WordsModel.query
-                        .join(SourceModel, SourceModel.word_id == WordsModel.id)
-                        .filter(SourceModel.file == current_file)
-                        .filter(WordsModel.en == en_str)
-                        .first()
-                    )
-                if word is None:
-                    word = WordsModel(
-                        en=en_str,
-                        cn=en_str,
-                        json_file=current_file,
-                        modified_by=user_id,
-                        source="",
-                        version="0",
-                    )
-                    word.category = tag
-                    word.is_key = 0
-                    word.proofread = 0
-                    session.add(word)
-                    session.flush()
+            word = _resolve_word(word_id, current_file, en_str, uid)
+            if word is None and word_id is not None:
+                return error(f"批量校对失败：没有找到词条：{word_id}")
 
-                source = SourceModel.query.filter_by(file=current_file, uid=uid).first()
-                if source is None:
-                    source = SourceModel.query.filter_by(
-                        word_id=word.id,
-                        file=current_file,
-                    ).first()
-                if source is None:
-                    session.add(SourceModel(word.id, current_file, word.version or "0", uid=uid or ""))
-                else:
-                    source.word_id = word.id
-                    source.version = word.version or source.version or "0"
-                    if uid and not source.uid:
-                        source.uid = uid
+            submit_data = {
+                'current_file': current_file,
+                'word_id': word.id if word is not None else word_id,
+                'en_str': en_str,
+                'uid': uid,
+                'tag': tag,
+                'cn': cn,
+            }
+            decision = _build_proofread_decision(word, cn, current_file, uid, en_str)
+            if decision.get('requires_confirmation') or decision.get('blocked'):
+                decision['batch_index'] = index
+                decision['submit_data'] = submit_data
+                pending_confirmations.append(decision)
+                continue
 
-                proofread = ProofreadModel(
-                    word_id=word.id,
-                    cn=cn,
-                    modified_by=user_id,
-                    accepted=0,
+            try:
+                result = _execute_proofread_action(
+                    word,
+                    cn,
+                    user_id,
+                    current_file=current_file,
+                    uid=uid,
+                    en_str=en_str,
+                    tag=tag,
+                    action='normal',
+                    refresh_current=False,
+                    enqueue_related=False,
                 )
-                session.add(proofread)
-                word.cn = cn
-                word.proofread = 0
-                word.is_key = 1
-                word.modified_by = user_id
-                related_word_ids.append(word.id)
-                results.append({
-                    'uid': uid,
-                    'en_str': en_str,
-                    'cn_str': cn,
-                    'sql_id': word.id,
-                    'is_key': 1,
-                    'is_proofread': 0,
-                })
-            session.commit()
-        except Exception as exc:
-            session.rollback()
-            print(f"批量提交校对失败: {exc}")
-            return error(f"批量校对失败：{exc}")
+            except RuntimeError as exc:
+                session.rollback()
+                return error(str(exc))
+            except Exception as exc:
+                session.rollback()
+                print(f"批量提交校对失败: {exc}")
+                return error(f"批量校对失败：{exc}")
+            results.append(result['item'])
+            progress = result.get('progress') or progress
+            stale_files.extend(result.get('stale_files') or [])
+            cache_jobs.extend(result.get('cache_jobs') or [])
+            changeset = result.get('changeset') or {}
+            changed_word_ids.extend(changeset.get('changed_word_ids') or [])
+            affected_files.extend(changeset.get('affected_files') or [])
+            revisions.update(changeset.get('revisions') or {})
 
-        try:
-            refresh_file_runtime(current_file)
-        except Exception as exc:
-            print(f"批量校对缓存重建失败: {exc}")
-            return error("批量校对已写入数据库，但预览缓存重建失败，请刷新文件缓存")
-        related_files = [
-            row[0] for row in session.query(SourceModel.file)
-            .filter(SourceModel.word_id.in_(related_word_ids))
-            .distinct()
-            .all()
-        ]
-        stale_files = [
-            file_path for file_path in related_files
-            if file_path and file_path != current_file
-        ]
-        mark_files_stale(stale_files)
+        cache_error = ""
+        if revisions.get(current_file):
+            try:
+                progress = refresh_file_runtime(
+                    current_file,
+                    cache_revision=revisions.get(current_file),
+                )
+            except Exception as exc:
+                print(f"批量校对缓存重建失败: {exc}")
+                cache_error = "批量校对已写入数据库，但预览缓存重建失败，请刷新文件缓存"
+                mark_file_cache_error(current_file, cache_error)
+        cache_jobs = enqueue_cache_refresh_jobs(
+            revisions,
+            exclude_files=[current_file],
+            reason="batch-proofread",
+            priority=50,
+        )
+
+        deduped_stale_files = []
+        seen_stale_files = set()
+        for file_path in stale_files:
+            key = file_path.lower()
+            if not file_path or key in seen_stale_files:
+                continue
+            seen_stale_files.add(key)
+            deduped_stale_files.append(file_path)
         return success(message="批量校对提交成功", data={
             'items': results,
-            'progress': _get_file_progress(current_file),
-            'stale_files': stale_files,
+            'pending_confirmations': pending_confirmations,
+            'progress': progress or _get_file_progress(current_file),
+            'stale_files': deduped_stale_files,
+            'cache_jobs': cache_jobs,
+            'cache_status': 'error' if cache_error else 'fresh',
+            'cache_error': cache_error,
+            'changeset': _build_changeset(
+                changed_word_ids=changed_word_ids,
+                affected_files=affected_files,
+                current_file=current_file,
+                revisions=revisions,
+            ),
         })
 
 
@@ -564,15 +722,39 @@ class AcceptedApi(Resource, BaseApi):
                 .distinct()
                 .all()
             ]
+            dirty_revisions = mark_files_dirty(related_files)
+            progress = {}
+            cache_error = ""
             if current_file:
-                update_job_cache_word(current_file, proofread.word_id, is_key=1, is_proofread=1, cn_str=proofread.cn)
-                clear_file_stale(current_file)
-                progress = _get_file_progress(current_file)
-            else:
-                progress = {}
+                try:
+                    progress = refresh_file_runtime(
+                        current_file,
+                        cache_revision=dirty_revisions.get(current_file),
+                    )
+                except Exception as exc:
+                    print(f"采纳校对缓存重建失败: {exc}")
+                    cache_error = "采纳已写入数据库，但预览缓存重建失败，请刷新文件缓存"
+                    mark_file_cache_error(current_file, cache_error)
             stale_files = [file_path for file_path in related_files if file_path and file_path != current_file]
-            mark_files_stale(stale_files)
-            return success(data={'progress': progress, 'stale_files': stale_files})
+            cache_jobs = enqueue_cache_refresh_jobs(
+                dirty_revisions,
+                exclude_files=[current_file],
+                reason="accept-proofread",
+                priority=40,
+            )
+            return success(data={
+                'progress': progress,
+                'stale_files': stale_files,
+                'cache_jobs': cache_jobs,
+                'changeset': _build_changeset(
+                    changed_word_ids=[proofread.word_id],
+                    affected_files=related_files,
+                    current_file=current_file,
+                    revisions=dirty_revisions,
+                ),
+                'cache_status': 'error' if cache_error else 'fresh',
+                'cache_error': cache_error,
+            })
         elif 'file' in params.keys():
             wids = SourceModel.query.filter(SourceModel.file == params['file']).with_entities(SourceModel.word_id).distinct()
             pids = ProofreadModel.query.group_by(ProofreadModel.word_id
@@ -594,19 +776,49 @@ class AcceptedApi(Resource, BaseApi):
                     session.rollback()
                     print(f"存储过程执行失败: {e}")
                     return error("采纳失败")
+            changed_word_ids = []
             for pid in pids:
                 proofread = ProofreadModel.query.get(pid[0])
                 if proofread is not None:
-                    update_job_cache_word(params['file'], proofread.word_id, is_key=1, is_proofread=1, cn_str=proofread.cn)
-            clear_file_stale(params['file'])
-            progress = _get_file_progress(params['file'])
+                    changed_word_ids.append(proofread.word_id)
             affected_files = [
                 row[0] for row in session.query(SourceModel.file)
                 .filter(SourceModel.word_id.in_(wids))
                 .distinct()
                 .all()
             ]
+            dirty_revisions = mark_files_dirty(affected_files)
+            current_file = params['file']
+            progress = {}
+            cache_error = ""
+            try:
+                progress = refresh_file_runtime(
+                    current_file,
+                    cache_revision=dirty_revisions.get(current_file),
+                )
+            except Exception as exc:
+                print(f"批量采纳缓存重建失败: {exc}")
+                cache_error = "采纳已写入数据库，但预览缓存重建失败，请刷新文件缓存"
+                mark_file_cache_error(current_file, cache_error)
             stale_files = [file_path for file_path in affected_files if file_path and file_path != params['file']]
-            mark_files_stale(stale_files)
-            return success(data={'accepted_count': len(pids), 'progress': progress, 'stale_files': stale_files})
+            cache_jobs = enqueue_cache_refresh_jobs(
+                dirty_revisions,
+                exclude_files=[current_file],
+                reason="accept-file",
+                priority=40,
+            )
+            return success(data={
+                'accepted_count': len(pids),
+                'progress': progress,
+                'stale_files': stale_files,
+                'cache_jobs': cache_jobs,
+                'changeset': _build_changeset(
+                    changed_word_ids=changed_word_ids,
+                    affected_files=affected_files,
+                    current_file=current_file,
+                    revisions=dirty_revisions,
+                ),
+                'cache_status': 'error' if cache_error else 'fresh',
+                'cache_error': cache_error,
+            })
         return success()

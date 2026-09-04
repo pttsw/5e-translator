@@ -59,9 +59,9 @@ class BaseApi():
                         self.model.en.asc(),
                         self.model.id.asc()
                     )
-                elif sort_by[0] == '+':
+                elif sort_by[0] == '+' and hasattr(self.model, sort_by[1:]):
                     query = query.order_by(getattr(self.model, sort_by[1:]).asc())
-                elif sort_by[0] == '-':
+                elif sort_by[0] == '-' and hasattr(self.model, sort_by[1:]):
                     query = query.order_by(getattr(self.model, sort_by[1:]).desc())
             query = self._get(query)
             # 查询分页
