@@ -62,6 +62,7 @@ class BuquanshuSearcher:
         category: str = "all",
         page: int = 1,
         page_size: int = 10,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         keyword = str(keyword or "").strip()
         if not keyword:
@@ -84,7 +85,8 @@ class BuquanshuSearcher:
             "pageSize": page_size,
         }
         try:
-            response = self.http_client.get(f"{self.api_url}/api/search", params=params)
+            response = self.http_client.get(f"{self.api_url}/api/search", params=params,
+                                            **({'timeout': timeout} if timeout is not None else {}))
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -95,7 +97,7 @@ class BuquanshuSearcher:
 
         results = [
             self._normalize_result(item)
-            for item in payload["results"]
+            for item in payload["results"][:page_size]
             if isinstance(item, dict)
         ]
         return {
@@ -133,7 +135,7 @@ class BuquanshuSearcher:
             "url": urljoin(self.site_url, quote(path, safe="/%:@?&=+#")) if path else "",
         }
 
-    def fetch_page(self, url: str, max_bytes: int = 2 * 1024 * 1024):
+    def fetch_page(self, url: str, max_bytes: int = 2 * 1024 * 1024, timeout: float = 25):
         """Fetch only same-origin public-site HTML; validate every redirect hop."""
         import ipaddress
         import socket
@@ -152,10 +154,13 @@ class BuquanshuSearcher:
             if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
                 raise BuquanshuSearchError('page_address_not_public')
 
-        deadline = time.monotonic() + 25
+        deadline = time.monotonic() + timeout
         for _ in range(4):
             validate(url)
-            with self.http_client.stream('GET', url, follow_redirects=False, timeout=10) as response:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BuquanshuSearchError('page_budget_exceeded')
+            with self.http_client.stream('GET', url, follow_redirects=False, timeout=min(10, remaining)) as response:
                 if response.is_redirect:
                     url = urljoin(url, response.headers.get('location', ''))
                     continue
@@ -178,6 +183,8 @@ class BuquanshuSearcher:
                     if node.find_parent(['p', 'li', 'tr']):
                         continue
                     value = node.get_text(' ', strip=True)
+                    if node.name == 'tr':
+                        value = ' | '.join(cell.get_text(' ', strip=True) for cell in node.find_all(['td', 'th'], recursive=False))
                     if not value:
                         continue
                     level = int(node.name[1]) if re.fullmatch('h[1-6]', node.name) else 0

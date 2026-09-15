@@ -41,6 +41,29 @@ class RedisDB:
     #     if tag != "":
     #         tag_k = key + "%" + tag
     #     return self.r.set(tag_k, value)
+    def get_list(self, key_list: list):
+        keys = list(dict.fromkeys(key_list))
+        if not keys:
+            return {}
+
+        pipeline = self.r.pipeline(transaction=False)
+        for key in keys:
+            pipeline.smembers(key)
+
+        terms = {}
+        for key, values in zip(keys, pipeline.execute()):
+            if not values:
+                terms[key] = "null"
+                continue
+
+            parsed_values = []
+            for value in sorted(values):
+                category, separator, cn = value.partition('%')
+                if not separator:
+                    category, cn = "", value
+                parsed_values.append({"cn": cn, "category": category})
+            terms[key] = parsed_values
+        return terms
 
     def keys(self):
         return list(self.r.scan_iter())

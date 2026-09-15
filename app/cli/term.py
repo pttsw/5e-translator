@@ -175,7 +175,7 @@ def add_confirmed_term(mysql_db: DBDictionary, en: str, cn: str, category="", so
 
 def add_mysql_terms_to_redis():
     mysql_db = DBDictionary()
-    _add_word_terms_to_term_table(mysql_db)
+    # _add_word_terms_to_term_table(mysql_db)
     redis_db = RedisDB(db=1)
     mysql_terms, duplicate_skipped, duplicate_conflicts = _dedupe_terms_by_db_key(
         sorted(mysql_db.get_all_term(), key=lambda item: (item.en.lower(), item.category or '', item.cn))

@@ -91,6 +91,25 @@ def test_toc_and_arbitrary_adjacent_names_do_not_become_full_entities():
     assert len(result['translations']) == 2
 
 
+def test_explicit_translation_table_preserves_category_and_conflict():
+    text = '| English | 中文 | 类别 |\n| Fireball | 火球术 | spell |\n| Fireball | 火球 | spell |'
+    result = ReferenceContentProcessor().process(text, source_id='table')
+    assert [(t['en'], t['cn'], t['category']) for t in result['translations']] == [
+        ('Fireball', '火球术', 'spell'), ('Fireball', '火球', 'spell')]
+    assert all(t['conflict'] for t in result['translations'])
+
+
+def test_failed_update_retains_previous_version(tmp_path):
+    path = tmp_path / 'reference.txt'
+    path.write_text(TEXT)
+    store = ReferenceStore()
+    store.load_path(str(path), (tmp_path,))
+    summary = store.summary()
+    path.write_bytes(b'\xff')
+    assert store.load_path(str(path), (tmp_path,))['failed'] == 1
+    assert store.summary() == summary
+
+
 def test_fallback_is_once_and_rejects_fabricated_evidence():
     text = '这段文字讲述一个无名之物。'
     fallback = Mock(return_value={'entities': [{'start': 0, 'end': len(text), 'name_en': 'Invented',
@@ -247,3 +266,48 @@ def test_tool_round_limit_and_failures():
     adapter = ReferenceToolAdapter(type('Adapter', (), {'llm': model})(), refs)
     answer, status = adapter.sendText('source', 'JSON only')
     assert answer is None and model.invoke.call_count == adapter.MAX_ROUNDS
+
+
+def test_category_threshold_and_provider_timeout_preserve_session_results():
+    store = ReferenceStore()
+    store.add(TEXT, 'ref')
+    reader = Mock(side_effect=TimeoutError('sensitive connection details'))
+    refs = ReferenceTools(store, term_reader=reader, searcher_factory=EmptySearch)
+    response = refs.lookup_translations(['Battle Familiar'], category='spell')
+    assert response['results'][0]['source_type'] == 'session_reference'
+    assert response['errors'] == [{'source_type': 'term_table', 'code': 'TimeoutError'}]
+    assert refs.lookup_translations(['Battle Familiar'], category='item')['results'] == []
+    assert service(store, min_confidence=.95).lookup_translations(['Battle Familiar'])['results'] == []
+
+
+def test_temporary_store_captures_finished_processor_without_retaining_it():
+    from threading import Lock
+    from app.core.bean.term import Term
+    processor = type('Processor', (), {'cache_lock': Lock(), 'temple_terms': {Term('Shield', 'spell', '护盾术')}})()
+    temporary = TemporaryTermStore()
+    temporary.bind(processor)
+    temporary.finish(processor)
+    assert temporary.processors == []
+    assert temporary.snapshot()[0]['cn'] == '护盾术'
+    temporary.clear()
+    assert temporary.snapshot() == []
+
+
+def test_agent_ref_and_chat_share_tools_and_clear_preserves_references(tmp_path):
+    from .agent import DNDTranslatorAgent
+    from .tools import ToolRegistry
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'ref.txt').write_text(TEXT)
+    agent = DNDTranslatorAgent.__new__(DNDTranslatorAgent)
+    refs = service()
+    agent.tool_registry = ToolRegistry(refs)
+    agent.translation_options = AgentOptions(source, tmp_path / 'output')
+    agent.messages = []
+    state = json.loads(agent.execute_command('/ref ref.txt'))
+    assert state['reference_result']['success'] == 1
+    assert agent.translation_graph.references is refs
+    agent.execute_command('/clear')
+    assert json.loads(agent.execute_command('/refs'))['references']
+    agent.execute_command('/clear-refs')
+    assert refs.store.summary() == []

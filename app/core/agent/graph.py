@@ -27,7 +27,8 @@ class TranslationGraph:
             if command.name in {'/ref', '/refs', '/clear-refs'}:
                 if command.name == '/ref':
                     state['stage'] = 'load_references'
-                    state['reference_result'] = self.references.store.load_path(command.path, self.options.reference_roots)
+                    with self.references.lock:
+                        state['reference_result'] = self.references.store.load_path(command.path, self.options.reference_roots)
                 elif command.name == '/clear-refs':
                     self.references.clear()
                 state['references'] = self.references.store.summary()
@@ -61,6 +62,8 @@ class TranslationGraph:
                             break
                 except Exception as exc:
                     nodes.error(state, result, exc)
+                finally:
+                    self.references.temporary.finish(getattr(nodes, 'processor', None))
                 state['progress']['completed'] += 1
             state['reference_index_ids'] = [item['index_id'] for item in self.references.store.summary()]
             state['tool_calls'] = deepcopy(self.references.audit)

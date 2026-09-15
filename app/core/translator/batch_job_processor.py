@@ -332,6 +332,7 @@ class BatchJobProcessor(JobProcessor):
             use_ai=self.use_ai,
         )
         fallback_processor.adapter_transform = getattr(self, 'adapter_transform', None)
+        fallback_processor.temporary_term_sink = getattr(self, 'temporary_term_sink', None)
         fallback_results = list(fallback_processor.invoke([fallback_file], config=self.config))
         if not fallback_results:
             return failed_jobs

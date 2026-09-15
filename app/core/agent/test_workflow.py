@@ -134,6 +134,70 @@ def test_file_does_not_invoke_automatic_reference_setters(workspace, monkeypatch
         constructor.assert_not_called()
 
 
+def test_file_with_reference_keeps_raw_reference_out_of_mock_llm_request(workspace, monkeypatch):
+    from app.core.agent.reference_tools import ReferenceTools
+    from app.core.translator.mock_adapter import MockAdapter
+    options, _ = workspace
+    write_source(options)
+    (options.source_root / 'ref.txt').write_text('# 测试光亮 Test Light\n这段会话资料绝不自动注入模型。')
+    refs = ReferenceTools(term_reader=Mock(side_effect=AssertionError('unexpected lookup')))
+    graph = TranslationGraph(options, references=refs)
+    graph.invoke('/ref ref.txt')
+    original_send = MockAdapter.sendText
+    requests = []
+
+    def send(adapter, text, *args, **kwargs):
+        requests.append(text)
+        return original_send(adapter, text, *args, **kwargs)
+
+    monkeypatch.setattr(MockAdapter, 'sendText', send)
+    result = graph.invoke('/file spells/spells-test.json')
+    assert result['progress']['success'] == 1, result
+    assert requests and all('绝不自动注入' not in request for request in requests)
+    assert result['reference_index_ids'] and result['tool_calls'] == []
+    refs.term_reader.assert_not_called()
+    assert refs.temporary.snapshot() == []
+
+
+def test_file_model_can_query_session_reference_through_processor(workspace, monkeypatch):
+    from langchain_core.messages import AIMessage, ToolMessage
+    from app.core.agent.reference_tools import ReferenceTools
+    from app.core.agent.test_references import EmptySearch
+    from app.core.translator.mock_adapter import MockAdapter
+    options, _ = workspace
+    write_source(options)
+    (options.source_root / 'ref.txt').write_text('# 测试光亮 Test Light\n这道法术创造光亮。')
+    refs = ReferenceTools(term_reader=lambda q: [], searcher_factory=EmptySearch)
+    model = Mock()
+    model.bind_tools.return_value.bind.return_value = model
+    requests = []
+
+    def invoke(messages):
+        requests.append(list(messages))
+        results = [m for m in messages if isinstance(m, ToolMessage)]
+        if not results:
+            return AIMessage(content='', tool_calls=[{'id': 'lookup', 'type': 'tool_call',
+                             'name': 'lookup_translations', 'args': {'en_list': ['Test Light']}}])
+        response = json.loads(results[-1].content)
+        assert response['results'][0]['cn'] == '测试光亮'
+        assert response['results'][0]['source_type'] == 'session_reference'
+        payload = json.loads(messages[1].content)
+        return AIMessage(content=json.dumps({'batch_id': payload['batch_id'], 'source_hash': payload['source_hash'],
+            'items': [{'uid': item['uid'], 'trans_str': '测试光亮' if item['en_str'] == 'Test Light' else item['en_str']}
+                      for item in payload['items']], 'add_terms': {}}))
+
+    model.invoke.side_effect = invoke
+    monkeypatch.setattr(MockAdapter, 'llm', model, raising=False)
+    graph = TranslationGraph(options, references=refs)
+    graph.invoke('/ref ref.txt')
+    state = graph.invoke('/file spells/spells-test.json')
+    assert state['progress']['success'] == 1, state
+    output = json.loads(Path(state['file_results'][0]['output_path']).read_text())
+    assert output['spell'][0]['name'] == '测试光亮'
+    assert state['tool_calls'][0]['tool'] == 'lookup_translations'
+    assert '这道法术创造光亮' not in str(requests[0])
+
+
 def test_directory_failure_isolation_and_no_early_writes(workspace):
     options, db = workspace
     (options.source_root / 'a.json').write_text('{invalid')
@@ -256,6 +320,17 @@ def test_processor_failure_does_not_publish_or_persist(workspace, monkeypatch):
     assert state['file_results'][0]['failed_stage'] == 'translate'
     assert not (options.output_root / 'a.json').exists()
     assert db.store_records == []
+
+
+def test_failed_processor_initialization_does_not_bind_temporary_store(workspace, monkeypatch):
+    options, _ = workspace
+    write_source(options, 'a.json')
+    import app.core.translator.batch_job_processor as module
+    monkeypatch.setattr(module, 'BatchJobProcessor', lambda *args, **kwargs: type('Failed', (), {'ok': False})())
+    graph = TranslationGraph(options)
+    state = graph.invoke('/file a.json')
+    assert state['file_results'][0]['error'] == 'processor_initialization_failed'
+    assert graph.references.temporary.processors == []
 
 
 def test_persistence_failure_keeps_candidate_and_existing_output(workspace, monkeypatch):

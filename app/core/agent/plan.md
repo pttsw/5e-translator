@@ -331,6 +331,8 @@ Tool 返回只进入当前实体任务的对话上下文，不写入 `translatio
 
 ### 阶段 B：参考资料
 
+2026-09-15：已实现会话参考命令、共享实体/译名解析、两个聚合查询 Tool、不全书安全全文读取及 processor 按需 Tool 调用。已使用 `forum_posts2129.txt`、真实 `term` 行和不全书全文只读验证；用法、预算、解析边界与探测脚本见 [README.md](README.md)。完整实体双视图载荷仍属于待完成的处理器改造，不由本阶段的参考索引替代。
+
 - 实现 `ReferenceLoader` 和共享的 `ReferenceContentProcessor`，能从单份中文为主的内容中拆出多个实体，并提取有原文证据的中英文译文对。
 - 会话资料和不全书正文使用相同的 `ReferenceEntity`、`TranslationCandidate` 结构及两个只读索引；处理结果明确输出实体列表和中英文对照译文列表。
 - 实现 `lookup_translations`，按 `term` 表 → 会话译文 → 不全书译文 → 临时术语的固定优先级返回带置信度候选。

@@ -12,15 +12,32 @@ class TemporaryTermStore:
     def __init__(self):
         self.terms = {}
         self.processors = []
+        self.lock = RLock()
 
     def clear(self):
-        self.terms.clear()
-        self.processors.clear()
+        with self.lock:
+            self.terms.clear()
+            self.processors.clear()
 
     def bind(self, processor):
-        self.processors.append(processor)
+        with self.lock:
+            self.processors.append(processor)
+
+    def add(self, term):
+        with self.lock:
+            self.terms[(term.en, term.cn, term.category or '')] = term
+
+    def finish(self, processor):
+        with self.lock:
+            self.snapshot()
+            if processor in self.processors:
+                self.processors.remove(processor)
 
     def snapshot(self):
+        with self.lock:
+            return self._snapshot()
+
+    def _snapshot(self):
         for processor in self.processors:
             with processor.cache_lock:
                 terms = list(processor.temple_terms)
@@ -41,7 +58,7 @@ def category_matches(actual, requested):
     return actual in {'', 'unknown', 'normal', requested}
 
 
-def score_record(record, query, *, entity=False):
+def score_record(record, query, *, entity=False, category=None):
     if entity:
         direct = [record['name_en'], record['name_cn']]
         names = direct + record.get('aliases', [])
@@ -59,6 +76,12 @@ def score_record(record, query, *, entity=False):
         quality, match = .5 * similarity, 'fuzzy'
     if record.get('parse_method') == 'llm_fallback':
         quality *= .9
+    category_reason = 'category_unspecified'
+    if category:
+        actual = record.get('entity_type' if entity else 'category', '')
+        category_reason = 'category_exact' if actual == category else 'category_unknown_or_alias'
+        if actual != category:
+            quality *= .95
     if entity:
         ranks = {'session_reference': (1, .85, 1.0), 'buquanshu': (2, .65, .84)}
     else:
@@ -67,7 +90,7 @@ def score_record(record, query, *, entity=False):
     rank, low, high = ranks[record['source_type']]
     return dict(record, source_rank=rank, confidence=round(low + (high - low) * quality, 4),
                 match_type=match, confidence_reasons=[f'source_priority:{rank}', match,
-                    'engineering_score_not_probability', 'evidence:' + record.get('parse_method', 'structured')])
+                    'engineering_score_not_probability', category_reason, 'evidence:' + record.get('parse_method', 'structured')])
 
 
 class ReferenceTools:
@@ -92,12 +115,14 @@ class ReferenceTools:
         self.lock = RLock()
 
     def start_run(self):
-        self.temporary.clear()
-        self.audit.clear()
-        self._term_cache.clear()
+        with self.lock:
+            self.temporary.clear()
+            self.audit.clear()
+            self._term_cache.clear()
 
     def end_run(self):
-        self.temporary.clear()
+        with self.lock:
+            self.temporary.clear()
 
     def clear(self):
         with self.lock:
@@ -120,7 +145,7 @@ class ReferenceTools:
         found = self._indexes[kind].get(normalize(query))
         return found if found is not None else self.store.records(kind)
 
-    def _remote(self, query, errors):
+    def _remote(self, query, errors, deadline):
         key = normalize(query)
         if key in self._remote_cache:
             errors.extend(self._remote_cache[key])
@@ -128,19 +153,26 @@ class ReferenceTools:
         local_errors = []
         try:
             with self.searcher_factory() as searcher:
-                result = searcher.search(query, page_size=10)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('tool_budget_exceeded')
+                result = searcher.search(query, page_size=10, timeout=min(10, remaining))
                 # Prefer descriptions over quick-reference lists; never invent a detail URL.
                 pages = sorted(result['results'], key=lambda item: (
                     '速查' in item.get('category', '') or '列表' in item.get('source_path', ''),
                     '详述' not in item.get('source_path', ''), item.get('url', '')))
                 for page in pages[:self.max_pages]:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        local_errors.append({'source_type': 'buquanshu', 'code': 'tool_budget_exceeded'})
+                        break
                     url = page.get('url')
                     if not url:
                         continue
                     if ('buquanshu', url) in self.store.documents:
                         continue
                     try:
-                        content = searcher.fetch_page(url)
+                        content = searcher.fetch_page(url, timeout=min(10, remaining))
                         if not content.get('complete'):
                             local_errors.append({'source_type': 'buquanshu', 'source_id': url, 'code': 'preview_only'})
                             continue
@@ -166,10 +198,14 @@ class ReferenceTools:
         while response['results'] and len(json.dumps(response, ensure_ascii=False)) > self.max_chars:
             response['results'].pop()
             response['truncated'] = True
+        while response['errors'] and len(json.dumps(response, ensure_ascii=False)) > self.max_chars:
+            response['errors'].pop()
+            response['truncated'] = True
         self.audit.append({'tool': tool, 'query': response['query'],
                            'source_ids': sorted({r['source_id'] for r in response['results']}),
                            'elapsed_ms': round((time.monotonic() - started) * 1000),
                            'truncated': response['truncated'], 'errors': deepcopy(response['errors'])})
+        del self.audit[:-1000]
         return response
 
     @staticmethod
@@ -179,9 +215,9 @@ class ReferenceTools:
             key = ((record['entity_id'],) if entity else (normalize(record['en']), record['cn'],
                    record['category'], record['source_type']))
             if key not in unique:
-                unique[key] = dict(record, evidence_sources=[])
+                unique[key] = dict(record, evidence_sources=list(record.get('evidence_sources', [])))
             evidence = {'source_id': record['source_id'], 'evidence_location': record['evidence_location']}
-            if evidence not in unique[key]['evidence_sources']:
+            if evidence not in unique[key]['evidence_sources'] and len(unique[key]['evidence_sources']) < 8:
                 unique[key]['evidence_sources'].append(evidence)
         return list(unique.values())
 
@@ -191,6 +227,10 @@ class ReferenceTools:
         started = time.monotonic()
         with self.lock:
             for query in queries:
+                if time.monotonic() - started > 30:
+                    response['errors'].append({'code': 'tool_budget_exceeded'})
+                    response['truncated'] = True
+                    break
                 candidates = []
                 try:
                     if normalize(query) not in self._term_cache:
@@ -205,7 +245,7 @@ class ReferenceTools:
                             evidence_location={'table': 'term', 'en': row['en'], 'source': row.get('source', '')}, parse_method='structured'))
                 except Exception as exc:
                     response['errors'].append({'source_type': 'term_table', 'code': type(exc).__name__})
-                self._remote(query, response['errors'])
+                self._remote(query, response['errors'], started + 30)
                 candidates.extend(self._indexed('translations', query))
                 candidates.extend(self.temporary.snapshot())
                 ranked = []
@@ -214,12 +254,14 @@ class ReferenceTools:
                         continue
                     if entity_id and record.get('entity_id') not in (None, entity_id):
                         continue
-                    scored = score_record(record, query)
+                    scored = score_record(record, query, category=category)
                     if scored and scored['confidence'] >= self.min_confidence:
                         ranked.append(scored)
-                conflict = len({r['cn'] for r in ranked if normalize(r['en']) == normalize(query)}) > 1
+                variants = {}
                 for record in ranked:
-                    record.update(query=query, conflict=conflict and normalize(record['en']) == normalize(query))
+                    variants.setdefault(normalize(record['en']), set()).add(record['cn'])
+                for record in ranked:
+                    record.update(query=query, conflict=len(variants[normalize(record['en'])]) > 1)
                 ranked.sort(key=lambda r: (-r['confidence'], r['match_type'] != 'exact', r['source_id']))
                 response['truncated'] |= len(ranked) > limit_per_term
                 response['results'].extend(ranked[:limit_per_term])
@@ -231,18 +273,22 @@ class ReferenceTools:
         started = time.monotonic()
         with self.lock:
             for query in queries:
+                if time.monotonic() - started > 30:
+                    response['errors'].append({'code': 'tool_budget_exceeded'})
+                    response['truncated'] = True
+                    break
                 def collect():
                     found = []
                     for record in self._dedupe(self._indexed('entities', query), entity=True):
                         if not record['complete'] or not category_matches(record['entity_type'], entity_type):
                             continue
-                        scored = score_record(record, query, entity=True)
+                        scored = score_record(record, query, entity=True, category=entity_type)
                         if scored and scored['confidence'] >= self.min_confidence:
                             found.append(dict(scored, query=query))
                     return found
                 ranked = collect()
                 if len(ranked) < limit_per_name:
-                    self._remote(query, response['errors'])
+                    self._remote(query, response['errors'], started + 30)
                     ranked = collect()
                 ranked.sort(key=lambda r: (-r['confidence'], r['match_type'] != 'exact', r['source_id']))
                 response['truncated'] |= len(ranked) > limit_per_name

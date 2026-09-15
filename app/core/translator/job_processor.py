@@ -168,6 +168,9 @@ class JobProcessor(Runnable):
                 with open(self.terms_file_path, "a") as terms_file:
                     terms_file.write(f"\n{en},{cn},{term.category}")
                 logger.info(f"添加术语到缓存:{en} -> {cn}")
+        sink = getattr(self, 'temporary_term_sink', None)
+        if sink is not None:
+            sink(term)
     
     def __search_temple_terms(self, en_str: str):
         with self.cache_lock:

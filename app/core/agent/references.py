@@ -101,6 +101,8 @@ def bilingual_name(value):
     """Only explicit bilingual names, never infer translations from prose."""
     value = re.sub(r'^#{1,6}\s+', '', value).strip().strip('|').strip()
     value = re.sub(r'^\d+级[：:]\s*', '', value)
+    if normalize(value).replace('|', ' ').strip() in {'english 中文', '英文 中文', 'en cn', 'name 名称'}:
+        return None
     if len(value) > 150 or re.search(r'[。！？；!?;]', value):
         return None
     # Parentheses or table/delimiter forms; match whichever side contains English.
@@ -152,6 +154,12 @@ class ReferenceContentProcessor:
                 boundaries.append((i, -1, False))
                 continue
             pair = pairs[i]
+            table_category = None
+            cells = [cell.strip() for cell in block.text.strip('|').split('|')]
+            if len(cells) == 3 and cells[2] in {'spell', 'item', 'monster', 'feat', 'background', 'class', 'unknown'}:
+                pair = bilingual_name(' | '.join(cells[:2]))
+                pairs[i] = pair
+                table_category = cells[2]
             next_text = '\n'.join(b.text for b in blocks[i:i + 5])
             kind = infer_type(next_text)
             # Explicit headings preserve nesting; stat-block signatures delimit flat exports.
@@ -165,7 +173,7 @@ class ReferenceContentProcessor:
                 boundaries.append((i, block.level or 2, True))
             if pair:
                 en, cn = pair
-                translations.append(dict(en=en, cn=cn, category=kind, entity_id=None,
+                translations.append(dict(en=en, cn=cn, category=table_category or kind, entity_id=None,
                     source_type=source_type, source_id=source_id, content_hash=content_hash,
                     evidence_location={'start': block.start, 'end': block.end, 'location': block.location,
                                        'quote': block.text}, parse_method='structured' if block.level else 'rule'))
@@ -227,6 +235,26 @@ class ReferenceContentProcessor:
                 warnings.append('fallback_failed')
         if not any(entity['complete'] for entity in entities):
             warnings.append('uncertain_entity_boundaries')
+        unique = {}
+        for candidate in translations:
+            key = (normalize(candidate['en']), candidate['cn'], candidate['category'])
+            evidence = {'source_id': source_id, 'evidence_location': candidate['evidence_location']}
+            if key not in unique:
+                unique[key] = dict(candidate, evidence_sources=[])
+            unique[key]['evidence_sources'].append(evidence)
+            if candidate['entity_id'] and not unique[key]['entity_id']:
+                unique[key]['entity_id'] = candidate['entity_id']
+        translations = list(unique.values())
+        for candidate in translations:
+            candidate.update(source_rank=2 if source_type == 'session_reference' else 3,
+                             confidence=.90 if source_type == 'session_reference' else .77,
+                             match_type='extracted', confidence_reasons=['explicit_bilingual_evidence'])
+            candidate['conflict'] = len({other['cn'] for other in translations
+                                         if normalize(other['en']) == normalize(candidate['en'])}) > 1
+        for entity in entities:
+            entity.update(source_rank=1 if source_type == 'session_reference' else 2,
+                          confidence=.9 if source_type == 'session_reference' else .75,
+                          match_type='extracted', confidence_reasons=['source_document_evidence'])
         return {'entities': entities, 'translations': translations, 'warnings': warnings}
 
 
@@ -299,4 +327,6 @@ class ReferenceStore:
         report['references'] = self.summary()
         report['entities'] = len(self.records('entities'))
         report['translations'] = len(self.records('translations'))
+        report['uncertain_boundaries'] = [doc['source_id'] for doc in report['references']
+                                          if 'uncertain_entity_boundaries' in doc['warnings']]
         return report
