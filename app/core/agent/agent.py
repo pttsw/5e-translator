@@ -2,16 +2,19 @@
 import os
 import platform
 import logging
+from threading import Lock
 from collections.abc import Iterator
 from typing import Any, Union
 
 import httpx
 import tiktoken
+from pydantic import SecretStr
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, message_chunk_to_message
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
 from app.core.agent.tools import ToolRegistry
+from app.core.agent.prompts import CHAT_SYSTEM
 
 load_dotenv()
 
@@ -24,16 +27,20 @@ logger = logging.getLogger(__name__)
 class DNDTranslatorAgent:
     MAX_TOOL_ROUNDS = 8
 
-    def __init__(self):
+    def __init__(self, translation_options=None):
+        self.translation_options = translation_options
+        self.translation_graph = None
+        self._translation_graph_lock = Lock()
         self.agent = None
         self.tool_registry = ToolRegistry()
-        self.messages = [SystemMessage(content="你是D&D（龙与地下城）数据翻译专家。只输出翻译后的文本，不输出其他说明。")]
+        self.messages = [SystemMessage(content=CHAT_SYSTEM)]
+        self.last_token_usage = self._empty_token_usage()
         
         logger.info(f"初始化于{platform.system()}")
         
         base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
         model = os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3.2")
-        api_key = os.getenv("SILICONFLOW_API_KEY") or os.getenv("DS_KEY")
+        api_key = SecretStr(os.getenv("SILICONFLOW_API_KEY") or os.getenv("DS_KEY",""))
         trust_env = os.getenv("SILICONFLOW_TRUST_ENV", "0").lower() in (
             "1", "true", "yes", "on"
         )
@@ -51,10 +58,11 @@ class DNDTranslatorAgent:
         self.agent = ChatOpenAI(
             temperature=0,
             base_url=base_url,
-            openai_api_key=api_key,
+            api_key=api_key,
             model=model,
             http_client=self.http_client,
             max_retries=max_retries,
+            stream_usage=True,
             # response_format={"type": "json_object"},
         )
         logger.info(
@@ -86,12 +94,15 @@ class DNDTranslatorAgent:
         Returns:
             Agent response (or generator if streaming)
         """
+        if not isinstance(message, str):
+            raise TypeError("message must be a string")
+        if message.lstrip().startswith('/'):
+            response = self.execute_command(message)
+            return iter([response]) if stream else response
         if not self.agent:
             raise RuntimeError("Agent not initialized")
 
-        if not isinstance(message, str):
-            raise TypeError("message must be a string")
-
+        self.last_token_usage = self._empty_token_usage()
         registry = self._get_tool_registry()
         runnable = self.agent
         if use_tools:
@@ -103,6 +114,7 @@ class DNDTranslatorAgent:
 
         for _ in range(self.MAX_TOOL_ROUNDS):
             response = runnable.invoke(messages, **kwargs)
+            self._record_token_usage(response)
             tool_calls = getattr(response, "tool_calls", None) or []
             if not use_tools or not tool_calls:
                 messages.append(response)
@@ -137,6 +149,7 @@ class DNDTranslatorAgent:
                 return
 
             response_message = message_chunk_to_message(response)
+            self._record_token_usage(response_message)
             tool_calls = getattr(response_message, "tool_calls", None) or []
             if not use_tools or not tool_calls:
                 messages.append(response_message)
@@ -167,7 +180,125 @@ class DNDTranslatorAgent:
 
     def clear_history(self) -> None:
         """Clear all messages from the current conversation."""
-        self.messages = []
+        self.messages = [SystemMessage(content=CHAT_SYSTEM)]
+        self.last_token_usage = self._empty_token_usage()
+
+    def execute_command(self, message, *, on_progress=None):
+        from .commands import CommandError, parse_command
+        from .graph import build_graph
+        import json
+        self.last_token_usage = self._empty_token_usage()
+        try:
+            command = parse_command(message)
+            if command.name == '/clear':
+                self.clear_history()
+                return '已清空对话；文件运行记录与会话参考资料保留。'
+            if getattr(self, 'translation_graph', None) is None:
+                lock = getattr(self, '_translation_graph_lock', None)
+                if lock is None:
+                    lock = self._translation_graph_lock = Lock()
+                with lock:
+                    if getattr(self, 'translation_graph', None) is None:
+                        self.translation_graph = build_graph(getattr(self, 'translation_options', None))
+            state = self.translation_graph.invoke(message, on_progress=on_progress)
+            return json.dumps(state, ensure_ascii=False, indent=2)
+        except (CommandError, OSError) as exc:
+            return f'命令失败：{exc}'
+
+    @staticmethod
+    def _empty_token_usage() -> dict[str, Union[int, bool]]:
+        return {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cache_read_available": False,
+            "cache_creation_available": False,
+        }
+
+    @staticmethod
+    def _first_token_value(*values) -> Union[int, None]:
+        for value in values:
+            if value is None:
+                continue
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _record_token_usage(self, response) -> None:
+        usage = getattr(response, "usage_metadata", None) or {}
+        response_metadata = getattr(response, "response_metadata", None) or {}
+        raw_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
+        if not isinstance(usage, dict):
+            usage = {}
+        if not isinstance(raw_usage, dict):
+            raw_usage = {}
+
+        input_details = usage.get("input_token_details") or {}
+        raw_input_details = raw_usage.get("prompt_tokens_details") or {}
+        if not isinstance(input_details, dict):
+            input_details = {}
+        if not isinstance(raw_input_details, dict):
+            raw_input_details = {}
+
+        input_tokens = self._first_token_value(
+            usage.get("input_tokens"), raw_usage.get("prompt_tokens")
+        ) or 0
+        output_tokens = self._first_token_value(
+            usage.get("output_tokens"), raw_usage.get("completion_tokens")
+        ) or 0
+        total_tokens = self._first_token_value(
+            usage.get("total_tokens"), raw_usage.get("total_tokens")
+        )
+        if total_tokens is None:
+            total_tokens = input_tokens + output_tokens
+
+        cache_read = self._first_token_value(
+            input_details.get("cache_read"),
+            raw_input_details.get("cached_tokens"),
+            raw_usage.get("prompt_cache_hit_tokens"),
+            raw_usage.get("cache_read_input_tokens"),
+        )
+        cache_creation = self._first_token_value(
+            input_details.get("cache_creation"),
+            raw_usage.get("prompt_cache_miss_tokens"),
+            raw_usage.get("cache_creation_input_tokens"),
+        )
+
+        current = getattr(self, "last_token_usage", None)
+        if not isinstance(current, dict):
+            current = self._empty_token_usage()
+            self.last_token_usage = current
+        current["input_tokens"] += input_tokens
+        current["output_tokens"] += output_tokens
+        current["total_tokens"] += total_tokens
+        if cache_read is not None:
+            current["cache_read_tokens"] += cache_read
+            current["cache_read_available"] = True
+        if cache_creation is not None:
+            current["cache_creation_tokens"] += cache_creation
+            current["cache_creation_available"] = True
+
+    def format_last_token_usage(self) -> str:
+        usage = getattr(self, "last_token_usage", None) or self._empty_token_usage()
+        cache_read = (
+            str(usage["cache_read_tokens"])
+            if usage["cache_read_available"]
+            else "未提供"
+        )
+        cache_creation = (
+            str(usage["cache_creation_tokens"])
+            if usage["cache_creation_available"]
+            else "未提供"
+        )
+        return (
+            f"📊 Token：输入={usage['input_tokens']} | 输出={usage['output_tokens']} | "
+            f"缓存命中={cache_read} | 缓存未命中/写入={cache_creation} | "
+            f"总计={usage['total_tokens']}"
+        )
 
     def _execute_tool_calls(
         self, tool_calls: list[dict[str, Any]], registry: ToolRegistry
@@ -222,17 +353,21 @@ class DNDTranslatorAgent:
                 
                 # Handle commands
                 if user_input.lower() == "/exit" or user_input.lower() == "quit":
-                    print("👋 Goodbye!")
+                    print("👋 拜拜！")
                     break
                 elif user_input.lower() == "/clear":
-                    self.clear_history()
-                    print("🚮 Done")
+                    print(self.execute_command('/clear'))
                     continue
-                
+                elif user_input.startswith('/'):
+                    print(self.execute_command(user_input, on_progress=self._print_file_progress))
+                    continue
+                        
+                    
                 print("\n⏳ Processing...")
                 response = self.chat(user_input, stream=False)
                 
                 print(f"🤖 Assistant: {response}")
+                print(self.format_last_token_usage())
                 
             except KeyboardInterrupt:
                 print("\n\n👋 Goodbye!")
@@ -240,7 +375,15 @@ class DNDTranslatorAgent:
             except Exception as e:
                 print(f"❌ Error: {e}")
                 logger.exception("Error in interactive mode")
+
+    @staticmethod
+    def _print_file_progress(state):
+        if state['stage'] == 'analyse_and_reuse':
+            item = state['file_results'][-1]
+            print(f"文件 {state['progress']['completed'] + 1}/{state['progress']['files']}："
+                  f"{state['current_file']}；单元={item.get('total', 0)}，"
+                  f"复用={item.get('reused', 0)}，待译={item.get('pending', 0)}，冲突=尚未检测")
             
 if __name__ == '__main__':
     agent = DNDTranslatorAgent()
-    agent.interactive_mode(agent)
+    agent.interactive_mode()

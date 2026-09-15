@@ -7,9 +7,6 @@ from config import logger,KEY_MATCHED_TAG
 from typing import List, Optional
 from app.core.utils import Job, check_skip_key, parse_custom_format, only_has_format, split_string, need_translate_str, check_prefix, check_suffix, get_tag_from_rel_path,get_source_from_rel_path, replace_split_values, process_filter_split_values, process_post_filter_split_values, FILTER_SUPPORT_PAGES, normalize_tagless_text
 from app.core.database import DBDictionary
-# 添加jsonpath_ng的导入
-from jsonpath_ng import parse
-from jsonpath_ng.ext import parse as ext_parse
 
 
 class _LockedTagDictionaryAdapter:

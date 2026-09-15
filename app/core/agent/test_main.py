@@ -1,6 +1,8 @@
 from unittest.mock import Mock
 
-from app.core.agent import main as agent_main
+from langchain_core.messages import AIMessage, AIMessageChunk
+
+from app.core.agent import agent as agent_main
 
 
 def _build_agent(monkeypatch):
@@ -31,7 +33,8 @@ def test_agent_ignores_environment_proxy_by_default(monkeypatch):
     model_kwargs = agent_main.ChatOpenAI.call_args.kwargs
     assert model_kwargs["http_client"] is http_client
     assert model_kwargs["max_retries"] == 3
-    assert model_kwargs["openai_api_key"] == "test-key"
+    assert model_kwargs["stream_usage"] is True
+    assert model_kwargs["api_key"].get_secret_value() == "test-key"
     assert agent.agent is chat_model
 
 
@@ -49,3 +52,112 @@ def test_agent_connection_settings_can_be_overridden(monkeypatch):
     assert timeout.read == 45.0
     assert timeout.connect == 8.0
     assert agent_main.ChatOpenAI.call_args.kwargs["max_retries"] == 5
+
+
+def test_chat_records_standard_token_usage(monkeypatch):
+    agent, _, chat_model = _build_agent(monkeypatch)
+    chat_model.invoke.return_value = AIMessage(
+        content="译文",
+        usage_metadata={
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "total_tokens": 150,
+            "input_token_details": {"cache_read": 80, "cache_creation": 20},
+        },
+    )
+
+    response = agent.chat("source", use_tools=False)
+
+    assert response == "译文"
+    assert agent.last_token_usage == {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "cache_read_tokens": 80,
+        "cache_creation_tokens": 20,
+        "cache_read_available": True,
+        "cache_creation_available": True,
+    }
+    assert agent.format_last_token_usage() == (
+        "📊 Token：输入=120 | 输出=30 | 缓存命中=80 | "
+        "缓存未命中/写入=20 | 总计=150"
+    )
+
+
+def test_token_usage_accumulates_tool_rounds_and_provider_cache_fields(monkeypatch):
+    agent, _, _ = _build_agent(monkeypatch)
+    first = AIMessage(
+        content="",
+        response_metadata={
+            "token_usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "total_tokens": 110,
+                "prompt_cache_hit_tokens": 60,
+                "prompt_cache_miss_tokens": 40,
+            }
+        },
+    )
+    second = AIMessage(
+        content="完成",
+        usage_metadata={
+            "input_tokens": 140,
+            "output_tokens": 20,
+            "total_tokens": 160,
+        },
+    )
+
+    agent.last_token_usage = agent._empty_token_usage()
+    agent._record_token_usage(first)
+    agent._record_token_usage(second)
+
+    assert agent.last_token_usage == {
+        "input_tokens": 240,
+        "output_tokens": 30,
+        "total_tokens": 270,
+        "cache_read_tokens": 60,
+        "cache_creation_tokens": 40,
+        "cache_read_available": True,
+        "cache_creation_available": True,
+    }
+
+
+def test_token_usage_marks_unreported_cache_details(monkeypatch):
+    agent, _, _ = _build_agent(monkeypatch)
+    agent.last_token_usage = {
+        **agent._empty_token_usage(),
+        "input_tokens": 12,
+        "output_tokens": 3,
+        "total_tokens": 15,
+    }
+
+    assert agent.format_last_token_usage() == (
+        "📊 Token：输入=12 | 输出=3 | 缓存命中=未提供 | "
+        "缓存未命中/写入=未提供 | 总计=15"
+    )
+
+
+def test_streaming_chat_records_usage_from_final_chunk(monkeypatch):
+    agent, _, chat_model = _build_agent(monkeypatch)
+    chat_model.stream.return_value = iter(
+        [
+            AIMessageChunk(content="译"),
+            AIMessageChunk(
+                content="文",
+                usage_metadata={
+                    "input_tokens": 50,
+                    "output_tokens": 2,
+                    "total_tokens": 52,
+                    "input_token_details": {"cache_read": 30},
+                },
+            ),
+        ]
+    )
+
+    chunks = list(agent.chat("source", use_tools=False, stream=True))
+
+    assert chunks == ["译", "文"]
+    assert agent.last_token_usage["input_tokens"] == 50
+    assert agent.last_token_usage["output_tokens"] == 2
+    assert agent.last_token_usage["total_tokens"] == 52
+    assert agent.last_token_usage["cache_read_tokens"] == 30

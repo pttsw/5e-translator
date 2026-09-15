@@ -10,6 +10,7 @@ from app.core.utils import Job, TranslatorStatus, clean_5etools_json
 from app.core.database import DatabaseAdapter
 from .siliconflow_adapter import SiliconFlowAdapter, resolve_llm_api_key
 from .mock_adapter import MockAdapter
+from .job_persister import persist_completed_job
 from .llm_factory import LLMFactory
 from app.core.utils import Job, replace_cn_pattern, need_translate_str, check_prefix, check_suffix, parse_custom_format, format_llm_msg, parse_foundry_items_uuid_format, FILTER_SUPPORT_PAGES
 from typing import List, Tuple, Optional
@@ -49,6 +50,8 @@ class JobProcessor(Runnable):
         self.cache_lock = threading.Lock()
         self.terms_file_path = '/tmp/terms.csv'
         self.translation_aliases = {}
+        self.output_root = OUT_PATH
+        self.prompt_suffix = ""
 
         
     def invoke(self, input, config=None, **kwargs):
@@ -58,6 +61,8 @@ class JobProcessor(Runnable):
         self.mode = config['metadata'].get('mode', '5et')
         self.cache = config['metadata'].get('cache', True)
         self.use_ai = config['metadata'].get('use_ai', self.use_ai)
+        self.output_root = config['metadata'].get('output_root', OUT_PATH)
+        self.prompt_suffix = config['metadata'].get('prompt_suffix', '')
         if self.byhand:
             # 手动模式，串行执行
             self.thread_num = 1
@@ -105,7 +110,7 @@ class JobProcessor(Runnable):
                 except Exception:
                     failed = []
 
-                failed_path = os.path.join(OUT_PATH, res.out_path + '.failed_jobs.json')
+                failed_path = os.path.join(self.output_root, res.out_path + '.failed_jobs.json')
                 try:
                     os.makedirs(os.path.dirname(failed_path), exist_ok=True)
 
@@ -130,7 +135,8 @@ class JobProcessor(Runnable):
     def __load_temple_terms(self, job_list, out_path):
         with self.cache_lock:
             self.temple_terms.clear()
-        self.terms_file_path = os.path.join(OUT_PATH, out_path+".terms.csv")
+        self.terms_file_path = os.path.join(getattr(self, 'output_root', OUT_PATH), out_path+".terms.csv")
+        os.makedirs(os.path.dirname(self.terms_file_path), exist_ok=True)
         if os.path.exists(self.terms_file_path):
             with open(self.terms_file_path, "r") as terms_file:
                 loaded_term_list = csv.reader(terms_file)
@@ -245,7 +251,7 @@ class JobProcessor(Runnable):
                         job.cn_str = input_str
                     return job, TranslatorStatus.SUCCESS
             
-            msg, status = self.adapter.sendText(request, promot)
+            msg, status = self.adapter.sendText(request, promot + getattr(self, 'prompt_suffix', ''))
             if status != TranslatorStatus.SUCCESS:
                 logger.warning(f'获取结果错误:{msg}')
                 return None, status
@@ -379,34 +385,9 @@ class JobProcessor(Runnable):
         if job is None or job.cn_str is None:
             return False
         if self.update and job.need_translate and self.use_ai:
-            if job.sql_id is None:
-                logger.info(f"处理完成任务:{job.en_str}, 中文:{job.cn_str}")
-                ok = self.dictionary.put(
-                    job.en_str,
-                    job.cn_str,
-                    job.rel_path,
-                    proofread=self.byhand,
-                    tag=job.tag,
-                    job_context=job,
-                )
-                if not ok:
-                    logger.error(f"写入字典失败:{job}")
-                    return False
-                if isinstance(ok, int) and not isinstance(ok, bool):
-                    job.sql_id = ok
-            else:
-                ok = self.dictionary.update(
-                    job.sql_id,
-                    job.en_str,
-                    job.cn_str,
-                    proofread=self.byhand,
-                    tag=job.tag,
-                    rel_f=job.rel_path,
-                    job_context=job,
-                )
-                if not ok:
-                    logger.error(f"更新字典失败:{job}")
-                    return False
+            if not persist_completed_job(self.dictionary, job, proofread=self.byhand):
+                logger.error(f"写入字典失败:{job}")
+                return False
         if job not in self.done_jobs:
             self.done_jobs.append(job)
         return True

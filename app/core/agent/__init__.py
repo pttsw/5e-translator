@@ -1,1 +1,1 @@
-from .main import DNDTranslatorAgent
+from .agent import DNDTranslatorAgent

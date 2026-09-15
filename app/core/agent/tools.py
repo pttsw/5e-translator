@@ -32,7 +32,7 @@ class ToolRegistry:
             name="search_buquanshu",
             function=self.search_buquanshu,
             description=(
-                "可搜索实体的汉化内容，返回不全书的标题、分类、来源路径、相关度、内容预览和网页链接"
+                "输入法术、怪物、物品等实体的名字，输出全部中文介绍"
             ),
             parameters={
                 "type": "object",

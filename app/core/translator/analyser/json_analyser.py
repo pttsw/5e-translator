@@ -19,7 +19,9 @@ from .decks_analyser import DecksAnalyser
 
 
 class JsonAnalyser(Runnable):
-    def __init__(self) -> (None):
+    def __init__(self, source_root=None, read_only=False) -> (None):
+        self.source_root = os.path.realpath(source_root) if source_root else None
+        self.read_only = read_only
         self.job_list: List[Job] = []  # Job列表，存放所有Job
         self.name_list: List[str] = []  # 存放所有name的值（目前仅用于更新数据库的is_key字段）
         self.ok = self.__init_dictionary()  # 初始化字典
@@ -51,7 +53,10 @@ class JsonAnalyser(Runnable):
         # print(config)
         for j in inputs:
             self.en_obj = None
-            if self.mode == '5et':
+            if self.source_root is not None:
+                if os.path.commonpath([os.path.realpath(j), self.source_root]) != self.source_root:
+                    raise ValueError('Source path is outside source_root')
+            elif self.mode == '5et':
                 # 判断j是否在EN_PATH下的文件
                 if not j.startswith(EN_PATH):
                     logger.error(f"JsonAnalyser: 文件{j}不在{EN_PATH}目录下，跳过处理")
@@ -106,7 +111,8 @@ class JsonAnalyser(Runnable):
 
             #     yield FileWorkInfo(job_list, obj, self.rel_path, self.rel_path)
             if self.mode == 'splited':
-                self.__update_file_table(self.en_obj, get_rel_path(j, SPLITED_5ETOOLS_EN_PATH), self.rel_path, job_list)
+                if not self.read_only:
+                    self.__update_file_table(self.en_obj, get_rel_path(j, SPLITED_5ETOOLS_EN_PATH), self.rel_path, job_list)
                 yield FileWorkInfo(job_list, obj, self.rel_path, get_rel_path(j, SPLITED_5ETOOLS_EN_PATH))
             elif self.mode == 'plu':
                 yield FileWorkInfo(job_list, obj, self.rel_path, self.rel_path.replace('plu/', ''))
@@ -157,7 +163,9 @@ class JsonAnalyser(Runnable):
 
         en_json_obj = None
         # 获取相对路径，这个路径会根据是否是PLU的源数据来做不同的处理
-        if self.mode == 'plu':
+        if self.source_root is not None and self.mode != 'splited':
+            self.rel_path = get_rel_path(json_file, self.source_root)
+        elif self.mode == 'plu':
             self.rel_path = get_rel_path(json_file, PLU_EN_PATH)
         elif self.mode == 'dbd':
             self.rel_path = os.path.join("dbd", get_rel_path(json_file, PLU_DBD_PATH))

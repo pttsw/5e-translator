@@ -38,6 +38,10 @@ class JsonGenerator(Runnable):
         self._unique_translation_by_en = {}
         self._translation_cache = {}
         self.update_dictionary_during_generation = False
+
+    def sync_tag_only_cn(self, cn_str: str, old_en_str: Optional[str], new_en_str: str, tag=""):
+        """Public compatibility hook shared by legacy and workflow generation."""
+        return self.__sync_tag_only_cn(cn_str, old_en_str, new_en_str, tag)
         
     def invoke(self, input, config=None, **kwargs):
         inputs = [input] if isinstance(input, str) else input

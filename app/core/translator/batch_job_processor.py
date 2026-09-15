@@ -30,6 +30,8 @@ class BatchJobProcessor(JobProcessor):
         self.force = config['metadata'].get('force', False)
         self.mode = config['metadata'].get('mode', '5et')
         self.cache = config['metadata'].get('cache', True)
+        self.output_root = config['metadata'].get('output_root', OUT_PATH)
+        self.prompt_suffix = config['metadata'].get('prompt_suffix', '')
         self.batch_max_chars = config['metadata'].get('batch_max_chars', 12000)
         if self.byhand:
             self.thread_num = 1
@@ -91,7 +93,7 @@ class BatchJobProcessor(JobProcessor):
             return None, TranslatorStatus.FAILURE
         msg, status = self.adapter.sendText(
             request,
-            PROMOT_BATCH,
+            PROMOT_BATCH + getattr(self, 'prompt_suffix', ''),
             structured_output=True,
             response_mode="batch",
         )
@@ -287,7 +289,7 @@ class BatchJobProcessor(JobProcessor):
         return True
 
     def _dump_failed_jobs(self, out_path: str, failed_jobs: List[Job]):
-        failed_path = os.path.join(OUT_PATH, out_path + '.failed_jobs.json')
+        failed_path = os.path.join(getattr(self, 'output_root', OUT_PATH), out_path + '.failed_jobs.json')
         try:
             os.makedirs(os.path.dirname(failed_path), exist_ok=True)
             with open(failed_path, 'w') as fh:
@@ -296,7 +298,7 @@ class BatchJobProcessor(JobProcessor):
             logger.error(f'写出 failed_jobs 文件失败: {exc}')
 
     def _dump_failed_batches(self, out_path: str, failed_units: List[BatchUnit]):
-        failed_path = os.path.join(OUT_PATH, out_path + '.failed_batches.json')
+        failed_path = os.path.join(getattr(self, 'output_root', OUT_PATH), out_path + '.failed_batches.json')
         try:
             os.makedirs(os.path.dirname(failed_path), exist_ok=True)
             payload = []
