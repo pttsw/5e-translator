@@ -238,6 +238,12 @@ class MemoryDBDictionary:
             return [record for record in self.store_records if record["en"].lower() == lower_en]
         return [record for record in self.store_records if record["en"] == en]
 
+    def get_reuse_candidates(self, en, rel_f=""):
+        """Read all candidates and location evidence without recording usage."""
+        return [dict(self._to_bean(row), usages=[dict(u) for u in self.word_usage
+                    if u['word_id'] == row['id'] and u['file'] == rel_f])
+                for row in self._query_store(en, ignore_case=True)]
+
     def get(self, k: str, rel_f="", load_from_sql=False, ignore_case=False, tag="", correct_tag_from_db=False, job_context=None):
         usage_match = self._get_usage_match(k, tag, rel_f, job_context, ignore_case=ignore_case) if load_from_sql else None
         if usage_match is not None:

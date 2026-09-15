@@ -21,7 +21,12 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(MemoryDBDictionary, '_instance', None)
     source = tmp_path / 'source'
     source.mkdir()
-    return AgentOptions(source, tmp_path / 'output', thread_num=1), MemoryDBDictionary()
+    project = tmp_path / '5etools'
+    project.mkdir()
+    (project / 'check.py').write_text('import json, sys; json.load(open(sys.argv[1]))')
+    import sys
+    return AgentOptions(source, tmp_path / 'output', thread_num=1, regression_root=project,
+                        regression_command=(sys.executable, 'check.py', '{candidate}')), MemoryDBDictionary()
 
 
 def write_source(options, name='spells/spells-test.json'):
@@ -87,7 +92,7 @@ def test_real_pipeline_offline_and_legacy_compatibility(workspace, monkeypatch):
     events = []
     state = TranslationGraph(options).invoke('/file spells/spells-test.json', on_progress=lambda s: events.append(s['stage']))
     assert state['progress']['success'] == 1, state
-    assert events == ['analyse_and_reuse', 'translate', 'generate', 'validate', 'persist_and_write']
+    assert events == ['analyse_and_reuse', 'detect_conflicts', 'translate', 'generate', 'validate', 'persist_and_write']
     result = state['file_results'][0]
     assert source.read_bytes() == original
     output = json.loads(Path(result['output_path']).read_text())
@@ -110,6 +115,8 @@ def test_real_pipeline_offline_and_legacy_compatibility(workspace, monkeypatch):
     for stage in [JobNeedTranslateSetter(), KnowledgeSetter(), ByHandHandler(), TermSetter(),
                   BatchJobProcessor(1, update=False), JsonGenerator(1)]:
         infos = list(stage.invoke(infos, config=config))
+    from app.core.agent.validation import remove_generated_names
+    remove_generated_names(json.loads(original), infos[0].cn_obj)
     assert infos[0].cn_obj == output
     saved_jobs = json.loads(Path(result['cache_paths'][1]).read_text())
     assert {job.uid for job in infos[0].job_list} == {job['uid'] for job in saved_jobs}

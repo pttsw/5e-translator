@@ -47,6 +47,8 @@ class LLMFactory:
         self.progress_label = "Current"
         self.progress_total_weight = 0
         self.progress_completed_weight = 0
+        self.cancel_event = None
+        self.cancelled = False
 
     def reset(self):
         self.job_count = 0
@@ -55,6 +57,8 @@ class LLMFactory:
         self.job_queue.clear()
         self.res_obj.clear()
         self.add_finish = False
+        self.cancelled = False
+        self.failed_jobs.clear()
         self.progress_total_weight = 0
         self.progress_completed_weight = 0
         console_progress.clear_file()
@@ -127,6 +131,11 @@ class LLMFactory:
         self._render_progress()
         if reason:
             logger.error(reason)
+
+    def cancel_pending(self):
+        """Stop at work-item boundaries while allowing already running calls to finish."""
+        self.cancelled = True
+        self.abort(reason="任务已收到取消请求；未开始的翻译单元已停止")
 
     def get_job(self):
         self.lock.acquire()
@@ -229,6 +238,9 @@ def kimi_work(factory: LLMFactory, work_func,
             if factory.isFinish():
                 break
     while not factory.isFinish():
+        if factory.cancel_event is not None and factory.cancel_event.is_set():
+            factory.cancel_pending()
+            return
         job = factory.get_job()
         if job is None:
             time.sleep(1)

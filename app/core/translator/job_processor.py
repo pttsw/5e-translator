@@ -55,6 +55,8 @@ class JobProcessor(Runnable):
 
         
     def invoke(self, input, config=None, **kwargs):
+        config = config or {'metadata': {}}
+        self.config = config
         inputs = [input] if isinstance(input, str) else input
         self.byhand = config['metadata'].get('byhand', False)
         self.force = config['metadata'].get('force', False)
@@ -63,6 +65,7 @@ class JobProcessor(Runnable):
         self.use_ai = config['metadata'].get('use_ai', self.use_ai)
         self.output_root = config['metadata'].get('output_root', OUT_PATH)
         self.prompt_suffix = config['metadata'].get('prompt_suffix', '')
+        self.checkpoint_callback = config['metadata'].get('checkpoint_callback')
         if self.byhand:
             # 手动模式，串行执行
             self.thread_num = 1
@@ -71,6 +74,7 @@ class JobProcessor(Runnable):
         if not self.ok:
             logger.error(f"初始化LLM工厂失败")
             return
+        self.factory.cancel_event = config['metadata'].get('cancel_event')
         
         for res in inputs:
             logger.info(f"开始处理 {res.json_path} 中的Job")
@@ -329,6 +333,9 @@ class JobProcessor(Runnable):
             """
             if not self._store_completed_job(job):
                 logger.error(f"处理完成任务错误:{job}")
+            callback = getattr(self, 'checkpoint_callback', None)
+            if callback is not None:
+                callback()
 
         self.factory = LLMFactory(
             work_num=self.thread_num,

@@ -255,6 +255,9 @@ def test_task_tool_results_are_lazy_cached_and_never_enter_other_requests():
     adapter.sendText('next source', 'JSON only')
     assert len(requests[-1]) == 2
     assert 'secret-session-reference' not in str(requests[-1])
+    bound_tools = model.bind_tools.call_args.args[0]
+    assert bound_tools
+    assert all(tool['function']['strict'] is True for tool in bound_tools)
 
 
 def test_tool_round_limit_and_failures():

@@ -30,6 +30,11 @@ class AgentOptions:
     force_title: bool = False
     reference_roots: tuple[Path, ...] = ()
 
+    regression_root: Path | None = None
+    regression_command: tuple[str, ...] = ()
+    regression_data_dir: str = 'data'
+    regression_timeout: float = 300
+
     def __post_init__(self):
         source = Path(self.source_root).expanduser().resolve(strict=True)
         output = Path(self.output_root).expanduser().resolve()
@@ -37,6 +42,16 @@ class AgentOptions:
             raise CommandError('源目录必须是目录')
         if contained(output, source) or contained(source, output):
             raise CommandError('源目录与输出目录不能重叠')
+        if self.regression_root is not None:
+            root = Path(self.regression_root).expanduser().resolve(strict=True)
+            if not root.is_dir() or contained(output, root) or contained(root, output):
+                raise CommandError('回归项目与输出目录不能重叠')
+            object.__setattr__(self, 'regression_root', root)
+        data_dir = Path(self.regression_data_dir)
+        if data_dir.is_absolute() or '..' in data_dir.parts or self.regression_timeout <= 0:
+            raise CommandError('回归目录或超时配置无效')
+        if isinstance(self.regression_command, str) or not all(isinstance(a, str) for a in self.regression_command):
+            raise CommandError('回归命令必须为参数数组')
         if self.mode not in {'5et', 'homebrew', 'ua'}:
             raise CommandError('阶段 A 支持 5et、homebrew 和 ua 模式')
         if self.thread_num < 1 or self.batch_max_chars < 1:
@@ -49,9 +64,14 @@ class AgentOptions:
     @classmethod
     def from_environment(cls):
         import os
+        import json
         from config import EN_PATH, OUT_PATH
         return cls(Path(os.getenv('TRANSLATION_AGENT_SOURCE_ROOT', EN_PATH)),
                    Path(os.getenv('TRANSLATION_AGENT_OUTPUT_ROOT', OUT_PATH)),
+                   regression_root=Path(os.environ['TRANSLATION_AGENT_REGRESSION_ROOT']) if os.getenv('TRANSLATION_AGENT_REGRESSION_ROOT') else None,
+                   regression_command=tuple(json.loads(os.getenv('TRANSLATION_AGENT_REGRESSION_COMMAND', '[]'))),
+                   regression_data_dir=os.getenv('TRANSLATION_AGENT_REGRESSION_DATA_DIR', 'data'),
+                   regression_timeout=float(os.getenv('TRANSLATION_AGENT_REGRESSION_TIMEOUT', '300')),
                    mode=os.getenv('TRANSLATION_AGENT_MODE', '5et'),
                    reference_roots=tuple(Path(root) for root in os.getenv('TRANSLATION_AGENT_REFERENCE_ROOTS', '').split(os.pathsep) if root))
 

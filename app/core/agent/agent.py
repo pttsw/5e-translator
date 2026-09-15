@@ -333,45 +333,42 @@ class DNDTranslatorAgent:
     def interactive_mode(self, stream:bool = True):
         """Run interactive chat mode with optional streaming"""
         print("\n" + "="*60)
-        print("💬 INTERACTIVE MODE" + (" (STREAMING)" if stream else ""))
+        print("💬 交互模式" + (" (STREAMING)" if stream else ""))
         print("="*60)
-        print("\nYou can now chat with the AI agent. It has access to various tools:")
+        print("\n现在你可以与ai助手进行对话:")
 
         registry = ToolRegistry()
         tools = registry.get_tools_schemas()
         
-        print("\n📦 Available Tools:")
+        print("\n📦 可用工具:")
         for i, tool in enumerate(tools, 1):
             func = tool["function"]
             print(f"  {i}. {func['name']}: {func['description']}")
         
         while True:
             try:
-                user_input = input("\n👤 You: ").strip()
+                user_input = input("\n👤 你: ").strip()
                 
                 if not user_input:
                     continue
                 
                 # Handle commands
-                if user_input.lower() == "/exit" or user_input.lower() == "quit":
+                if user_input.lower() == "quit":
                     print("👋 拜拜！")
                     break
-                elif user_input.lower() == "/clear":
-                    print(self.execute_command('/clear'))
-                    continue
                 elif user_input.startswith('/'):
                     print(self.execute_command(user_input, on_progress=self._print_file_progress))
                     continue
                         
                     
-                print("\n⏳ Processing...")
+                print("\n⏳ 处理中...")
                 response = self.chat(user_input, stream=False)
                 
-                print(f"🤖 Assistant: {response}")
+                print(f"🤖 助手: {response}")
                 print(self.format_last_token_usage())
                 
             except KeyboardInterrupt:
-                print("\n\n👋 Goodbye!")
+                print("\n\n👋 拜拜！")
                 break
             except Exception as e:
                 print(f"❌ Error: {e}")

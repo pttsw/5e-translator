@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import threading
 from typing import Optional
 
 import httpx
@@ -20,6 +21,7 @@ from openai import (
 from pydantic import BaseModel, ValidationError
 
 from app.core.utils import TranslatorStatus, format_llm_msg
+from app.core.agent.token_usage import add_response_usage, empty_token_usage
 from config import *
 
 
@@ -77,6 +79,8 @@ def resolve_llm_api_key(
 class SiliconFlowAdapter:
     def __init__(self, api_key, promot="", knowledge_promot=""):
         self.retry_time = 0
+        self.token_usage = empty_token_usage()
+        self.token_usage_lock = threading.Lock()
         self.access_time = 0
         self.id = "None"
         self.base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
@@ -293,6 +297,9 @@ class SiliconFlowAdapter:
 
         if not isinstance(result, dict):
             return None
+        raw_response = result.get('raw')
+        if raw_response is not None:
+            self.record_token_usage(raw_response)
 
         parsing_error = result.get("parsing_error")
         if parsing_error is not None:
@@ -321,7 +328,12 @@ class SiliconFlowAdapter:
             ),
         )
         message = local_llm.bind(max_tokens=token_budget).invoke(data)
+        self.record_token_usage(message)
         return message.content
+
+    def record_token_usage(self, response):
+        with self.token_usage_lock:
+            add_response_usage(self.token_usage, response)
 
     def __wait(self, second):
         logger.info(f"已到达使用限制，{second / 60}分钟后重试")

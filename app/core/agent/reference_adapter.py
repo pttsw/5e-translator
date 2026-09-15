@@ -27,7 +27,15 @@ class ReferenceToolAdapter:
         messages = [SystemMessage(content=promot + TOOL_PROMPT), HumanMessage(content=text)]
         cache, spent = {}, 0
         try:
-            model = self.adapter.llm.bind_tools(self.registry.get_tools_schemas()).bind(
+            tools = self.registry.get_tools_schemas()
+            # The OpenAI client auto-parses tool calls when the wrapped model also
+            # has a response_format. Preformatted tool dictionaries are not made
+            # strict by ChatOpenAI.bind_tools(strict=True), so mark them explicitly.
+            for tool in tools:
+                function = tool.get('function')
+                if isinstance(function, dict):
+                    function['strict'] = True
+            model = self.adapter.llm.bind_tools(tools).bind(
                 max_tokens=min(getattr(self.adapter, 'max_tokens_cap', 8192), 8192), timeout=60)
             for _ in range(self.MAX_ROUNDS):
                 # UTF-8 bytes are a conservative upper bound on text tokens; include schemas.
@@ -36,6 +44,12 @@ class ReferenceToolAdapter:
                 if estimate + spent + 8192 > self.MAX_TOTAL_TOKENS:
                     return None, TranslatorStatus.FAILURE
                 response = model.invoke(messages)
+                recorder = getattr(self.adapter, 'record_token_usage', None)
+                if recorder is not None:
+                    recorder(response)
+                elif hasattr(self.adapter, 'token_usage'):
+                    from .token_usage import add_response_usage
+                    add_response_usage(self.adapter.token_usage, response)
                 spent += (getattr(response, 'usage_metadata', None) or {}).get('total_tokens', 0)
                 calls = getattr(response, 'tool_calls', None) or []
                 if not calls:

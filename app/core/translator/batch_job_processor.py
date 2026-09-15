@@ -40,6 +40,7 @@ class BatchJobProcessor(JobProcessor):
         if not self.ok:
             logger.error("初始化LLM工厂失败")
             return
+        self.factory.cancel_event = config['metadata'].get('cancel_event')
 
         self.chunker = BatchChunker(max_chars=self.batch_max_chars)
         for res in inputs:
@@ -133,6 +134,9 @@ class BatchJobProcessor(JobProcessor):
             for job in batch_unit.jobs:
                 if not self._store_completed_job(job):
                     logger.error(f"处理完成批次Job错误: {job}")
+            callback = self.config.get('metadata', {}).get('checkpoint_callback')
+            if callback is not None:
+                callback()
         return done_func
 
     def _build_batch_request(self, batch_unit: BatchUnit) -> str:
@@ -334,6 +338,18 @@ class BatchJobProcessor(JobProcessor):
         fallback_processor.adapter_transform = getattr(self, 'adapter_transform', None)
         fallback_processor.temporary_term_sink = getattr(self, 'temporary_term_sink', None)
         fallback_results = list(fallback_processor.invoke([fallback_file], config=self.config))
+        parent_adapter = getattr(self, 'adapter', None)
+        child_adapter = getattr(fallback_processor, 'adapter', None)
+        parent_adapter = getattr(parent_adapter, 'adapter', parent_adapter)
+        child_adapter = getattr(child_adapter, 'adapter', child_adapter)
+        if hasattr(parent_adapter, 'token_usage') and hasattr(child_adapter, 'token_usage'):
+            from app.core.agent.token_usage import merge_token_usage
+            lock = getattr(parent_adapter, 'token_usage_lock', None)
+            if lock is None:
+                merge_token_usage(parent_adapter.token_usage, child_adapter.token_usage)
+            else:
+                with lock:
+                    merge_token_usage(parent_adapter.token_usage, child_adapter.token_usage)
         if not fallback_results:
             return failed_jobs
 

@@ -20,7 +20,7 @@ def parse_command(text: str) -> Command:
     except ValueError as exc:
         raise CommandError('路径引号未闭合') from exc
     if not parts or parts[0] not in {'/file', '/ref', '/clear', '/refs', '/clear-refs', '/status', '/retry', '/cancel'}:
-        raise CommandError('未知命令；支持 /file、/ref、/refs、/clear-refs 和 /clear')
+        raise CommandError('未知命令；支持 /file、/ref、/refs、/clear-refs、/status、/retry、/cancel 和 /clear')
     name = parts[0]
     if name in {'/file', '/ref'}:
         if len(parts) < 2:
