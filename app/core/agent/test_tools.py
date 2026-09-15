@@ -31,8 +31,7 @@ class FakeTermDB:
 def test_default_tool_is_registered_with_valid_schema():
     registry = ToolRegistry()
 
-    assert "search_terms" in registry.tools
-    assert "search_buquanshu" in registry.tools
+    assert set(registry.tools) == {"lookup_translations", "lookup_entities"}
 
     schemas = registry.get_tools_schemas()
     assert len(schemas) == 2
@@ -41,21 +40,12 @@ def test_default_tool_is_registered_with_valid_schema():
     function_schema = next(
         schema["function"]
         for schema in schemas
-        if schema["function"]["name"] == "search_terms"
+        if schema["function"]["name"] == "lookup_translations"
     )
-    assert function_schema["name"] == "search_terms"
+    assert function_schema["name"] == "lookup_translations"
     assert function_schema["description"]
-    assert function_schema["parameters"] == {
-        "type": "object",
-        "properties": {
-            "en_list": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "English words to search",
-            }
-        },
-        "required": ["en_list"],
-    }
+    assert function_schema['parameters']['required'] == ['en_list']
+    assert function_schema['parameters']['properties']['en_list']['type'] == 'array'
 
 
 def test_register_tool_adds_schema_and_callable():
@@ -149,20 +139,15 @@ def test_search_terms_returns_known_unknown_and_phrase_terms(monkeypatch):
     ]
 
 
-def test_search_terms_can_be_called_through_registry(monkeypatch):
+def test_search_terms_is_not_model_visible(monkeypatch):
     monkeypatch.setattr("app.core.database.RedisDB", FakeTermDB)
 
     result = ToolRegistry().execute_tool("search_terms", {"en_list": ["light"]})
 
-    assert json.loads(result) == {
-        "light": [
-            {"cn": "光照", "category": "normal"},
-            {"cn": "光亮术", "category": "spell"},
-        ]
-    }
+    assert json.loads(result) == {'error': "Tool 'search_terms' not found"}
 
 
-def test_search_buquanshu_can_be_called_through_registry(monkeypatch):
+def test_search_buquanshu_remains_an_internal_provider(monkeypatch):
     search = Mock(return_value={"total": 1, "results": [{"title": "火球术"}]})
     searcher = Mock()
     searcher.search = search
@@ -173,12 +158,9 @@ def test_search_buquanshu_can_be_called_through_registry(monkeypatch):
         Mock(return_value=searcher),
     )
 
-    result = ToolRegistry().execute_tool(
-        "search_buquanshu",
-        {"keyword": "火球术", "title_only": True, "page_size": 5},
-    )
+    result = ToolRegistry.search_buquanshu(keyword='火球术', title_only=True, page_size=5)
 
-    assert json.loads(result) == {
+    assert result == {
         "total": 1,
         "results": [{"title": "火球术"}],
     }

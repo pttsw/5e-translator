@@ -65,7 +65,7 @@ def test_path_policy_and_discovery(workspace, tmp_path):
 def test_empty_directory_and_unsupported_command(workspace):
     options, _ = workspace
     graph = TranslationGraph(options)
-    for text in ['/file .', '/ref .', '/filex .']:
+    for text in ['/file .', '/retry', '/filex .']:
         assert graph.invoke(text)['stage'] == 'failed'
 
 

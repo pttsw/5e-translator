@@ -55,6 +55,11 @@ class TranslationNodes:
     def translate(self, state, result):
         from app.core.translator.batch_job_processor import BatchJobProcessor
         self.processor = BatchJobProcessor(self.options.thread_num, update=False)
+        references = getattr(self, 'references', None)
+        if references is not None:
+            from .reference_adapter import ReferenceToolAdapter
+            self.processor.adapter_transform = lambda adapter: ReferenceToolAdapter(adapter, references)
+            references.temporary.bind(self.processor)
         if not self.processor.ok:
             raise StageError('processor_initialization_failed')
         if not list(self.processor.invoke([self.info], config=self.config)):

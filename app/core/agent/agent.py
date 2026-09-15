@@ -199,7 +199,8 @@ class DNDTranslatorAgent:
                     lock = self._translation_graph_lock = Lock()
                 with lock:
                     if getattr(self, 'translation_graph', None) is None:
-                        self.translation_graph = build_graph(getattr(self, 'translation_options', None))
+                        self.translation_graph = build_graph(getattr(self, 'translation_options', None),
+                                                             references=self._get_tool_registry().references)
             state = self.translation_graph.invoke(message, on_progress=on_progress)
             return json.dumps(state, ensure_ascii=False, indent=2)
         except (CommandError, OSError) as exc:

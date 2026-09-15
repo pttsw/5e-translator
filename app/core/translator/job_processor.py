@@ -216,6 +216,10 @@ class JobProcessor(Runnable):
             if not ok:
                 logger.error(f"加载LLM中间件失败")
                 return False
+            transform = getattr(self, 'adapter_transform', None)
+            if transform is not None:
+                self.adapter = transform(self.adapter)
+            self.adapter_ready = True
             return True
 
     def __init_factory(self):

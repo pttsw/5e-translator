@@ -1,7 +1,7 @@
 import os
 import re
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 
@@ -132,3 +132,66 @@ class BuquanshuSearcher:
             "preview": preview,
             "url": urljoin(self.site_url, quote(path, safe="/%:@?&=+#")) if path else "",
         }
+
+    def fetch_page(self, url: str, max_bytes: int = 2 * 1024 * 1024):
+        """Fetch only same-origin public-site HTML; validate every redirect hop."""
+        import ipaddress
+        import socket
+        import time
+        from bs4 import BeautifulSoup
+        from .references import ReferenceBlock
+
+        origin = urlsplit(self.site_url)
+
+        def validate(target):
+            parsed = urlsplit(target)
+            if (parsed.scheme != 'https' or parsed.hostname != origin.hostname
+                    or parsed.port != origin.port or parsed.username or parsed.password):
+                raise BuquanshuSearchError('page_origin_not_allowed')
+            addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+            if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
+                raise BuquanshuSearchError('page_address_not_public')
+
+        deadline = time.monotonic() + 25
+        for _ in range(4):
+            validate(url)
+            with self.http_client.stream('GET', url, follow_redirects=False, timeout=10) as response:
+                if response.is_redirect:
+                    url = urljoin(url, response.headers.get('location', ''))
+                    continue
+                response.raise_for_status()
+                if 'html' not in response.headers.get('content-type', '').lower():
+                    raise BuquanshuSearchError('page_not_html')
+                parts, size = [], 0
+                for part in response.iter_bytes():
+                    size += len(part)
+                    if size > max_bytes or time.monotonic() > deadline:
+                        raise BuquanshuSearchError('page_budget_exceeded')
+                    parts.append(part)
+                soup = BeautifulSoup(b''.join(parts), 'html.parser')
+                for node in soup.select('script, style, nav, header, footer, noscript'):
+                    node.decompose()
+                root = soup.select_one('article, main, #mw-content-text, .mw-parser-output, #content') or soup.body or soup
+                # Build paragraph-preserving text with heading levels and DOM evidence.
+                blocks, texts, offset = [], [], 0
+                for node in root.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'tr']):
+                    if node.find_parent(['p', 'li', 'tr']):
+                        continue
+                    value = node.get_text(' ', strip=True)
+                    if not value:
+                        continue
+                    level = int(node.name[1]) if re.fullmatch('h[1-6]', node.name) else 0
+                    blocks.append(ReferenceBlock(value, offset, offset + len(value), level,
+                                                 f'{node.name}:{len(blocks)}'))
+                    texts.append(value)
+                    offset += len(value) + 1
+                if not texts:
+                    from .references import text_blocks
+                    text = root.get_text('\n', strip=True)
+                    blocks = text_blocks(text)
+                else:
+                    text = '\n'.join(texts)
+                if not text.strip():
+                    raise BuquanshuSearchError('page_empty')
+                return {'url': url, 'text': text, 'blocks': blocks, 'complete': True}
+        raise BuquanshuSearchError('page_redirect_limit')

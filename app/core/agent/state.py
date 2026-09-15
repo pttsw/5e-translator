@@ -8,7 +8,7 @@ from .commands import CommandError, contained
 class TranslationAgentState(TypedDict):
     command: str
     source_paths: list[str]
-    reference_chunks: list[dict]
+    reference_index_ids: list[str]
     options: dict
     file_results: list[dict]
     current_file: str | None
@@ -28,6 +28,7 @@ class AgentOptions:
     cache: bool = True
     force: bool = False
     force_title: bool = False
+    reference_roots: tuple[Path, ...] = ()
 
     def __post_init__(self):
         source = Path(self.source_root).expanduser().resolve(strict=True)
@@ -42,6 +43,8 @@ class AgentOptions:
             raise CommandError('线程数与批次预算必须大于零')
         object.__setattr__(self, 'source_root', source)
         object.__setattr__(self, 'output_root', output)
+        object.__setattr__(self, 'reference_roots', tuple(Path(root).expanduser().resolve(strict=True)
+                                                       for root in self.reference_roots) or (source,))
 
     @classmethod
     def from_environment(cls):
@@ -49,12 +52,14 @@ class AgentOptions:
         from config import EN_PATH, OUT_PATH
         return cls(Path(os.getenv('TRANSLATION_AGENT_SOURCE_ROOT', EN_PATH)),
                    Path(os.getenv('TRANSLATION_AGENT_OUTPUT_ROOT', OUT_PATH)),
-                   mode=os.getenv('TRANSLATION_AGENT_MODE', '5et'))
+                   mode=os.getenv('TRANSLATION_AGENT_MODE', '5et'),
+                   reference_roots=tuple(Path(root) for root in os.getenv('TRANSLATION_AGENT_REFERENCE_ROOTS', '').split(os.pathsep) if root))
 
     def summary(self):
-        return {key: str(value) if isinstance(value, Path) else value for key, value in vars(self).items()}
+        return {key: str(value) if isinstance(value, Path) else
+                [str(root) for root in value] if key == 'reference_roots' else value for key, value in vars(self).items()}
 
 
 def initial_state(command: str, options: AgentOptions) -> TranslationAgentState:
-    return dict(command=command, source_paths=[], reference_chunks=[], options=options.summary(),
+    return dict(command=command, source_paths=[], reference_index_ids=[], options=options.summary(),
                 file_results=[], current_file=None, stage='parse_command', progress={}, errors=[], cancelled=False)

@@ -6,64 +6,30 @@ from .buquanshu_search import BuquanshuSearcher
 class ToolRegistry:
     """翻译智能体工具的注册器"""
     
-    def __init__(self):
+    def __init__(self, references=None):
+        from .reference_tools import ReferenceTools
+        self.references = references if references is not None else ReferenceTools()
         self.tools = {}
         self._register_default_tools()
         
     def _register_default_tools(self):
         """注册默认工具"""
-        self.register_tool(
-            name="search_terms",
-            function=self.search_terms,
-            description="Get standard translation of search terms",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "en_list": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "English words to search"
-                    }
-                },
-                "required": ["en_list"]
+        for name, query_key, filter_key, limit_key, description in [
+            ('lookup_translations', 'en_list', 'category', 'limit_per_term',
+             '按完整英文短语查译文候选，依次优先 term 表、会话参考、不全书、运行临时术语；返回置信度、冲突和证据。'),
+            ('lookup_entities', 'names', 'entity_type', 'limit_per_name',
+             '按中文或英文名称查询完整实体说明，优先会话资料，其次不全书全文；不返回搜索预览作为完整说明。'),
+        ]:
+            properties = {
+                query_key: {'type': 'array', 'items': {'type': 'string', 'maxLength': 200}, 'minItems': 1, 'maxItems': 10},
+                filter_key: {'type': 'string'},
+                limit_key: {'type': 'integer', 'minimum': 1, 'maximum': 10},
             }
-        )
-        self.register_tool(
-            name="search_buquanshu",
-            function=self.search_buquanshu,
-            description=(
-                "输入法术、怪物、物品等实体的名字，输出全部中文介绍"
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "keyword": {
-                        "type": "string",
-                        "description": "搜索词；支持空格、竖线和双引号查询语法"
-                    },
-                    "title_only": {
-                        "type": "boolean",
-                        "description": "是否只搜索页面标题，默认 false"
-                    },
-                    "category": {
-                        "type": "string",
-                        "description": "书籍分类；默认 all，表示全部分类"
-                    },
-                    "page": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "结果页码，默认 1"
-                    },
-                    "page_size": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 20,
-                        "description": "每页结果数，默认 10，最大 20"
-                    }
-                },
-                "required": ["keyword"]
-            }
-        )
+            if name == 'lookup_translations':
+                properties['entity_id'] = {'type': 'string'}
+            self.register_tool(name, getattr(self.references, name), description,
+                               {'type': 'object', 'properties': properties, 'required': [query_key], 'additionalProperties': False})
+
         
     def register_tool(self, name: str, function: callable, description:str, parameters: dict):
         """注册新工具"""
@@ -95,6 +61,9 @@ class ToolRegistry:
             result = self.tools[name]["function"](**arguments)
             return json.dumps(result, ensure_ascii=False, default=str) if isinstance(result, (dict, list)) else str(result)
         except Exception as e:
+            if name in {'lookup_translations', 'lookup_entities'}:
+                return json.dumps({'query': [], 'results': [], 'truncated': False,
+                                   'errors': [{'code': type(e).__name__}]})
             return json.dumps({"error": str(e)})
         
     @staticmethod
