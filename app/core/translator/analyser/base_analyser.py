@@ -52,6 +52,7 @@ class BaseAnalyser:
         self._jobs_by_key_path = {}
         self._dictionary_exact_cache = {}
         self._locked_tag_sync_generator = None
+        self.preserve_job_markers = False
 
     @staticmethod
     def _stable_path_token(value) -> str:
@@ -198,6 +199,7 @@ class BaseAnalyser:
                 j.sql_id = db_res['sql_id']
                 j.is_proofread = db_res['proofread']
                 j.is_key = db_res['is_key']
+                j.exact_translation = db_res.get('exact_translation', False)
         return res_dict, self.job_list
 
     def _get_usage_rel_path(self, en_obj) -> str:
@@ -636,14 +638,21 @@ class BaseAnalyser:
                     # 使用jsonpath作为唯一标识
                     name_jsonpath = name_uid
                     self._add_job(Job(name_jsonpath, en_dict["name"], cn_bean['cn'], rel_path=self.rel_path, tag=tag, knowledge=[
-                    ], current_names=names_in_job, is_proofread=cn_bean['proofread'], is_key=cn_bean['is_key'], sql_id=cn_bean['sql_id'], modified_at=cn_bean['modified_at'], key_path=key_path + '/name', entry_path=key_path, context_key=context_key, context_label=context_label))
-                    if "{@" in en_dict["name"] or "{@" in cn_bean['cn']:
+                    ], current_names=names_in_job, is_proofread=cn_bean['proofread'], is_key=cn_bean['is_key'], sql_id=cn_bean['sql_id'], modified_at=cn_bean['modified_at'], key_path=key_path + '/name', entry_path=key_path, context_key=context_key, context_label=context_label, exact_translation=cn_bean.get('exact_translation', False)))
+                    if (
+                        self.preserve_job_markers
+                        or "{@" in en_dict["name"]
+                        or "{@" in cn_bean['cn']
+                    ):
                         res_dict['name'] = f'{{!@ {name_jsonpath}}}'
                     else:
                         res_dict['name'] = cn_bean['cn']
                     skip_name = True
             elif "{@" not in en_dict["name"] and name_job.cn_str != None:
-                res_dict['name'] = name_job.cn_str
+                res_dict['name'] = (
+                    f'{{!@ {name_job.uid}}}'
+                    if self.preserve_job_markers else name_job.cn_str
+                )
                 skip_name = True
                 # print(res_dict['name'])
         # 递归处理dict的所有字段

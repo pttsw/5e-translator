@@ -901,7 +901,15 @@ class JsonGenerator(Runnable):
                         original_cn = j.cn_str
                         en_tags, en_values, en_valid = parse_custom_format(j.en_str, False)
                         cn_tags, cn_values, cn_valid = parse_custom_format(j.cn_str, False)
-                        if (
+                        # A location explicitly synchronized from a hand-written Chinese
+                        # file is authoritative. Other records still use the normal tag
+                        # repair path, including proofread legacy translations.
+                        preserve_exact_text = bool(
+                            getattr(j, "exact_translation", False)
+                        )
+                        if preserve_exact_text:
+                            replaced_cn, ok = j.cn_str, True
+                        elif (
                             en_valid
                             and cn_valid
                             and len(cn_values) < len(en_values)
@@ -920,8 +928,11 @@ class JsonGenerator(Runnable):
                                     self._unique_translation_by_en[j.en_str] = j.cn_str
                                     self._unique_translation_by_en[j.en_str.lower()] = j.cn_str
                                 self._translation_cache[(j.en_str, j.tag)] = (j.cn_str, True)
-                        replaced_cn, ok = self.__replace_sub_jobs(
-                            j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
+                            replaced_cn, ok = self.__replace_sub_jobs(
+                                j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
+                        else:
+                            replaced_cn, ok = self.__replace_sub_jobs(
+                                j.cn_str, j.en_str, tag=j.tag, base_uid=j.uid)
                         if not ok:
                             aligned_cn, aligned = self.__align_cn_tags_to_en_by_position(
                                 j.cn_str,

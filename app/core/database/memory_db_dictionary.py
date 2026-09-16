@@ -114,6 +114,7 @@ class MemoryDBDictionary:
             "is_key": record["is_key"],
             "sql_id": record["id"],
             "modified_at": record["modified_at"],
+            "exact_translation": False,
         }
         self.dictionary.setdefault(record["en"], [])
         if not any(c["sql_id"] == bean["sql_id"] for c in self.dictionary[record["en"]]):
@@ -152,7 +153,7 @@ class MemoryDBDictionary:
             "context_label": getattr(job, "context_label", "") or "",
         }
 
-    def _put_word_usage(self, word_id: int, rel_f: str, job_context=None):
+    def _put_word_usage(self, word_id: int, rel_f: str, job_context=None, rebind=False):
         if not word_id or not rel_f:
             return True
         context = self._job_usage_context(job_context)
@@ -168,14 +169,17 @@ class MemoryDBDictionary:
         }
         existing = self.usage_by_file_uid.get((rel_f, uid))
         if existing:
-            existing.update({
+            updates = {
                 "file": rel_f,
                 "uid": uid,
                 "key_path": context["key_path"],
                 "context_key": context["context_key"],
                 "context_label": context["context_label"],
                 "version": self.version,
-            })
+            }
+            if rebind:
+                updates["word_id"] = word_id
+            existing.update(updates)
         else:
             self.word_usage.append(usage)
             self.usage_by_file_uid[(rel_f, uid)] = usage
@@ -214,7 +218,19 @@ class MemoryDBDictionary:
                     matches.append(record)
             if matches:
                 proofread = [record for record in matches if record["proofread"] == 1]
-                return self._to_bean(proofread[0] if proofread else matches[0])
+                selected = proofread[0] if proofread else matches[0]
+                bean = self._to_bean(selected)
+                selected_usage = next(
+                    (usage for usage in self.word_usage
+                     if usage["file"] == rel_f
+                     and usage.get(field) == value
+                     and usage["word_id"] == selected["id"]),
+                    None,
+                )
+                bean["exact_translation"] = str(
+                    (selected_usage or {}).get("context_label") or ""
+                ).startswith("__SYNC_CN_EXACT__")
+                return bean
         return None
 
     def _pick_best_match(self, records: List[dict], en: str, tag: str):
@@ -341,9 +357,22 @@ class MemoryDBDictionary:
             return candidates[0]
         return None
 
-    def put(self, key: str, value: str, rel_f: str, proofread=False, tag="", job_context=None, **_kwargs):
-        record = self._insert_record(key, value, "", proofread=proofread, tag=tag)
-        self._put_word_usage(record["id"], rel_f, job_context)
+    def put(self, key: str, value: str, rel_f: str, proofread=False, tag="", job_context=None, rebind_usage=False, **_kwargs):
+        target_tag = tag if tag not in ("", None) else None
+        record = next(
+            (item for item in self.store_records
+             if item["en"] == key and item["cn"] == value
+             and item["category"] == target_tag),
+            None,
+        )
+        if record is None:
+            record = self._insert_record(key, value, "", proofread=proofread, tag=tag)
+        elif proofread:
+            record["proofread"] = 1
+            self._refresh_cache_for_en(record["en"])
+        self._put_word_usage(
+            record["id"], rel_f, job_context, rebind=rebind_usage,
+        )
         return record["id"]
 
     def update(self, sql_id: int, en_or_cn: str, cn=None, proofread: bool = False, tag="", rel_f="", job_context=None):
@@ -356,8 +385,7 @@ class MemoryDBDictionary:
         else:
             record["en"] = en_or_cn
         record["cn"] = cn
-        if proofread:
-            record["proofread"] = 1
+        record["proofread"] = 1 if proofread else 0
         if tag not in ("", None):
             record["category"] = tag
         if old_en != record["en"]:

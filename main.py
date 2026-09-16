@@ -165,7 +165,7 @@ def main():
                                   help='Do not use AI for entries missing from the database; keep English text and translate known tag values')
     translate_parser.add_argument('--skip-file-name', default='', type=str,
                                   help='Skip files whose file name contains this value')
-    translate_parser.add_argument('--simple', dest='simple_mode', action='store_false', default=True)
+    translate_parser.add_argument('--simple', dest='simple_mode', action='store_true', default=False)
     
     search_parser = subparsers.add_parser('search')
     search_parser.add_argument('--query', default='', type=str,
@@ -205,6 +205,18 @@ def main():
                              help='Source JSON file or directory under configured source roots; directories are processed recursively')
     sync_parser.add_argument('--skip-jobs', action='store_true', default=False,
                             help='Only rebuild split files and file table, skip jobs cache')
+
+    sync_cn_parser = subparsers.add_parser(
+        'sync-cn', aliases=['sync-from-cn'],
+        help='从手工中文 JSON 同步译文到数据库，并验证 translate 可复现结果',
+    )
+    sync_cn_parser.add_argument('--en', required=True, type=str,
+                                help='英文 JSON 文件路径')
+    sync_cn_parser.add_argument('--cn', required=True, type=str,
+                                help='手工中文 JSON 文件路径')
+    sync_cn_parser.add_argument('--mode', default='5et', type=str,
+                                choices=('5et', 'splited', 'homebrew', 'plu', 'ua'),
+                                help='与 translate 相同的文件模式，默认 5et')
     
     agent_parser = subparsers.add_parser('agent')
 
@@ -476,6 +488,11 @@ def main():
         with cli_db_app_context():
             res = sync_source_path(args.source_file, rebuild_jobs=not args.skip_jobs)
         print(res)
+    elif args.function in ('sync-cn', 'sync-from-cn'):
+        from app.cli.sync_from_cn import print_sync_summary, sync_from_cn
+
+        summary = sync_from_cn(args.en, args.cn, mode=args.mode)
+        print_sync_summary(summary)
     elif args.function == 'agent':
         from app.core.agent import DNDTranslatorAgent
         agent = DNDTranslatorAgent()

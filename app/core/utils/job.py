@@ -4,7 +4,7 @@ from config import *
 from typing import Tuple
 
 class Job:
-    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, is_key=False, sql_id=None, modified_at=0, source="", key_path="", entry_path="", batch_id="", batch_seq=-1, tag_sync_required=False, old_en_str=None, old_tag=None, context_key="", context_label="") -> (None):
+    def __init__(self, uid: str, en_str, cn_str, rel_path="", tag="", knowledge=[],current_names=[], is_proofread=False, is_key=False, sql_id=None, modified_at=0, source="", key_path="", entry_path="", batch_id="", batch_seq=-1, tag_sync_required=False, old_en_str=None, old_tag=None, context_key="", context_label="", exact_translation=False) -> (None):
         self.uid = str(uid)
         self.en_str = en_str # 英文原文
         self.cn_str = cn_str # 中文译文
@@ -33,6 +33,7 @@ class Job:
         self.old_tag = old_tag
         self.context_key = context_key
         self.context_label = context_label
+        self.exact_translation = exact_translation
         self.context_obj = None
         
     def __str__(self):

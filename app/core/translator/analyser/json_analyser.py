@@ -19,9 +19,10 @@ from .decks_analyser import DecksAnalyser
 
 
 class JsonAnalyser(Runnable):
-    def __init__(self, source_root=None, read_only=False) -> (None):
+    def __init__(self, source_root=None, read_only=False, preserve_job_markers=False) -> (None):
         self.source_root = os.path.realpath(source_root) if source_root else None
         self.read_only = read_only
+        self.preserve_job_markers = preserve_job_markers
         self.job_list: List[Job] = []  # Job列表，存放所有Job
         self.name_list: List[str] = []  # 存放所有name的值（目前仅用于更新数据库的is_key字段）
         self.ok = self.__init_dictionary()  # 初始化字典
@@ -243,6 +244,7 @@ class JsonAnalyser(Runnable):
                 self.rel_path = os.path.join('plu/', self.rel_path)
             # 只处理dict格式的文件
             analyser = BaseAnalyser(self.dictionary, self.rel_path, self.force_title)
+            analyser.preserve_job_markers = self.preserve_job_markers
             if self.mode == 'homebrew':
                 en_name = json_file[json_file.rfind(';')+1:json_file.rfind('.json')].strip()
                 analyser.set_job('#HOME_BREW', en_name, None)

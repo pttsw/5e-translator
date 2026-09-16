@@ -143,6 +143,7 @@ class DBDictionary:
             'is_key': row['is_key'],
             'sql_id': row['id'],
             'modified_at': row['modified_at'],
+            'exact_translation': str(row.get('usage_context_label') or '').startswith('__SYNC_CN_EXACT__'),
         }
 
     @staticmethod
@@ -158,7 +159,7 @@ class DBDictionary:
         target_tag = tag if tag not in ("", None) else None
         base_select_with_en = (
             "SELECT w.id, w.en, w.cn, w.json_file, w.proofread, w.category, "
-            "w.modified_at, w.is_key "
+            "w.modified_at, w.is_key, wu.context_label AS usage_context_label "
             "FROM word_usage wu JOIN words w ON w.id = wu.word_id "
             "WHERE wu.file = %s AND w.en = %s AND "
         )
@@ -173,7 +174,7 @@ class DBDictionary:
             if exact_usage:
                 query = (
                     "SELECT w.id, w.en, w.cn, w.json_file, w.proofread, w.category, "
-                    "w.modified_at, w.is_key "
+                    "w.modified_at, w.is_key, wu.context_label AS usage_context_label "
                     "FROM word_usage wu JOIN words w ON w.id = wu.word_id "
                     "WHERE wu.file = %s AND " + usage_sql + " "
                     "ORDER BY w.proofread DESC, w.modified_at DESC LIMIT 1"
@@ -204,7 +205,7 @@ class DBDictionary:
                 return self.__row_to_bean(rows[0])
         return None
 
-    def __put_word_usage(self, db, word_id: int, rel_f: str, job=None):
+    def __put_word_usage(self, db, word_id: int, rel_f: str, job=None, rebind=False):
         if not word_id or not rel_f:
             return True
         context = self.__job_usage_context(job)
@@ -215,11 +216,14 @@ class DBDictionary:
                 (word_id, file, uid, key_path, context_key, context_label, version)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
+                {word_id_update}
                 key_path = VALUES(key_path),
                 context_key = VALUES(context_key),
                 context_label = VALUES(context_label),
                 version = VALUES(version)
-            """,
+            """.format(
+                word_id_update="word_id = VALUES(word_id)," if rebind else ""
+            ),
             (
                 word_id,
                 rel_f,
@@ -252,7 +256,8 @@ class DBDictionary:
             placeholders = ','.join(['%s'] * len(chunk))
             rows = db.execute_query(
                 "SELECT wu.uid, w.id, w.en, w.cn, w.json_file, w.proofread, "
-                "w.category, w.modified_at, w.is_key "
+                "w.category, w.modified_at, w.is_key, "
+                "wu.context_label AS usage_context_label "
                 "FROM word_usage wu JOIN words w ON w.id = wu.word_id "
                 f"WHERE wu.file = %s AND wu.uid IN ({placeholders})",
                 (rel_f, *chunk),
@@ -305,7 +310,8 @@ class DBDictionary:
             placeholders = ','.join(['%s'] * len(chunk))
             rows = db.execute_query(
                 f"SELECT wu.{field} AS usage_value, w.id, w.en, w.cn, w.json_file, "
-                "w.proofread, w.category, w.modified_at, w.is_key "
+                "w.proofread, w.category, w.modified_at, w.is_key, "
+                "wu.context_label AS usage_context_label "
                 "FROM word_usage wu JOIN words w ON w.id = wu.word_id "
                 f"WHERE wu.file = %s AND wu.{field} IN ({placeholders}) "
                 "ORDER BY w.proofread DESC, w.modified_at DESC",
@@ -457,6 +463,24 @@ class DBDictionary:
             db.update('words', {'cn': input_str, 'proofread': 1,'modified_at': datetime.datetime.now()}, {'id': selected_id})
         self.__release_db(db_index)
     
+    def get_reuse_candidates(self, en, rel_f=""):
+        """Bypass single-value caches to retain ambiguity and location evidence."""
+        index = self.__get_db_index()
+        db = self.db_list[index]
+        try:
+            rows = db.select('words', columns=['id', 'en', 'cn', 'proofread',
+                'category', 'modified_at', 'is_key'], condition={'en': en})
+            if rows is None:
+                raise RuntimeError('reuse_candidates_unavailable')
+            usages = db.select('word_usage', columns=['word_id', 'uid', 'key_path'],
+                               condition={'file': rel_f}) if rel_f else []
+            if usages is None:
+                raise RuntimeError('reuse_evidence_unavailable')
+            return [dict(self.__row_to_bean(row), usages=[u for u in usages
+                         if u['word_id'] == row['id']]) for row in rows]
+        finally:
+            self.__release_db(index)
+
     def get(self, k: str, rel_f="", load_from_sql=False, ignore_case=False, tag="", correct_tag_from_db=False, job_context=None):
         """从数据库读取翻译
 
@@ -813,7 +837,7 @@ class DBDictionary:
         self.__release_db(db_index)
         # logger.info(f"插入word_usage表成功，file: {rel_f}, word_id: {word_id}, version: {self.version}")
         
-    def put(self, key: str, value, rel_f: str, insert_word=True, proofread=False, tag="", job_context=None) -> (bool):
+    def put(self, key: str, value, rel_f: str, insert_word=True, proofread=False, tag="", job_context=None, rebind_usage=False) -> (bool):
         """
         插入翻译结果
 
@@ -835,9 +859,20 @@ class DBDictionary:
         # 更新words表
         if insert_word:
             p = 1 if proofread else 0
-            # 去重校验
-            res = db.select('words', columns=['id', 'json_file', 'version', 'source'], condition={
-                            'BINARY en': key, 'cn': value})
+            # 按英文、中文和分类去重；相同文本在不同 tag 下是不同译文记录。
+            if tag != "":
+                res = db.execute_query(
+                    "SELECT id, json_file, version, source FROM words "
+                    "WHERE BINARY en = %s AND cn = %s AND category = %s",
+                    (key, value, tag),
+                )
+            else:
+                res = db.execute_query(
+                    "SELECT id, json_file, version, source FROM words "
+                    "WHERE BINARY en = %s AND cn = %s "
+                    "AND (category IS NULL OR category = '')",
+                    (key, value),
+                )
             if res == None:
                 self.__release_db(db_index)
                 logger.error(f"查询words表失败，en: {key}, cn: {value}, file: {rel_f}, version: {self.version}, proofread: {p}, category: {tag}")
@@ -848,6 +883,7 @@ class DBDictionary:
                           'source': self.source, 'version': self.version, 'proofread': p, 'modified_by': 1, 'category':tag})
                 if not ok:
                     logger.error(f"插入words表失败，en: {key}, cn: {value}, file: {rel_f}, version: {self.version}, proofread: {p}, category: {tag}")
+                    self.__release_db(db_index)
                     return False
         word_rows = []
         if tag != "":
@@ -864,7 +900,9 @@ class DBDictionary:
         for row in word_rows:
             if word_id is None:
                 word_id = row['id']
-            self.__put_word_usage(db, row['id'], rel_f, job_context)
+            self.__put_word_usage(
+                db, row['id'], rel_f, job_context, rebind=rebind_usage,
+            )
         self.__release_db(db_index)
         logger.debug(f"put函数执行时间：{time.time() - start_time} 秒")
         return word_id or True
