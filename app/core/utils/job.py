@@ -1,3 +1,4 @@
+from ast import Dict
 import json
 from config import *
 from typing import Tuple
@@ -32,6 +33,7 @@ class Job:
         self.old_tag = old_tag
         self.context_key = context_key
         self.context_label = context_label
+        self.context_obj = None
         
     def __str__(self):
         return f'en_str:{self.en_str} \ncn_str:{self.cn_str}'
@@ -177,3 +179,6 @@ class Job:
         if hasattr(self, 'modified_at') and self.modified_at:
             job_dict['modified_at'] = str(self.modified_at)
         return job_dict
+
+    def set_context(self, obj:Dict):
+        self.context_obj = obj

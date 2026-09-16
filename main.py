@@ -165,6 +165,7 @@ def main():
                                   help='Do not use AI for entries missing from the database; keep English text and translate known tag values')
     translate_parser.add_argument('--skip-file-name', default='', type=str,
                                   help='Skip files whose file name contains this value')
+    translate_parser.add_argument('--simple', dest='simple_mode', action='store_false', default=True)
     
     search_parser = subparsers.add_parser('search')
     search_parser.add_argument('--query', default='', type=str,
@@ -204,6 +205,8 @@ def main():
                              help='Source JSON file or directory under configured source roots; directories are processed recursively')
     sync_parser.add_argument('--skip-jobs', action='store_true', default=False,
                             help='Only rebuild split files and file table, skip jobs cache')
+    
+    agent_parser = subparsers.add_parser('agent')
 
     
     args = parser.parse_args()
@@ -294,8 +297,11 @@ def main():
             if args.intermediate_cache:
                 pipeline = pipeline|write_translate_cache
             pipeline = pipeline|processor|JsonGenerator(args.thread_num)|write_translate_cache
-        else:
+        elif args.simple_mode:
             pipeline = find_json_files|JsonAnalyser()|NonAiFallbackSetter()
+        else:
+            
+            pipeline = find_json_files|JsonAnalyser()|NonAiFallbackSetter()|JsonGenerator(args.thread_num)
             if args.intermediate_cache:
                 pipeline = pipeline|write_translate_cache
             pipeline = pipeline|JsonGenerator(args.thread_num)|write_translate_cache
@@ -470,6 +476,9 @@ def main():
         with cli_db_app_context():
             res = sync_source_path(args.source_file, rebuild_jobs=not args.skip_jobs)
         print(res)
-        
+    elif args.function == 'agent':
+        from app.core.agent import DNDTranslatorAgent
+        agent = DNDTranslatorAgent()
+        agent.interactive_mode()
 if __name__ == '__main__':
     main()
