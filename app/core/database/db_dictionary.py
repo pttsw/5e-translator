@@ -836,6 +836,167 @@ class DBDictionary:
         self.__put_word_usage(db, word_id, rel_f, job_context)
         self.__release_db(db_index)
         # logger.info(f"插入word_usage表成功，file: {rel_f}, word_id: {word_id}, version: {self.version}")
+
+    def apply_sync_batch(
+        self, put_items: list, update_items: list, progress_callback=None,
+    ) -> bool:
+        """批量落库“从中文同步”的结果。
+
+        words 和 word_usage 在同一事务中写入。此接口会忽略 category，
+        按 (en, cn) 复用已有记录，并始终按 (file, uid)
+        重绑 usage；它不改变普通 put/update 的历史行为。
+        """
+        def report(stage: str, current: int, total: int):
+            if progress_callback is not None:
+                progress_callback(stage, current, total)
+
+        if not put_items and not update_items:
+            for stage in ("lookup", "insert", "update", "usage", "commit"):
+                report(stage, 0 if stage != "commit" else 1, 0 if stage != "commit" else 1)
+            return True
+
+        db_index = self.__get_db_index()
+        db = self.db_list[db_index]
+
+        def word_key(item):
+            return (item["en"], item["cn"])
+
+        unique_words = {}
+        for item in put_items:
+            unique_words.setdefault(word_key(item), item)
+
+        def run(cursor):
+            word_ids = {}
+            keys = list(unique_words.keys())
+            chunk_size = 300
+            if not keys:
+                report("lookup", 0, 0)
+            for start in range(0, len(keys), chunk_size):
+                chunk = keys[start:start + chunk_size]
+                where = " OR ".join(
+                    ["(BINARY en = %s AND cn = %s)"]
+                    * len(chunk)
+                )
+                params = tuple(value for key in chunk for value in key)
+                cursor.execute(
+                    "SELECT id, en, cn, category FROM words WHERE " + where
+                    + " ORDER BY id",
+                    params,
+                )
+                for row in cursor.fetchall() or []:
+                    key = (row["en"], row["cn"])
+                    word_ids.setdefault(key, row["id"])
+                report("lookup", min(start + len(chunk), len(keys)), len(keys))
+
+            missing_keys = [key for key in keys if key not in word_ids]
+            if missing_keys:
+                cursor.executemany(
+                    "INSERT INTO words "
+                    "(en, cn, json_file, source, version, proofread, modified_by, category) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, 1, %s)",
+                    [
+                        (
+                            item["en"], item["cn"], item["rel_f"], self.source,
+                            self.version, 1 if item.get("proofread") else 0,
+                            item.get("tag") or "",
+                        )
+                        for key in missing_keys
+                        for item in [unique_words[key]]
+                    ],
+                )
+                for start in range(0, len(missing_keys), chunk_size):
+                    chunk = missing_keys[start:start + chunk_size]
+                    where = " OR ".join(
+                        ["(BINARY en = %s AND cn = %s)"]
+                        * len(chunk)
+                    )
+                    params = tuple(value for key in chunk for value in key)
+                    cursor.execute(
+                        "SELECT id, en, cn, category FROM words WHERE " + where
+                        + " ORDER BY id",
+                        params,
+                    )
+                    for row in cursor.fetchall() or []:
+                        key = (row["en"], row["cn"])
+                        word_ids.setdefault(key, row["id"])
+            report("insert", len(missing_keys), len(missing_keys))
+
+            unresolved = [key for key in keys if key not in word_ids]
+            if unresolved:
+                raise RuntimeError(f"批量插入后找不到 words 记录: {unresolved[0][0]}")
+
+            update_with_tag = []
+            update_without_tag = []
+            unique_updates = {}
+            for item in update_items:
+                unique_updates[item["sql_id"]] = item
+            for item in unique_updates.values():
+                params = (
+                    item["en"], item["cn"], self.source,
+                    1 if item.get("proofread") else 0,
+                    self.version, item["sql_id"],
+                )
+                if item.get("tag") not in (None, ""):
+                    update_with_tag.append(params[:-1] + (item["tag"], params[-1]))
+                else:
+                    update_without_tag.append(params)
+            if update_without_tag:
+                cursor.executemany(
+                    "UPDATE words SET en = %s, cn = %s, source = %s, proofread = %s, "
+                    "version = %s, modified_by = 1, modified_at = NOW() WHERE id = %s",
+                    update_without_tag,
+                )
+            if update_with_tag:
+                cursor.executemany(
+                    "UPDATE words SET en = %s, cn = %s, source = %s, proofread = %s, "
+                    "version = %s, modified_by = 1, modified_at = NOW(), category = %s "
+                    "WHERE id = %s",
+                    update_with_tag,
+                )
+            report("update", len(unique_updates), len(unique_updates))
+
+            usages = {}
+            for item in put_items:
+                word_id = word_ids[word_key(item)]
+                context = self.__job_usage_context(item.get("job_context"))
+                uid = context["uid"] or f"legacy:{word_id}"
+                usages[(item["rel_f"], uid)] = (word_id, item)
+            for item in update_items:
+                context = self.__job_usage_context(item.get("job_context"))
+                uid = context["uid"] or f"legacy:{item['sql_id']}"
+                usages[(item["rel_f"], uid)] = (item["sql_id"], item)
+
+            usage_params = []
+            for word_id, item in usages.values():
+                rel_f = item["rel_f"]
+                if not word_id or not rel_f:
+                    continue
+                context = self.__job_usage_context(item.get("job_context"))
+                uid = context["uid"] or f"legacy:{word_id}"
+                usage_params.append((
+                    word_id, rel_f, uid, context["key_path"],
+                    context["context_key"], context["context_label"], self.version,
+                ))
+            if usage_params:
+                cursor.executemany(
+                    "INSERT INTO word_usage "
+                    "(word_id, file, uid, key_path, context_key, context_label, version) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                    "ON DUPLICATE KEY UPDATE "
+                    "word_id = VALUES(word_id), key_path = VALUES(key_path), "
+                    "context_key = VALUES(context_key), context_label = VALUES(context_label), "
+                    "version = VALUES(version)",
+                    usage_params,
+                )
+            report("usage", len(usage_params), len(usage_params))
+            return True
+
+        try:
+            result = bool(db.execute_transaction(run))
+            report("commit", 1, 1)
+            return result
+        finally:
+            self.__release_db(db_index)
         
     def put(self, key: str, value, rel_f: str, insert_word=True, proofread=False, tag="", job_context=None, rebind_usage=False) -> (bool):
         """

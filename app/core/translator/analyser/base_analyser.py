@@ -169,7 +169,12 @@ class BaseAnalyser:
             if not ok:
                 raise RuntimeError(f'process error:{en_obj}')
         # 最终从数据库里查job
-        pending_jobs = [j for j in self.job_list if j.cn_str == None]
+        # 纯标签字符串默认会先以英文原文作为 cn_str，但它仍需要
+        # 查询数据库；sync-cn 可能已为整串持久化了精确的人工译文。
+        pending_jobs = [
+            j for j in self.job_list
+            if j.cn_str is None or only_has_format(j.en_str)
+        ]
         query_en_list = [j.en_str for j in pending_jobs]
         query_tag_list = [j.tag for j in pending_jobs]
         batch_res_map = self.dictionary.get_bunch(

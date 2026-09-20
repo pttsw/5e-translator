@@ -1,8 +1,18 @@
+import importlib
 import json
+from pathlib import Path
 
 import pytest
 
-from app.cli.sync_from_cn import align_manual_translations, sync_from_cn
+from app.cli.sync_from_cn import (
+    SyncConflict,
+    SyncSummary,
+    _prompt_conflict,
+    align_manual_translations,
+    resolve_cn_path,
+    sync_from_cn,
+    sync_from_cn_path,
+)
 from app.core.database.memory_db_dictionary import MemoryDBDictionary
 from app.core.translator import JsonGenerator
 from app.core.utils import FileWorkInfo, Job
@@ -39,10 +49,22 @@ def _write_pair(tmp_path):
 
 
 def test_align_manual_translations_extracts_direct_markers():
-    parent = Job("$.entry", "Use {@spell Fireball|PHB|fireball}.", None, tag="spell")
-    child0 = Job("$.entry.spell[0].0", "Fireball", None, tag="spell")
-    child1 = Job("$.entry.spell[0].1", "PHB", None, tag="spell")
-    child2 = Job("$.entry.spell[0].2", "fireball", None, tag="spell")
+    parent = Job(
+        "$.entry", "Use {@spell Fireball|PHB|fireball}.", None,
+        tag="spell", key_path="/entry",
+    )
+    child0 = Job(
+        "$.entry.spell[0].0", "Fireball", None,
+        tag="spell", key_path="/entry/spell[0]",
+    )
+    child1 = Job(
+        "$.entry.spell[0].1", "PHB", None,
+        tag="spell", key_path="/entry/spell[0]",
+    )
+    child2 = Job(
+        "$.entry.spell[0].2", "fireball", None,
+        tag="spell", key_path="/entry/spell[0]",
+    )
 
     result = align_manual_translations(
         {"entry": "{!@ $.entry}"},
@@ -51,7 +73,98 @@ def test_align_manual_translations_extracts_direct_markers():
     )
 
     assert result.errors == []
-    assert result.translations == {"$.entry": "使用 {@spell 火球术|PHB|火球术}。"}
+    assert result.translations == {
+        "$.entry": "使用 {@spell 火球术|PHB|火球术}。",
+        "$.entry.spell[0].0": "火球术",
+        "$.entry.spell[0].1": "PHB",
+        "$.entry.spell[0].2": "火球术",
+    }
+
+
+def test_align_manual_translations_handles_reordered_tags():
+    parent = Job(
+        "$.entry", "Meet {@creature Szass Tam|AUD|Szass Tam's} in {@area chapter 7|300|x}.",
+        None, key_path="/entry",
+    )
+    creature = Job(
+        "$.entry.creature[0].2", "Szass Tam's", None,
+        tag="creature", key_path="/entry/creature[0]",
+    )
+    area = Job(
+        "$.entry.area[1].0", "chapter 7", None,
+        tag="area", key_path="/entry/area[1]",
+    )
+
+    result = align_manual_translations(
+        {"entry": "{!@ $.entry}"},
+        {"entry": "在{@area 第七章|300|x}会见{@creature 萨扎斯·坦|AUD|萨扎斯·坦的}。"},
+        [parent, creature, area],
+    )
+
+    assert result.errors == []
+    assert result.translations[creature.uid] == "萨扎斯·坦的"
+    assert result.translations[area.uid] == "第七章"
+
+
+def test_align_manual_translations_keeps_first_ambiguous_repeated_tag_child():
+    parent = Job(
+        "$.entry",
+        "Read {@book Shadowfell|XDMG|5|Shadowfell}.",
+        None,
+        key_path="/entry",
+    )
+    child = Job(
+        "$.entry.book[0].0",
+        "Shadowfell",
+        None,
+        tag="book",
+        key_path="/entry/book[0]",
+    )
+
+    result = align_manual_translations(
+        {"entry": "{!@ $.entry}"},
+        {"entry": "阅读{@book 城主指南|XDMG|5|堕影冥界}。"},
+        [parent, child],
+    )
+
+    assert result.errors == []
+    assert result.translations[parent.uid] == "阅读{@book 城主指南|XDMG|5|堕影冥界}。"
+    assert result.translations[child.uid] == "城主指南"
+
+
+def test_sync_from_cn_persists_jobs_inside_tags(tmp_path, monkeypatch):
+    db = _reset_memory_db(monkeypatch)
+    en_path = tmp_path / "adventure.json"
+    cn_path = tmp_path / "adventure-cn.json"
+    en_path.write_text(json.dumps({
+        "adventure": [{
+            "name": "Test Adventure",
+            "source": "TST",
+            "entries": [
+                "Read {@adventure Chapter 1: Red Wizards.|TST|1} and visit {@area Mission Rewards|abc|x}."
+            ],
+        }],
+    }), encoding="utf-8")
+    cn_path.write_text(json.dumps({
+        "adventure": [{
+            "ENG_name": "Test Adventure",
+            "name": "测试冒险",
+            "source": "TST",
+            "entries": [
+                "阅读{@adventure 第一章：红袍法师。|TST|1}并前往{@area 任务奖励|abc|x}。"
+            ],
+            "translator": "机翻",
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), mode="5et", source_root=str(tmp_path),
+    )
+
+    translations = {(row["en"], row["category"]): row["cn"] for row in db.store_records}
+    assert translations[("Chapter 1: Red Wizards.", "adventure")] == "第一章：红袍法师。"
+    assert translations[("Mission Rewards", "area")] == "任务奖励"
+    assert summary.verified is True
 
 
 def test_generator_preserves_proofread_text_with_intentionally_omitted_repeated_tag(monkeypatch):
@@ -68,7 +181,9 @@ def test_generator_preserves_proofread_text_with_intentionally_omitted_repeated_
     assert generated.cn_obj["entry"] == cn
 
 
-def test_sync_from_cn_adds_missing_and_reproduces_manual_json(tmp_path, monkeypatch):
+def test_sync_from_cn_adds_missing_and_reproduces_manual_json(
+    tmp_path, monkeypatch, capsys
+):
     db = _reset_memory_db(monkeypatch)
     en_path, cn_path = _write_pair(tmp_path)
     summary = sync_from_cn(
@@ -86,6 +201,209 @@ def test_sync_from_cn_adds_missing_and_reproduces_manual_json(tmp_path, monkeypa
     assert repeated.added == 0
     assert repeated.matched == 2
     assert repeated.verified is True
+    output = capsys.readouterr().out
+    for label in (
+        "[1/5] 检查已有译文",
+        "[2/5] 新增译文",
+        "[3/5] 修改译文",
+        "[4/5] 绑定翻译位置",
+        "[5/5] 提交事务",
+    ):
+        assert label in output
+
+
+def test_sync_from_cn_derives_cn_path_from_data_bak(tmp_path, monkeypatch, capsys):
+    _reset_memory_db(monkeypatch)
+    en_dir = tmp_path / "data-bak"
+    cn_dir = tmp_path / "data"
+    en_dir.mkdir()
+    cn_dir.mkdir()
+    en_path, authored_cn_path = _write_pair(en_dir)
+    inferred_cn_path = cn_dir / en_path.name
+    inferred_cn_path.write_text(
+        authored_cn_path.read_text(encoding="utf-8"), encoding="utf-8",
+    )
+
+    summary = sync_from_cn(
+        str(en_path), mode="5et", source_root=str(en_dir),
+    )
+
+    assert summary.added == 2
+    assert summary.verified is True
+    assert f"自动使用中文文件: {inferred_cn_path}" in capsys.readouterr().out
+
+
+def test_sync_from_cn_reloads_exact_translation_for_tag_only_string(
+    tmp_path, monkeypatch
+):
+    _reset_memory_db(monkeypatch)
+    en_path = tmp_path / "sample.json"
+    cn_path = tmp_path / "sample-cn.json"
+    en_path.write_text(json.dumps({
+        "item": [{
+            "name": "Crafting Materials",
+            "source": "TST",
+            "entries": ["{@item Acid|XPHB}, {@item Oil|XPHB}"],
+        }],
+    }), encoding="utf-8")
+    cn_path.write_text(json.dumps({
+        "item": [{
+            "ENG_name": "Crafting Materials",
+            "name": "制作材料",
+            "source": "TST",
+            "entries": ["{@item 强酸|XPHB}, {@item 燃油|XPHB}"],
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), mode="5et", source_root=str(tmp_path),
+    )
+
+    assert summary.verified is True
+
+
+def test_sync_from_cn_treats_tag_only_fallback_as_missing(
+    tmp_path, monkeypatch
+):
+    db = _reset_memory_db(monkeypatch)
+    db.put(
+        "Cartographer's Tools", "制图工具", "old.json",
+        proofread=True, tag="item",
+    )
+    en_path = tmp_path / "backgrounds.json"
+    cn_path = tmp_path / "backgrounds-cn.json"
+    en_path.write_text(json.dumps({
+        "background": [{
+            "name": "Archaeologist",
+            "source": "EFA",
+            "entries": ["{@item Cartographer's Tools|XPHB}"],
+        }],
+    }), encoding="utf-8")
+    cn_path.write_text(json.dumps({
+        "background": [{
+            "ENG_name": "Archaeologist",
+            "name": "考古学家",
+            "source": "EFA",
+            "entries": ["{@item 制图工具|XPHB}"],
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    def unexpected_prompt(*_args):
+        raise AssertionError("仅标签变化的兜底命中不应进入冲突确认")
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), mode="5et", source_root=str(tmp_path),
+        decision_provider=unexpected_prompt,
+    )
+
+    exact = [
+        row for row in db.store_records
+        if row["en"] == "{@item Cartographer's Tools|XPHB}"
+    ]
+    assert len(exact) == 1
+    assert exact[0]["cn"] == "{@item 制图工具|XPHB}"
+    assert exact[0]["proofread"] == 0
+    assert summary.conflicts == 0
+    assert summary.verified is True
+
+
+def test_resolve_cn_path_reports_missing_inferred_file(tmp_path):
+    en_dir = tmp_path / "data-bak"
+    en_dir.mkdir()
+    en_path = en_dir / "missing.json"
+    en_path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="data/missing.json"):
+        resolve_cn_path(str(en_path))
+
+
+def test_resolve_cn_path_requires_data_bak_component(tmp_path):
+    en_path = tmp_path / "sample.json"
+    en_path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="不包含 data-bak"):
+        resolve_cn_path(str(en_path))
+
+
+def test_sync_from_cn_path_recursively_processes_matching_json_files(
+    tmp_path, monkeypatch, capsys
+):
+    _reset_memory_db(monkeypatch)
+    en_root = tmp_path / "data-bak"
+    cn_root = tmp_path / "data"
+    (en_root / "nested").mkdir(parents=True)
+    (cn_root / "nested").mkdir(parents=True)
+
+    def write_pair(relative_path, name, cn_name, entry, cn_entry):
+        en_file = en_root / relative_path
+        cn_file = cn_root / relative_path
+        en_file.write_text(json.dumps({
+            "spell": [{"name": name, "source": "TST", "entries": [entry]}],
+        }), encoding="utf-8")
+        cn_file.write_text(json.dumps({
+            "spell": [{
+                "ENG_name": name, "name": cn_name,
+                "source": "TST", "entries": [cn_entry],
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+
+    write_pair("first.json", "First", "第一个", "First entry.", "第一条。")
+    write_pair(
+        "nested/second.json", "Second", "第二个",
+        "Second entry.", "第二条。",
+    )
+    (en_root / "missing.json").write_text("{}", encoding="utf-8")
+
+    summary = sync_from_cn_path(
+        str(en_root), mode="5et", source_root=str(en_root),
+    )
+
+    assert summary.processed_files == 2
+    assert summary.skipped_files == 1
+    assert summary.added == 4
+    assert summary.verified is True
+    output = capsys.readouterr().out
+    assert "处理文件 [1/2]: first.json" in output
+    assert "处理文件 [2/2]: nested/second.json" in output
+    assert "跳过缺少中文对应文件的 JSON: missing.json" in output
+
+
+def test_sync_from_cn_path_continues_after_one_file_fails(
+    tmp_path, monkeypatch, capsys
+):
+    module = importlib.import_module("app.cli.sync_from_cn")
+    en_root = tmp_path / "data-bak"
+    cn_root = tmp_path / "data"
+    en_root.mkdir()
+    cn_root.mkdir()
+    for filename in ("first.json", "second.json"):
+        (en_root / filename).write_text("{}", encoding="utf-8")
+        (cn_root / filename).write_text("{}", encoding="utf-8")
+
+    calls = []
+
+    def fake_sync(en_path, *_args, **_kwargs):
+        filename = Path(en_path).name
+        calls.append(filename)
+        if filename == "first.json":
+            raise RuntimeError("重新执行翻译未生成相同结果")
+        return SyncSummary(verified=True, processed_files=1, matched=2)
+
+    monkeypatch.setattr(module, "sync_from_cn", fake_sync)
+
+    summary = module.sync_from_cn_path(str(en_root))
+    module.print_sync_summary(summary)
+
+    assert calls == ["first.json", "second.json"]
+    assert summary.processed_files == 1
+    assert summary.failed_files == [
+        ("first.json", "重新执行翻译未生成相同结果")
+    ]
+    assert summary.verified is False
+    captured = capsys.readouterr()
+    assert "处理失败，继续下一个文件: first.json" in captured.err
+    assert "文件汇总：成功 1，失败 1，跳过 0。" in captured.out
+    assert "验证未全部通过" in captured.out
 
 
 @pytest.mark.parametrize(
@@ -118,11 +436,75 @@ def test_sync_from_cn_applies_conflict_decision(
         tag="spell", job_context=context,
     )
     assert bean["cn"] == expected_cn
-    if decision in {"add", "modify"}:
+    if decision == "add":
         assert bean["proofread"] == 0
     else:
         assert bean["proofread"] == 1
     assert (summary.added, summary.updated, summary.kept_database) == (added, updated, kept)
+    assert summary.verified is True
+
+
+@pytest.mark.parametrize(
+    ("is_proofread", "expected_status"),
+    [(True, "已校对"), (False, "未校对")],
+)
+def test_prompt_conflict_shows_database_proofread_status(
+    monkeypatch, capsys, is_proofread, expected_status
+):
+    job = Job(
+        "$.spell.name", "Magic Bolt", "旧译名", rel_path="sample.json",
+        tag="spell", is_proofread=is_proofread,
+    )
+    conflict = SyncConflict(job, "旧译名", "魔法飞弹")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "k")
+
+    assert _prompt_conflict(conflict, 1, 1) == "keep"
+
+    output = capsys.readouterr().out
+    assert f"库中校对状态: {expected_status}" in output
+
+
+def test_sync_from_cn_does_not_repeat_modify_confirmation_for_same_word_id(
+    tmp_path, monkeypatch
+):
+    db = _reset_memory_db(monkeypatch)
+    en_path = tmp_path / "sample.json"
+    cn_path = tmp_path / "sample-cn.json"
+    en_path.write_text(json.dumps({
+        "spell": [
+            {"name": "First", "source": "TST", "entries": ["Shared text."]},
+            {"name": "Second", "source": "TST", "entries": ["Shared text."]},
+        ],
+    }), encoding="utf-8")
+    cn_path.write_text(json.dumps({
+        "spell": [
+            {"ENG_name": "First", "name": "第一个", "source": "TST",
+             "entries": ["共享译文。"]},
+            {"ENG_name": "Second", "name": "第二个", "source": "TST",
+             "entries": ["共享译文。"]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    word_id = db.put(
+        "Shared text.", "旧译文。", "old.json", proofread=True, tag="spell",
+    )
+    prompted = []
+
+    def decide(conflict, *_args):
+        prompted.append((conflict.job.sql_id, conflict.database_value))
+        return "modify"
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), mode="5et", source_root=str(tmp_path),
+        decision_provider=decide,
+    )
+
+    assert prompted == [(word_id, "旧译文。")]
+    assert summary.conflicts == 2
+    assert summary.updated == 1
+    assert db.store_by_id[word_id]["cn"] == "共享译文。"
+    assert db.store_by_id[word_id]["proofread"] == 1
+    usages = [usage for usage in db.word_usage if usage["word_id"] == word_id]
+    assert len([usage for usage in usages if usage["file"] == "sample.json"]) == 2
     assert summary.verified is True
 
 
@@ -148,3 +530,109 @@ def test_sync_from_cn_automatically_keeps_database_when_manual_equals_english(
     assert summary.kept_database == 1
     assert summary.added == 1
     assert summary.verified is True
+
+
+def test_sync_from_cn_automatically_keeps_database_when_only_quotes_differ(
+    tmp_path, monkeypatch
+):
+    db = _reset_memory_db(monkeypatch)
+    en_path, cn_path = _write_pair(tmp_path)
+    manual_obj = json.loads(cn_path.read_text(encoding="utf-8"))
+    manual_obj["spell"][0]["name"] = "“魔法飞弹”"
+    cn_path.write_text(json.dumps(manual_obj, ensure_ascii=False), encoding="utf-8")
+    db.put("Magic Bolt", '"魔法飞弹"', "sample.json", proofread=True, tag="spell")
+
+    def unexpected_prompt(*_args):
+        raise AssertionError("仅引号样式不同不应进入冲突确认")
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), mode="5et", source_root=str(tmp_path),
+        decision_provider=unexpected_prompt,
+    )
+
+    assert summary.conflicts == 1
+    assert summary.kept_database == 1
+    assert summary.added == 1
+    assert len([row for row in db.store_records if row["en"] == "Magic Bolt"]) == 1
+    assert db.store_records[0]["cn"] == '"魔法飞弹"'
+    assert summary.verified is True
+
+
+def test_sync_from_cn_automatically_modifies_when_only_tag_contents_differ(
+    tmp_path, monkeypatch
+):
+    db = _reset_memory_db(monkeypatch)
+    en_path = tmp_path / "sample.json"
+    cn_path = tmp_path / "sample-cn.json"
+    english = "Use {@item Cartographer's Tools|PHB}."
+    database_cn = "使用 {@item 制图工具|PHB}。"
+    manual_cn = "使用 {@item 制图工具|XPHB}。"
+    en_path.write_text(json.dumps({
+        "spell": [{"name": "Tools", "source": "TST", "entries": [english]}],
+    }), encoding="utf-8")
+    cn_path.write_text(json.dumps({
+        "spell": [{
+            "ENG_name": "Tools", "name": "工具",
+            "source": "TST", "entries": [manual_cn],
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    word_id = db.put(
+        english, database_cn, "old.json", proofread=True, tag="spell",
+    )
+
+    def unexpected_prompt(*_args):
+        raise AssertionError("仅 {@...} 内部不同不应进入冲突确认")
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), mode="5et", source_root=str(tmp_path),
+        decision_provider=unexpected_prompt,
+    )
+
+    assert db.store_by_id[word_id]["cn"] == manual_cn
+    assert db.store_by_id[word_id]["proofread"] == 1
+    assert summary.conflicts == 1
+    assert summary.updated == 1
+    assert summary.verified is True
+
+
+def test_sync_from_cn_preserves_unproofread_status_when_modifying_existing_word(
+    tmp_path, monkeypatch
+):
+    db = _reset_memory_db(monkeypatch)
+    en_path, cn_path = _write_pair(tmp_path)
+    word_id = db.put(
+        "Magic Bolt", "旧译名", "sample.json", proofread=False, tag="spell",
+    )
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), mode="5et", source_root=str(tmp_path),
+        decision_provider=lambda *_: "modify",
+    )
+
+    assert db.store_by_id[word_id]["cn"] == "魔法飞弹"
+    assert db.store_by_id[word_id]["proofread"] == 0
+    assert summary.updated == 1
+    assert summary.verified is True
+
+
+def test_sync_batch_reuses_translation_regardless_of_category(monkeypatch):
+    db = _reset_memory_db(monkeypatch)
+    db.put("Magic Bolt", "魔法飞弹", "old.json", proofread=True, tag="item")
+    job = Job(
+        "$.spell.name", "Magic Bolt", None,
+        rel_path="sample.json", tag="spell",
+    )
+
+    assert db.apply_sync_batch(
+        [{
+            "en": "Magic Bolt", "cn": "魔法飞弹", "rel_f": "sample.json",
+            "proofread": False, "tag": "spell", "job_context": job,
+        }],
+        [],
+    )
+
+    assert len(db.store_records) == 1
+    assert db.store_records[0]["category"] == "item"
+    assert db.usage_by_file_uid[("sample.json", "$.spell.name")]["word_id"] == (
+        db.store_records[0]["id"]
+    )

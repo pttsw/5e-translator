@@ -1293,6 +1293,55 @@ def test_replace_jobs_continues_sub_tag_replacement_after_alignment():
     ]
 
 
+def test_exact_translation_preserves_prose_but_translates_retained_tags():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = None
+    parent_uid = "$.entry"
+    generator.done_jobs = [
+        Job(
+            parent_uid,
+            "Use {@spell Find Familiar|XPHB} and track {@variantrule Hit Points|XPHB}.",
+            "人工正文：使用{@spell Find Familiar|XPHB}并记录{@variantrule Hit Points|XPHB}。",
+            tag="entries",
+            exact_translation=True,
+        ),
+        Job(f"{parent_uid}.spell[0].0", "Find Familiar", "寻获魔宠", tag="spell"),
+        Job(f"{parent_uid}.variantrule[1].0", "Hit Points", "生命值", tag="variantrule"),
+    ]
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entry": f"{{!@ {parent_uid}}}"}
+    )
+
+    assert ok is True
+    assert cn_obj == {
+        "entry": "人工正文：使用{@spell 寻获魔宠|XPHB}并记录{@variantrule 生命值|XPHB}。"
+    }
+
+
+def test_exact_translation_translates_retained_tag_without_restoring_omitted_tag():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = None
+    generator.done_jobs = [
+        Job(
+            "$.entry",
+            "{@condition Poisoned|XPHB}, then {@condition Frightened|XPHB}.",
+            "仅保留{@condition Poisoned|XPHB}。",
+            tag="entries",
+            exact_translation=True,
+        ),
+        Job("poisoned", "Poisoned", "中毒", tag="condition"),
+        Job("frightened", "Frightened", "恐慌", tag="condition"),
+    ]
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs(
+        {"entry": "{!@ $.entry}"}
+    )
+
+    assert ok is True
+    assert cn_obj == {"entry": "仅保留{@condition 中毒|XPHB}。"}
+
+
 def test_replace_jobs_prefers_value_matching_over_position_alignment():
     class FakeDictionary:
         def get(self, en, tag=""):

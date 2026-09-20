@@ -375,6 +375,59 @@ class MemoryDBDictionary:
         )
         return record["id"]
 
+    def apply_sync_batch(
+        self, put_items: list, update_items: list, progress_callback=None,
+    ) -> bool:
+        """内存后端的同步批处理，与 MySQL 后端保持相同语义。"""
+        def report(stage: str, current: int, total: int):
+            if progress_callback is not None:
+                progress_callback(stage, current, total)
+
+        unique_keys = {(item["en"], item["cn"]) for item in put_items}
+        report("lookup", len(unique_keys), len(unique_keys))
+        inserted = 0
+        for item in put_items:
+            record = next(
+                (record for record in self.store_records
+                 if record["en"] == item["en"] and record["cn"] == item["cn"]),
+                None,
+            )
+            if record is None:
+                inserted += 1
+                record = self._insert_record(
+                    item["en"], item["cn"], "",
+                    proofread=item.get("proofread", False),
+                    tag=item.get("tag", ""),
+                )
+            elif item.get("proofread"):
+                record["proofread"] = 1
+                self._refresh_cache_for_en(record["en"])
+            self._put_word_usage(
+                record["id"], item["rel_f"], item.get("job_context"), rebind=True,
+            )
+        report("insert", inserted, inserted)
+        updated = 0
+        for item in update_items:
+            if not self.update(
+                item["sql_id"], item["en"], item["cn"],
+                proofread=item.get("proofread", False),
+                tag=item.get("tag", ""), rel_f=item["rel_f"],
+                job_context=item.get("job_context"),
+            ):
+                return False
+            updated += 1
+            self._put_word_usage(
+                item["sql_id"], item["rel_f"], item.get("job_context"), rebind=True,
+            )
+        report("update", updated, updated)
+        usage_count = len({
+            (item["rel_f"], self._job_usage_context(item.get("job_context"))["uid"])
+            for item in put_items + update_items
+        })
+        report("usage", usage_count, usage_count)
+        report("commit", 1, 1)
+        return True
+
     def update(self, sql_id: int, en_or_cn: str, cn=None, proofread: bool = False, tag="", rel_f="", job_context=None):
         record = self.store_by_id.get(sql_id)
         if record is None:

@@ -105,6 +105,38 @@ class MySQLDatabase:
             logger.error(f"语句执行失败，错误原因: {e},{query},{params}")
             return None
 
+    def execute_transaction(self, callback):
+        """在一个事务中执行回调，并返回回调结果。
+
+        回调接收当前 DictCursor；任何异常都会回滚并继续向上抛出，
+        以便调用方能够报告整批写入失败。
+        """
+        retryable_error_codes = {1205, 1213}
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            if not self._ensure_connection():
+                raise RuntimeError("数据库连接不可用")
+            try:
+                self.connection.begin()
+                result = callback(self.cursor)
+                self.connection.commit()
+                return result
+            except pymysql.MySQLError as exc:
+                self.connection.rollback()
+                error_code = exc.args[0] if getattr(exc, "args", None) else None
+                if error_code in retryable_error_codes and attempt < max_retries:
+                    sleep_seconds = 0.2 * (2 ** attempt)
+                    logger.warning(
+                        f"事务遇到可重试错误(code={error_code})，"
+                        f"{sleep_seconds:.1f}秒后重试第{attempt + 1}/{max_retries}次"
+                    )
+                    time.sleep(sleep_seconds)
+                    continue
+                raise
+            except Exception:
+                self.connection.rollback()
+                raise
+
     def insert(self, table, data):
         """插入数据"""
         columns = ', '.join(data.keys())
