@@ -13,6 +13,7 @@ if os.getenv("SKIP_APP_BOOTSTRAP", _default_skip_bootstrap).lower() not in ("1",
     from flask_cors import CORS
     from .api import login_manager, api_bp as api_blueprint
     from .model import db, migrate, ensure_custom_translation_table_schema, ensure_file_cache_job_table_schema, ensure_file_table_schema, ensure_term_table_schema, ensure_word_usage_table_schema, ensure_words_table_schema, migrate_plaintext_passwords, ensure_user_table_schema, ensure_invite_code_table_schema
+    from .core.translation_workflow.migrations import ensure_translation_workflow_schema
 
     from config.settings import DB_CONFIG
     from config.swagger import swagger
@@ -56,4 +57,5 @@ if os.getenv("SKIP_APP_BOOTSTRAP", _default_skip_bootstrap).lower() not in ("1",
             ensure_words_table_schema()
             ensure_word_usage_table_schema()
             ensure_custom_translation_table_schema()
+            ensure_translation_workflow_schema()
             migrate_plaintext_passwords()

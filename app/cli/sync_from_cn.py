@@ -8,7 +8,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from app.core.translator import JsonAnalyser, JsonGenerator
 from app.core.utils import Job, check_prefix, check_suffix, parse_custom_format, split_string
@@ -56,6 +56,20 @@ class SyncSummary:
     processed_files: int = 0
     skipped_files: int = 0
     failed_files: List[Tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class ClassifyResult:
+    missing: List[SyncConflict] = field(default_factory=list)
+    matching: List[SyncConflict] = field(default_factory=list)
+    auto_keep: List[SyncConflict] = field(default_factory=list)
+    auto_modify: List[SyncConflict] = field(default_factory=list)
+    auto_rebind: List[SyncConflict] = field(default_factory=list)
+    conflict: List[SyncConflict] = field(default_factory=list)
+
+    @property
+    def all_conflicts(self) -> List[SyncConflict]:
+        return self.auto_keep + self.auto_modify + self.auto_rebind + self.conflict
 
 
 def _json_path(parent: str, component) -> str:
@@ -211,7 +225,9 @@ def _read_json(path: str):
         return json.load(file)
 
 
-def resolve_cn_path(en_path: str, cn_path: Optional[str] = None) -> str:
+def resolve_cn_path(
+    en_path: str, cn_path: Optional[str] = None, announce: bool = True,
+) -> str:
     """在未指定中文文件时，将英文路径中的 data-bak 目录替换为 data。"""
     if cn_path:
         return cn_path
@@ -237,10 +253,11 @@ def resolve_cn_path(en_path: str, cn_path: Optional[str] = None) -> str:
             f"未指定 --cn，自动推导的中文{target_kind}不存在: {candidate}"
         )
     target_kind = "目录" if source_is_directory else "文件"
-    print(
-        f"未指定 --cn，自动使用中文{target_kind}: {candidate}",
-        flush=True,
-    )
+    if announce:
+        print(
+            f"未指定 --cn，自动使用中文{target_kind}: {candidate}",
+            flush=True,
+        )
     return str(candidate)
 
 
@@ -354,6 +371,128 @@ def _differs_only_inside_tags(left: str, right: str) -> bool:
     return left_skeleton is not None and left_skeleton == right_skeleton
 
 
+differs_only_by_quote_style = _differs_only_by_quote_style
+differs_only_inside_tags = _differs_only_inside_tags
+
+
+def classify_alignment(
+    alignment: AlignmentResult, jobs_by_uid: Dict[str, Job]
+) -> ClassifyResult:
+    """Classify aligned jobs for both preview and the mutating sync path."""
+    result = ClassifyResult()
+    for uid, manual_value in alignment.translations.items():
+        job = jobs_by_uid[uid]
+        item = SyncConflict(job, job.cn_str or "", manual_value)
+        if job.sql_id is None or getattr(job, "tag_sync_required", False):
+            result.missing.append(item)
+        elif job.cn_str == manual_value:
+            result.matching.append(item)
+        elif manual_value == job.en_str or differs_only_by_quote_style(job.cn_str, manual_value):
+            item.decision = "keep"
+            result.auto_keep.append(item)
+        elif differs_only_inside_tags(job.cn_str, manual_value):
+            item.decision = "auto_modify"
+            result.auto_modify.append(item)
+        else:
+            result.conflict.append(item)
+    return result
+
+
+_ACTIONS = {"add", "modify", "keep"}
+_MATCH_KEYS = {"en", "en_in", "sql_id", "sql_id_in", "tag_child", "file"}
+
+
+def _is_tag_child(job: Job) -> bool:
+    return bool(job.tag and re.search(rf"/{re.escape(job.tag)}\[\d+\]$", job.key_path or ""))
+
+
+def _validate_decision_rules(rules_dict: dict) -> dict:
+    if not isinstance(rules_dict, dict):
+        raise ValueError("决策文件根节点必须是对象")
+    unknown = set(rules_dict) - {"default", "rules"}
+    if unknown:
+        raise ValueError(f"决策文件含未知字段: {sorted(unknown)}")
+    normalized = {"rules": rules_dict.get("rules", [])}
+    if not isinstance(normalized["rules"], list):
+        raise ValueError("rules 必须是数组")
+
+    def validate_rule(rule, location, allow_match):
+        if not isinstance(rule, dict):
+            raise ValueError(f"{location} 必须是对象")
+        allowed = {"action", "fallback", "reason"} | ({"match"} if allow_match else set())
+        extra = set(rule) - allowed
+        if extra:
+            raise ValueError(f"{location} 含未知字段: {sorted(extra)}")
+        if rule.get("action") not in _ACTIONS:
+            raise ValueError(f"{location}.action 必须是 add/modify/keep")
+        if not isinstance(rule.get("reason"), str) or not rule["reason"].strip():
+            raise ValueError(f"{location}.reason 不能为空")
+        if "fallback" in rule and rule["fallback"] not in _ACTIONS:
+            raise ValueError(f"{location}.fallback 必须是 add/modify/keep")
+        if allow_match:
+            match = rule.get("match")
+            if not isinstance(match, dict) or not match:
+                raise ValueError(f"{location}.match 必须是非空对象")
+            match_extra = set(match) - _MATCH_KEYS
+            if match_extra:
+                raise ValueError(f"{location}.match 含未知字段: {sorted(match_extra)}")
+            for key in ("en_in", "sql_id_in"):
+                if key in match and not isinstance(match[key], list):
+                    raise ValueError(f"{location}.match.{key} 必须是数组")
+            if "tag_child" in match and not isinstance(match["tag_child"], bool):
+                raise ValueError(f"{location}.match.tag_child 必须是布尔值")
+        return dict(rule)
+
+    normalized["rules"] = [validate_rule(rule, f"rules[{index}]", True)
+                             for index, rule in enumerate(normalized["rules"])]
+    if "default" in rules_dict:
+        normalized["default"] = validate_rule(rules_dict["default"], "default", False)
+    return normalized
+
+
+class RulesDecisionProvider:
+    def __init__(self, rules_dict: dict):
+        self.rules = _validate_decision_rules(rules_dict)
+        self.log: List[dict] = []
+
+    @staticmethod
+    def _matches(match: dict, conflict: SyncConflict) -> bool:
+        job = conflict.job
+        values = {"en": job.en_str, "sql_id": job.sql_id,
+                  "tag_child": _is_tag_child(job), "file": job.rel_path}
+        for key, expected in match.items():
+            if key == "en_in" and values["en"] not in expected:
+                return False
+            if key == "sql_id_in" and values["sql_id"] not in expected:
+                return False
+            if key not in {"en_in", "sql_id_in"} and values[key] != expected:
+                return False
+        return True
+
+    def choose(self, conflict: SyncConflict) -> Tuple[dict, str]:
+        for index, rule in enumerate(self.rules["rules"]):
+            if self._matches(rule["match"], conflict):
+                return rule, f"rules[{index}]"
+        default = self.rules.get("default")
+        if default is None:
+            raise ValueError(
+                f"决策规则未覆盖冲突: file={conflict.job.rel_path}, "
+                f"uid={conflict.job.uid}, en={conflict.job.en_str!r}"
+            )
+        return default, "default"
+
+    def __call__(self, conflict: SyncConflict, index: int, total: int) -> str:
+        rule, matched = self.choose(conflict)
+        conflict._decision_rule = rule
+        conflict._decision_match = matched
+        return rule["action"]
+
+
+def build_decision_provider_from_rules(rules_dict: dict) -> RulesDecisionProvider:
+    """Validate rules and return the provider used by both CLI and library calls."""
+    return RulesDecisionProvider(rules_dict)
+
+
 def _print_database_progress(stage: str, current: int, total: int) -> None:
     stages = {
         "lookup": (1, "检查已有译文"),
@@ -378,12 +517,301 @@ def _generate(info, mode: str):
     }})).cn_obj
 
 
+def _report_entry(section: str, item: SyncConflict) -> dict:
+    job = item.job
+    return {
+        "uid": job.uid,
+        "en": job.en_str,
+        "cn_db": item.database_value,
+        "cn_file": item.manual_value,
+        "sql_id": job.sql_id,
+        "is_proofread": bool(job.is_proofread),
+        "tag": job.tag,
+        "key_path": job.key_path,
+        "tag_child": _is_tag_child(job),
+        "file": job.rel_path,
+    }
+
+
+def _chunks(values: Sequence[Any], size: int = 500):
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
+
+
+def _query_preview_evidence(db, english: Sequence[str], word_ids: Sequence[int]) -> dict:
+    candidates = {value: [] for value in sorted(set(english))}
+    usage_files = {str(value): {} for value in sorted(set(word_ids))}
+    if hasattr(db, "store_records"):
+        for en in candidates:
+            rows = [row for row in db.store_records if row["en"] == en]
+            for row in rows:
+                usages = [u for u in db.word_usage if u["word_id"] == row["id"]]
+                candidates[en].append({
+                    "id": row["id"], "cn": row["cn"],
+                    "proofread": bool(row["proofread"]),
+                    "is_key": bool(row["is_key"]), "usage_count": len(usages),
+                    "json_file": row.get("json_file", ""),
+                })
+        for word_id in word_ids:
+            counts = usage_files[str(word_id)]
+            for usage in db.word_usage:
+                if usage["word_id"] == word_id:
+                    counts[usage["file"]] = counts.get(usage["file"], 0) + 1
+    else:
+        sql_db = db.db_list[0]
+        for chunk in _chunks(sorted(candidates)):
+            placeholders = ",".join(["%s"] * len(chunk))
+            rows = sql_db.execute_query(
+                "SELECT w.id,w.en,w.cn,w.proofread,w.is_key,w.json_file,"
+                "COUNT(wu.id) usage_count FROM words w LEFT JOIN word_usage wu "
+                "ON wu.word_id=w.id WHERE BINARY w.en IN (" + placeholders + ") "
+                "GROUP BY w.id,w.en,w.cn,w.proofread,w.is_key,w.json_file",
+                tuple(chunk),
+            ) or []
+            for row in rows:
+                candidates[row["en"]].append({
+                    "id": row["id"], "cn": row["cn"],
+                    "proofread": bool(row["proofread"]),
+                    "is_key": bool(row["is_key"]),
+                    "usage_count": row["usage_count"],
+                    "json_file": row.get("json_file", ""),
+                })
+        for chunk in _chunks(sorted(set(word_ids))):
+            placeholders = ",".join(["%s"] * len(chunk))
+            rows = sql_db.execute_query(
+                "SELECT word_id,file,COUNT(*) usage_count FROM word_usage "
+                "WHERE word_id IN (" + placeholders + ") GROUP BY word_id,file",
+                tuple(chunk),
+            ) or []
+            for row in rows:
+                usage_files[str(row["word_id"])][row["file"]] = row["usage_count"]
+    for rows in candidates.values():
+        rows.sort(key=lambda row: (-row["usage_count"], row["id"]))
+    return {"candidates": candidates, "usage_files": usage_files}
+
+
+def _promote_reusable_conflicts(classified: ClassifyResult, db) -> None:
+    """Turn conflicts with an existing exact (en, cn) row into usage rebinds."""
+    if not classified.conflict:
+        return
+    evidence = _query_preview_evidence(
+        db, [item.job.en_str for item in classified.conflict], [],
+    )
+    remaining = []
+    for item in classified.conflict:
+        candidate = next(
+            (row for row in evidence["candidates"].get(item.job.en_str, [])
+             if row["cn"] == item.manual_value),
+            None,
+        )
+        if candidate is None:
+            remaining.append(item)
+            continue
+        item.decision = "add"
+        item._reuse_sql_id = candidate["id"]
+        classified.auto_rebind.append(item)
+    classified.conflict = remaining
+
+
+def _find_collisions(classified: ClassifyResult) -> List[dict]:
+    by_id: Dict[int, List[Tuple[str, SyncConflict]]] = {}
+    for section in ("auto_modify", "conflict"):
+        for item in getattr(classified, section):
+            if item.job.sql_id is not None:
+                by_id.setdefault(item.job.sql_id, []).append((section, item))
+    collisions = []
+    for word_id, items in by_id.items():
+        values = sorted({item.manual_value for _, item in items})
+        if len(values) < 2:
+            continue
+        sections = {section for section, _ in items}
+        kind = ("conflict-vs-auto_modify" if len(sections) > 1
+                else "conflict-vs-conflict")
+        collisions.append({
+            "word_id": word_id,
+            "uids": sorted(item.job.uid for _, item in items),
+            "distinct_file_values": values,
+            "kind": kind,
+        })
+    return sorted(collisions, key=lambda item: item["word_id"])
+
+
+def preview_sync_from_cn(
+    en_path: str,
+    cn_path: Optional[str] = None,
+    mode: str = "5et",
+    source_root: Optional[str] = None,
+    include_matching: bool = False,
+) -> dict:
+    """Analyze one pair and return a deterministic, JSON-serializable report."""
+    cn_path = resolve_cn_path(en_path, cn_path, announce=False)
+    manual_obj = _read_json(cn_path)
+    analyser = JsonAnalyser(
+        source_root=source_root, read_only=True, preserve_job_markers=True,
+    )
+    info = next(analyser.invoke([en_path], config={"metadata": {
+        "mode": mode, "force_title": False,
+    }}), None)
+    if info is None:
+        raise RuntimeError("英文文件未产生可同步的分析结果，请检查路径与 --mode")
+    alignment = align_manual_translations(info.json_obj, manual_obj, info.job_list)
+    classified = classify_alignment(alignment, {job.uid: job for job in info.job_list})
+    entries = {}
+    _promote_reusable_conflicts(classified, analyser.dictionary)
+    for section in ("missing", "auto_keep", "auto_modify", "auto_rebind", "conflict"):
+        rows = [_report_entry(section, item) for item in getattr(classified, section)]
+        if section == "auto_rebind":
+            for row, item in zip(rows, classified.auto_rebind):
+                row["reuse_sql_id"] = item._reuse_sql_id
+        entries[section] = sorted(
+            rows, key=lambda row: (section, row["en"], row["cn_db"], row["cn_file"], row["uid"])
+        )
+    if include_matching:
+        rows = [_report_entry("matching", item) for item in classified.matching]
+        entries["matching"] = sorted(
+            rows, key=lambda row: ("matching", row["en"], row["cn_db"], row["cn_file"], row["uid"])
+        )
+    evidence = _query_preview_evidence(
+        analyser.dictionary,
+        [item.job.en_str for item in (
+            classified.missing + classified.auto_rebind + classified.conflict
+        )],
+        [item.job.sql_id for item in classified.conflict + classified.auto_modify
+         if item.job.sql_id is not None]
+        + [item._reuse_sql_id for item in classified.auto_rebind],
+    )
+    return {
+        "en_path": str(en_path), "cn_path": str(cn_path), "mode": mode,
+        "summary": {
+            "total_jobs": len(info.job_list),
+            "translated": len(alignment.translations),
+            "missing": len(classified.missing),
+            "matching": len(classified.matching),
+            "auto_keep": len(classified.auto_keep),
+            "auto_modify": len(classified.auto_modify),
+            "auto_rebind": len(classified.auto_rebind),
+            "conflict": len(classified.conflict),
+            "alignment_errors": len(alignment.errors),
+        },
+        "entries": entries,
+        "evidence": evidence,
+        "collisions": _find_collisions(classified),
+        "alignment_errors": sorted(alignment.errors),
+    }
+
+
+def _merge_preview_reports(reports: List[dict], en_path: str, cn_path: str, mode: str) -> dict:
+    summary_keys = ("total_jobs", "translated", "missing", "matching", "auto_keep",
+                    "auto_modify", "auto_rebind", "conflict", "alignment_errors")
+    merged = {
+        "en_path": en_path, "cn_path": cn_path, "mode": mode,
+        "summary": {key: sum(report["summary"][key] for report in reports)
+                    for key in summary_keys},
+        "entries": {}, "evidence": {"candidates": {}, "usage_files": {}},
+        "collisions": [], "alignment_errors": [], "files": reports,
+    }
+    sections = sorted({section for report in reports for section in report["entries"]})
+    for section in sections:
+        merged["entries"][section] = sorted(
+            [row for report in reports for row in report["entries"].get(section, [])],
+            key=lambda row: (section, row["en"], row["cn_db"], row["cn_file"], row["uid"]),
+        )
+    for report in reports:
+        for en, rows in report["evidence"]["candidates"].items():
+            known = {row["id"] for row in merged["evidence"]["candidates"].get(en, [])}
+            merged["evidence"]["candidates"].setdefault(en, []).extend(
+                row for row in rows if row["id"] not in known
+            )
+        for word_id, counts in report["evidence"]["usage_files"].items():
+            merged["evidence"]["usage_files"].setdefault(word_id, {}).update(counts)
+        merged["collisions"].extend(report["collisions"])
+        merged["alignment_errors"].extend(
+            f"{report.get('relative_path', '')}: {error}" for error in report["alignment_errors"]
+        )
+    merged["collisions"].sort(key=lambda item: item["word_id"])
+    return merged
+
+
+def preview_sync_from_cn_path(
+    en_path: str, cn_path: Optional[str] = None, mode: str = "5et",
+    source_root: Optional[str] = None, include_matching: bool = False,
+) -> dict:
+    """Preview one file or recursively preview paired JSON files."""
+    en_root = Path(en_path)
+    if en_root.is_file():
+        return preview_sync_from_cn(
+            str(en_root), cn_path, mode, source_root, include_matching,
+        )
+    if not en_root.is_dir():
+        raise FileNotFoundError(f"英文路径不存在: {en_root}")
+    cn_root = Path(resolve_cn_path(str(en_root), cn_path, announce=False))
+    if not cn_root.is_dir():
+        raise ValueError(f"--en 是目录时，--cn 也必须是目录: {cn_root}")
+    reports = []
+    for en_file in sorted(en_root.rglob("*.json")):
+        relative = en_file.relative_to(en_root)
+        cn_file = cn_root / relative
+        if not cn_file.is_file():
+            continue
+        report = preview_sync_from_cn(
+            str(en_file), str(cn_file), mode, source_root or str(en_root), include_matching,
+        )
+        report["relative_path"] = str(relative)
+        reports.append(report)
+    if not reports:
+        raise ValueError(f"未在中文目录中找到任何对应 JSON: {cn_root}")
+    return _merge_preview_reports(reports, str(en_root), str(cn_root), mode)
+
+
+def validate_preview_decisions(report: dict, provider: RulesDecisionProvider) -> List[dict]:
+    """Fail closed while dry-running rule coverage and word-id collisions."""
+    if report.get("files"):
+        for file_report in report["files"]:
+            validate_preview_decisions(file_report, provider)
+        return provider.log
+    modified = {}
+    for row in report["entries"].get("auto_modify", []):
+        old = modified.get(row["sql_id"])
+        if old is not None and old != row["cn_file"]:
+            raise ValueError(
+                f"预演碰撞: word_id={row['sql_id']}，冲突值={old!r}/{row['cn_file']!r}"
+            )
+        modified[row["sql_id"]] = row["cn_file"]
+    for index, row in enumerate(report["entries"].get("conflict", []), start=1):
+        job = Job(row["uid"], row["en"], row["cn_db"], rel_path=row.get("file", ""),
+                  tag=row.get("tag", ""), key_path=row.get("key_path", ""))
+        job.sql_id = row["sql_id"]
+        conflict = SyncConflict(job, row["cn_db"], row["cn_file"])
+        action = provider(conflict, index, report["summary"]["conflict"])
+        fallback_used = False
+        previous = modified.get(row["sql_id"])
+        if action == "modify" and previous is not None and previous != row["cn_file"]:
+            fallback = conflict._decision_rule.get("fallback")
+            if fallback is None or fallback == "modify":
+                raise ValueError(
+                    f"预演碰撞: word_id={row['sql_id']}，冲突值="
+                    f"{previous!r}/{row['cn_file']!r}，规则={conflict._decision_match}"
+                )
+            action, fallback_used = fallback, True
+        if action == "modify":
+            modified[row["sql_id"]] = row["cn_file"]
+        provider.log.append({
+            "index": index, "uid": row["uid"], "sql_id": row["sql_id"],
+            "en": row["en"], "cn_db": row["cn_db"], "cn_file": row["cn_file"],
+            "file": row.get("file", ""),
+            "matched": conflict._decision_match, "action": action,
+            "fallback_used": fallback_used, "reason": conflict._decision_rule["reason"],
+        })
+    return provider.log
+
+
 def sync_from_cn(
     en_path: str,
     cn_path: Optional[str] = None,
     mode: str = "5et",
     decision_provider: Optional[Callable[[SyncConflict, int, int], str]] = None,
     source_root: Optional[str] = None,
+    decision_log: Optional[List[dict]] = None,
 ) -> SyncSummary:
     """Synchronize one English/Chinese JSON pair and verify a fresh DB-only generation."""
     cn_path = resolve_cn_path(en_path, cn_path)
@@ -404,38 +832,24 @@ def sync_from_cn(
         suffix = "" if len(alignment.errors) <= 20 else f"\n- 另有 {len(alignment.errors) - 20} 项"
         raise ValueError(f"中英文 JSON 无法安全对齐：\n{details}{suffix}")
 
-    summary = SyncSummary()
     jobs_by_uid = {job.uid: job for job in info.job_list}
-    conflicts: List[SyncConflict] = []
-    missing: List[Tuple[Job, str]] = []
-    matching: List[Tuple[Job, str]] = []
+    classified = classify_alignment(alignment, jobs_by_uid)
+    _promote_reusable_conflicts(classified, analyser.dictionary)
+    summary = SyncSummary(matched=len(classified.matching))
+    conflicts = classified.all_conflicts
+    missing = [(item.job, item.manual_value) for item in classified.missing]
+    matching = [(item.job, item.manual_value) for item in classified.matching]
     expected_values: Dict[str, str] = {}
-
-    for uid, manual_value in alignment.translations.items():
-        job = jobs_by_uid[uid]
-        # tag-only fallback 只证明可见文本有译文，不代表数据库中
-        # 存在当前完整英文。同步时应新增完整带标签记录，而非报冲突。
-        if job.sql_id is None or getattr(job, "tag_sync_required", False):
-            job.tag_sync_required = False
-            job.sql_id = None
-            missing.append((job, manual_value))
-            expected_values[uid] = manual_value
-        elif job.cn_str == manual_value:
-            summary.matched += 1
-            matching.append((job, manual_value))
-            expected_values[uid] = manual_value
-        else:
-            conflict = SyncConflict(job, job.cn_str, manual_value)
-            if (
-                manual_value == job.en_str
-                or _differs_only_by_quote_style(job.cn_str, manual_value)
-            ):
-                conflict.decision = "keep"
-                expected_values[uid] = job.cn_str
-            elif _differs_only_inside_tags(job.cn_str, manual_value):
-                conflict.decision = "auto_modify"
-                expected_values[uid] = manual_value
-            conflicts.append(conflict)
+    for item in classified.missing:
+        item.job.tag_sync_required = False
+        item.job.sql_id = None
+        expected_values[item.job.uid] = item.manual_value
+    for item in classified.matching:
+        expected_values[item.job.uid] = item.manual_value
+    for item in classified.auto_keep:
+        expected_values[item.job.uid] = item.database_value
+    for item in classified.auto_modify:
+        expected_values[item.job.uid] = item.manual_value
 
     summary.conflicts = len(conflicts)
     pending_conflicts = [conflict for conflict in conflicts if not conflict.decision]
@@ -446,8 +860,12 @@ def sync_from_cn(
     for index, conflict in enumerate(conflicts, start=1):
         if conflict.decision == "keep":
             continue
+        if conflict.decision == "add":
+            expected_values[conflict.job.uid] = conflict.manual_value
+            continue
         word_id = conflict.job.sql_id
         if word_id in modified_values_by_id:
+            conflict._original_database_value = conflict.database_value
             conflict.database_value = modified_values_by_id[word_id]
             if conflict.database_value == conflict.manual_value:
                 # 前面已确认修改同一 words 记录，本位置将自然
@@ -478,8 +896,23 @@ def sync_from_cn(
                     "同一数据库记录在不同位置对应不同手工译文，不能同时“修改”；"
                     "本项请选择“新增”或“以库中为准”"
                 )
+                rule = getattr(conflict, "_decision_rule", None)
+                if rule and rule.get("fallback"):
+                    decision = rule["fallback"]
+                    conflict._fallback_used = True
+                    if decision == "modify":
+                        raise ValueError(
+                            f"word_id={word_id} 的 fallback 仍为 modify，"
+                            f"冲突值={previous_value!r}/{conflict.manual_value!r}，"
+                            f"规则={getattr(conflict, '_decision_match', '')}"
+                        )
+                    break
                 if decision_provider is not None:
-                    raise ValueError(message)
+                    raise ValueError(
+                        f"{message}；word_id={word_id}，"
+                        f"冲突值={previous_value!r}/{conflict.manual_value!r}，"
+                        f"规则={getattr(conflict, '_decision_match', '自定义 provider')}"
+                    )
                 print(message)
                 continue
             break
@@ -489,6 +922,20 @@ def sync_from_cn(
         expected_values[conflict.job.uid] = (
             conflict.database_value if decision == "keep" else conflict.manual_value
         )
+        if isinstance(provider, RulesDecisionProvider):
+            rule = conflict._decision_rule
+            entry = {
+                "index": index, "uid": conflict.job.uid,
+                "sql_id": conflict.job.sql_id, "en": conflict.job.en_str,
+                "cn_db": getattr(conflict, "_original_database_value", conflict.database_value),
+                "cn_file": conflict.manual_value, "file": conflict.job.rel_path,
+                "matched": conflict._decision_match, "action": decision,
+                "fallback_used": bool(getattr(conflict, "_fallback_used", False)),
+                "reason": rule["reason"],
+            }
+            provider.log.append(entry)
+            if decision_log is not None:
+                decision_log.append(entry)
 
     # Build the exact expected output before mutating the database.
     exact_uids = {job.uid for job, _ in missing}
@@ -614,6 +1061,7 @@ def sync_from_cn_path(
     mode: str = "5et",
     decision_provider: Optional[Callable[[SyncConflict, int, int], str]] = None,
     source_root: Optional[str] = None,
+    decision_log: Optional[List[dict]] = None,
 ) -> SyncSummary:
     """同步单个 JSON，或递归同步目录中所有可配对的 JSON。"""
     en_root = Path(en_path)
@@ -621,6 +1069,7 @@ def sync_from_cn_path(
         return sync_from_cn(
             str(en_root), cn_path, mode=mode,
             decision_provider=decision_provider, source_root=source_root,
+            decision_log=decision_log,
         )
     if not en_root.is_dir():
         raise FileNotFoundError(f"英文路径不存在: {en_root}")
@@ -665,6 +1114,7 @@ def sync_from_cn_path(
             current = sync_from_cn(
                 str(en_file), str(cn_file), mode=mode,
                 decision_provider=decision_provider, source_root=source_root,
+                decision_log=decision_log,
             )
         except Exception as exc:
             total.verified = False

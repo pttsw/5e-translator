@@ -607,6 +607,51 @@ class JsonGenerator(Runnable):
                 cn_str = p_v
         return cn_str, True
 
+    def __replace_exact_translation_tags(
+        self,
+        cn_str: str,
+        en_str: str,
+        tag: str = "",
+        base_uid: str = "",
+    ):
+        """Translate values in tags retained by an exact/manual translation.
+
+        Exact translations own the surrounding prose and tag structure.  Try
+        the normal source-aware path first so location-specific child jobs are
+        honoured.  If the author deliberately omitted or changed tags, only
+        process the tags which remain in the manual text; never repair its
+        structure from the English source.
+        """
+        replaced, ok = self.__replace_sub_jobs(
+            cn_str,
+            en_str,
+            tag=tag,
+            base_uid=base_uid,
+            process_full_value=False,
+        )
+        if ok:
+            return replaced, True
+
+        cn_tags, cn_values, cn_valid = parse_custom_format(cn_str, False)
+        if not cn_valid:
+            return cn_str, True
+
+        replaced = cn_str
+        for cn_tag, cn_value in zip(cn_tags, cn_values):
+            new_value, value_ok = self.__replace_sub_jobs(
+                cn_value,
+                cn_value,
+                tag=cn_tag,
+                allow_plain_reprocess=True,
+                process_full_value=False,
+            )
+            if not value_ok or new_value == cn_value:
+                continue
+            old_token = self.__format_tag(cn_tag, cn_value)
+            new_token = self.__format_tag(cn_tag, new_value)
+            replaced = replaced.replace(old_token, new_token, 1)
+        return replaced, True
+
     def __sync_tag_only_cn(self, cn_str: str, old_en_str: Optional[str], new_en_str: str, tag=""):
         """Best-effort update of existing CN when English only gained tag wrappers."""
         if not isinstance(cn_str, str) or not isinstance(new_en_str, str):
@@ -908,7 +953,12 @@ class JsonGenerator(Runnable):
                             getattr(j, "exact_translation", False)
                         )
                         if preserve_exact_text:
-                            replaced_cn, ok = j.cn_str, True
+                            replaced_cn, ok = self.__replace_exact_translation_tags(
+                                j.cn_str,
+                                j.en_str,
+                                tag=j.tag,
+                                base_uid=j.uid,
+                            )
                         elif (
                             en_valid
                             and cn_valid

@@ -9,9 +9,13 @@ from app.cli.sync_from_cn import (
     SyncSummary,
     _prompt_conflict,
     align_manual_translations,
+    build_decision_provider_from_rules,
+    classify_alignment,
+    preview_sync_from_cn,
     resolve_cn_path,
     sync_from_cn,
     sync_from_cn_path,
+    validate_preview_decisions,
 )
 from app.core.database.memory_db_dictionary import MemoryDBDictionary
 from app.core.translator import JsonGenerator
@@ -635,4 +639,154 @@ def test_sync_batch_reuses_translation_regardless_of_category(monkeypatch):
     assert db.store_records[0]["category"] == "item"
     assert db.usage_by_file_uid[("sample.json", "$.spell.name")]["word_id"] == (
         db.store_records[0]["id"]
+    )
+
+
+def test_preview_classifies_without_writing_and_omits_matching(tmp_path, monkeypatch):
+    db = _reset_memory_db(monkeypatch)
+    en_path, cn_path = _write_pair(tmp_path)
+    db.put("Magic Bolt", "魔法飞弹", "sample.json", proofread=True, tag="spell")
+    before_words = [dict(row) for row in db.store_records]
+    before_usage = [dict(row) for row in db.word_usage]
+
+    report = preview_sync_from_cn(
+        str(en_path), str(cn_path), source_root=str(tmp_path),
+    )
+
+    assert report["summary"]["matching"] == 1
+    assert report["summary"]["missing"] == 1
+    assert "matching" not in report["entries"]
+    assert report["entries"]["missing"][0]["en"] == "A bright bolt hits the target."
+    assert report["alignment_errors"] == []
+    assert db.store_records == before_words
+    assert db.word_usage == before_usage
+    json.loads(json.dumps(report, ensure_ascii=False))
+
+
+def test_preview_detects_conflict_collision(tmp_path, monkeypatch):
+    db = _reset_memory_db(monkeypatch)
+    en_path = tmp_path / "sample.json"
+    cn_path = tmp_path / "sample-cn.json"
+    en_path.write_text(json.dumps({"spell": [
+        {"name": "One", "source": "TST", "entries": ["Shared."]},
+        {"name": "Two", "source": "TST", "entries": ["Shared."]},
+    ]}), encoding="utf-8")
+    cn_path.write_text(json.dumps({"spell": [
+        {"ENG_name": "One", "name": "一", "source": "TST", "entries": ["甲。"]},
+        {"ENG_name": "Two", "name": "二", "source": "TST", "entries": ["乙。"]},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    word_id = db.put("Shared.", "旧。", "old.json", proofread=True, tag="spell")
+
+    report = preview_sync_from_cn(
+        str(en_path), str(cn_path), source_root=str(tmp_path),
+    )
+
+    collision = next(item for item in report["collisions"] if item["word_id"] == word_id)
+    assert collision["kind"] == "conflict-vs-conflict"
+    assert collision["distinct_file_values"] == ["乙。", "甲。"]
+
+
+@pytest.mark.parametrize("bad_rules", [
+    {"default": {"action": "drop", "reason": "x"}},
+    {"default": {"action": "keep"}},
+    {"rules": [{"match": {"unknown": 1}, "action": "keep", "reason": "x"}]},
+])
+def test_decision_rule_schema_rejects_invalid_documents(bad_rules):
+    with pytest.raises(ValueError):
+        build_decision_provider_from_rules(bad_rules)
+
+
+def test_preview_decisions_fail_closed_and_use_collision_fallback(tmp_path, monkeypatch):
+    db = _reset_memory_db(monkeypatch)
+    en_path = tmp_path / "sample.json"
+    cn_path = tmp_path / "sample-cn.json"
+    en_path.write_text(json.dumps({"spell": [
+        {"name": "One", "source": "TST", "entries": ["Shared."]},
+        {"name": "Two", "source": "TST", "entries": ["Shared."]},
+    ]}), encoding="utf-8")
+    cn_path.write_text(json.dumps({"spell": [
+        {"ENG_name": "One", "name": "一", "source": "TST", "entries": ["甲。"]},
+        {"ENG_name": "Two", "name": "二", "source": "TST", "entries": ["乙。"]},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    db.put("Shared.", "旧。", "old.json", proofread=True, tag="spell")
+    report = preview_sync_from_cn(str(en_path), str(cn_path), source_root=str(tmp_path))
+
+    uncovered = build_decision_provider_from_rules({
+        "rules": [{"match": {"en": "other"}, "action": "keep", "reason": "x"}],
+    })
+    with pytest.raises(ValueError, match="未覆盖冲突"):
+        validate_preview_decisions(report, uncovered)
+
+    provider = build_decision_provider_from_rules({
+        "default": {"action": "modify", "fallback": "add", "reason": "采用文件译文"},
+    })
+    log = validate_preview_decisions(report, provider)
+    assert [entry["action"] for entry in log] == ["modify", "add"]
+    assert [entry["fallback_used"] for entry in log] == [False, True]
+
+
+def test_rules_provider_applies_collision_fallback_and_logs_actual_actions(
+    tmp_path, monkeypatch
+):
+    db = _reset_memory_db(monkeypatch)
+    en_path = tmp_path / "sample.json"
+    cn_path = tmp_path / "sample-cn.json"
+    en_path.write_text(json.dumps({"spell": [
+        {"name": "One", "source": "TST", "entries": ["Shared."]},
+        {"name": "Two", "source": "TST", "entries": ["Shared."]},
+    ]}), encoding="utf-8")
+    cn_path.write_text(json.dumps({"spell": [
+        {"ENG_name": "One", "name": "一", "source": "TST", "entries": ["甲。"]},
+        {"ENG_name": "Two", "name": "二", "source": "TST", "entries": ["乙。"]},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    db.put("Shared.", "旧。", "old.json", proofread=True, tag="spell")
+    provider = build_decision_provider_from_rules({
+        "default": {"action": "modify", "fallback": "add", "reason": "采用文件译文"},
+    })
+    decision_log = []
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), source_root=str(tmp_path),
+        decision_provider=provider, decision_log=decision_log,
+    )
+
+    assert summary.verified is True
+    assert summary.updated == 1
+    assert [entry["action"] for entry in decision_log] == ["modify", "add"]
+    assert decision_log[1]["fallback_used"] is True
+    assert {row["cn"] for row in db.store_records if row["en"] == "Shared."} == {"甲。", "乙。"}
+
+
+def test_sync_rebinds_existing_exact_en_cn_without_prompt(tmp_path, monkeypatch):
+    db = _reset_memory_db(monkeypatch)
+    en_path, cn_path = _write_pair(tmp_path)
+    old_id = db.put(
+        "Magic Bolt", "旧译名", "old.json", proofread=True, tag="spell",
+    )
+    desired_id = db.put(
+        "Magic Bolt", "魔法飞弹", "other.json", proofread=False, tag="item",
+    )
+    words_before = [dict(row) for row in db.store_records]
+
+    report = preview_sync_from_cn(
+        str(en_path), str(cn_path), source_root=str(tmp_path),
+    )
+    assert report["summary"]["auto_rebind"] == 1
+    assert report["summary"]["conflict"] == 0
+    assert report["entries"]["auto_rebind"][0]["reuse_sql_id"] == desired_id
+
+    def unexpected_prompt(*_args):
+        raise AssertionError("已有相同 en/cn 时不应询问用户")
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), source_root=str(tmp_path),
+        decision_provider=unexpected_prompt,
+    )
+
+    assert summary.verified is True
+    assert len(db.store_records) == len(words_before) + 1  # 仅另一个缺失句子新增 words
+    assert db.store_by_id[old_id]["cn"] == "旧译名"
+    assert any(
+        usage["file"] == "sample.json" and usage["word_id"] == desired_id
+        for usage in db.word_usage
     )

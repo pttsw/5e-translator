@@ -34,6 +34,7 @@ class DBDictionary:
             return
 
         self._initialized = True
+        self.read_only = False
         self.source = source
         self.version = version
         self.lock = threading.Lock()
@@ -506,7 +507,7 @@ class DBDictionary:
         redis_bean = self.__get_redis(k, tag, ignore_case, correct_tag_from_db)
         if v_bean is None and redis_bean != None:
             v_bean = redis_bean
-            if rel_f != "" and job_context is not None:
+            if rel_f != "" and job_context is not None and not self.read_only:
                 self.__put_usage_by_word_id(v_bean['sql_id'], rel_f, job_context)
         # elif ignore_case:
         #     # tempd = list(map(lambda dk: {dk.lower():self.dictionary[dk]},self.dictionary.keys()))
@@ -532,7 +533,7 @@ class DBDictionary:
                 v_bean = self.__get_best_match(res, k, tag)
                 if v_bean == None:
                     return None
-                if rel_f != "":
+                if rel_f != "" and not self.read_only:
                     if correct_tag_from_db:
                         redis_bean = self.__get_redis(k, tag, ignore_case, False)
                         if redis_bean == None or redis_bean['category'] != v_bean['category']:
@@ -687,7 +688,7 @@ class DBDictionary:
                     res_beans[(k, t, uid)] = redis_bean
                 else:
                     res_beans[(k, t)] = redis_bean
-                if rel_f and index < len(contexts):
+                if rel_f and not self.read_only and index < len(contexts):
                     job_context = contexts[index] if index < len(contexts) else None
                     cached_usage_items.append((redis_bean['sql_id'], rel_f, job_context))
             else:
@@ -697,7 +698,7 @@ class DBDictionary:
                     query_keys.append(k)
                     seen_query_keys.add(k)
         if len(query_keys) == 0:
-            if cached_usage_items:
+            if cached_usage_items and not self.read_only:
                 db_index = self.__get_db_index()
                 db = self.db_list[db_index]
                 try:
@@ -762,7 +763,7 @@ class DBDictionary:
                 res_beans[(query_k, query_t)] = v_bean
                 query_beans.append((v_bean, job_context))
                 self.__put_redis(query_k, v_bean['cn'], v_bean['category'], v_bean['proofread'], v_bean['is_key'], v_bean['sql_id'], v_bean['modified_at'])
-            if rel_f != "":
+            if rel_f != "" and not self.read_only:
                 usage_items = cached_usage_items + [
                     (v_bean['sql_id'], rel_f, job_context)
                     for v_bean, job_context in query_beans

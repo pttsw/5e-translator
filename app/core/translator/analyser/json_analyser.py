@@ -85,7 +85,12 @@ class JsonAnalyser(Runnable):
                     continue
                 
             logger.info(f"开始解析 {j} 中的Json")
-            job_list, obj, ok = self.json_2_job(j)
+            previous_read_only = getattr(self.dictionary, "read_only", False)
+            self.dictionary.read_only = self.read_only
+            try:
+                job_list, obj, ok = self.json_2_job(j)
+            finally:
+                self.dictionary.read_only = previous_read_only
             if not ok:
                 logger.error(f"JsonAnalyser: 分析 {j} 时出错")
                 continue

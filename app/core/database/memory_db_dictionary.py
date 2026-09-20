@@ -27,6 +27,7 @@ class MemoryDBDictionary:
             return
         self._initialized = True
         self.ok = True
+        self.read_only = False
         self.source = source
         self.version = version
         self.lock = threading.Lock()
@@ -270,7 +271,7 @@ class MemoryDBDictionary:
             if cached:
                 proofread = [bean for bean in cached if bean["proofread"] == 1]
                 bean = proofread[0] if proofread else cached[0]
-                if rel_f:
+                if rel_f and not self.read_only:
                     self._put_word_usage(bean["sql_id"], rel_f, job_context)
                 return bean
             if target_tag is not None:
@@ -278,7 +279,7 @@ class MemoryDBDictionary:
             if not correct_tag_from_db and self.dictionary[k]:
                 proofread = [bean for bean in self.dictionary[k] if bean["proofread"] == 1]
                 bean = proofread[0] if proofread else self.dictionary[k][0]
-                if rel_f:
+                if rel_f and not self.read_only:
                     self._put_word_usage(bean["sql_id"], rel_f, job_context)
                 return bean
         if ignore_case and k.lower() in self.lower_dictionary:
@@ -288,7 +289,7 @@ class MemoryDBDictionary:
                 if tag_matches:
                     proofread = [bean for bean in tag_matches if bean["proofread"] == 1]
                     bean = proofread[0] if proofread else tag_matches[0]
-                    if rel_f:
+                    if rel_f and not self.read_only:
                         self._put_word_usage(bean["sql_id"], rel_f, job_context)
                     return bean
                 if correct_tag_from_db:
@@ -297,14 +298,14 @@ class MemoryDBDictionary:
                     return None
             proofread = [bean for bean in cached if bean["proofread"] == 1]
             bean = proofread[0] if proofread else cached[0]
-            if rel_f:
+            if rel_f and not self.read_only:
                 self._put_word_usage(bean["sql_id"], rel_f, job_context)
             return bean
         if not load_from_sql:
             return None
         records = self._query_store(k, ignore_case=ignore_case)
         bean = self._pick_best_match(records, k, tag)
-        if bean and rel_f and bean["sql_id"] in self.store_by_id:
+        if bean and rel_f and not self.read_only and bean["sql_id"] in self.store_by_id:
             self._put_word_usage(bean["sql_id"], rel_f, job_context)
         if bean:
             self._put_cache(self.store_by_id[bean["sql_id"]])
