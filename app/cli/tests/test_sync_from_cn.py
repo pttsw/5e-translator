@@ -790,3 +790,54 @@ def test_sync_rebinds_existing_exact_en_cn_without_prompt(tmp_path, monkeypatch)
         usage["file"] == "sample.json" and usage["word_id"] == desired_id
         for usage in db.word_usage
     )
+
+
+def test_sync_decks_rebinds_names_and_outcome_keys_then_reproduces_file(
+    tmp_path, monkeypatch
+):
+    db = _reset_memory_db(monkeypatch)
+    en_path = tmp_path / "decks.json"
+    cn_path = tmp_path / "decks-cn.json"
+    en_path.write_text(json.dumps({
+        "deck": [{
+            "name": "Tarokka Deck", "source": "CoS",
+            "spreads": [{
+                "name": "Reading",
+                "outcomes": {"adventure": {"CoS": {
+                    "warrior|tarokka deck|cos": "7fe",
+                }}},
+            }],
+        }],
+        "card": [{"name": "Skull", "source": "BMT"}],
+    }), encoding="utf-8")
+    cn_path.write_text(json.dumps({
+        "deck": [{
+            "ENG_name": "Tarokka Deck", "name": "塔罗卡牌组", "source": "CoS",
+            "spreads": [{
+                "ENG_name": "Reading", "name": "解读",
+                "outcomes": {"adventure": {"CoS": {
+                    "武者|塔罗卡牌组|cos": "7fe",
+                }}},
+            }],
+        }],
+        "card": [{"ENG_name": "Skull", "name": "头骨", "source": "BMT"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    db.put("Tarokka Deck", "塔罗卡牌组", "old.json", proofread=True, tag="deck")
+    db.put("Reading", "解读", "old.json", proofread=True, tag="deck")
+    db.put("Skull", "骷髅", "old.json", proofread=True, tag="deck")
+    skull_id = db.put("Skull", "头骨", "other.json", proofread=True, tag="card")
+    db.put("warrior", "战士", "old.json", proofread=True, tag="card")
+    warrior_id = db.put("warrior", "武者", "other.json", proofread=True, tag="card")
+    db.put("tarokka deck", "塔罗卡牌组", "old.json", proofread=True, tag="card")
+
+    def unexpected_prompt(*_args):
+        raise AssertionError("已有相同 en/cn 的名称和字典键不应询问用户")
+
+    summary = sync_from_cn(
+        str(en_path), str(cn_path), source_root=str(tmp_path),
+        decision_provider=unexpected_prompt,
+    )
+
+    assert summary.verified is True
+    assert any(u["file"] == "decks.json" and u["word_id"] == skull_id for u in db.word_usage)
+    assert any(u["file"] == "decks.json" and u["word_id"] == warrior_id for u in db.word_usage)

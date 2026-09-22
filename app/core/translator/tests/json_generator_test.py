@@ -1342,6 +1342,55 @@ def test_exact_translation_translates_retained_tag_without_restoring_omitted_tag
     assert cn_obj == {"entry": "仅保留{@condition 中毒|XPHB}。"}
 
 
+def test_exact_translation_prefers_manual_tag_values_over_global_normalization():
+    generator = JsonGenerator.__new__(JsonGenerator)
+    generator.dictionary = None
+    card_uid = "$.card"
+    quote_uid = "$.quote"
+    generator.done_jobs = [
+        Job(
+            card_uid,
+            "{@card Talons|Deck of Many Things}*",
+            "{@card 禽爪|万象无常牌}*",
+            tag="deck",
+            exact_translation=True,
+        ),
+        Job(
+            f"{card_uid}.card[0].0", "Talons", "禽爪",
+            tag="card", exact_translation=True,
+        ),
+        Job(
+            f"{card_uid}.card[0].1", "Deck of Many Things", "万象无常牌",
+            tag="card", exact_translation=True,
+        ),
+        Job(
+            quote_uid,
+            '{@i The mayor called them a "threat".}',
+            '{@i 镇长称他们为"威胁"。}',
+            tag="deck",
+            exact_translation=True,
+        ),
+        Job(
+            f"{quote_uid}.i[0].0",
+            'The mayor called them a "threat".',
+            '镇长称他们为“威胁”。',
+            tag="i",
+            exact_translation=False,
+        ),
+    ]
+
+    cn_obj, ok = generator._JsonGenerator__replace_jobs({
+        "card": f"{{!@ {card_uid}}}",
+        "quote": f"{{!@ {quote_uid}}}",
+    })
+
+    assert ok is True
+    assert cn_obj == {
+        "card": "{@card 禽爪|万象无常牌}*",
+        "quote": '{@i 镇长称他们为"威胁"。}',
+    }
+
+
 def test_replace_jobs_prefers_value_matching_over_position_alignment():
     class FakeDictionary:
         def get(self, en, tag=""):

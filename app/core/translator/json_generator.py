@@ -380,6 +380,7 @@ class JsonGenerator(Runnable):
         allow_plain_reprocess: bool = False,
         base_uid: str = "",
         process_full_value: bool = True,
+        prefer_manual_values: bool = False,
     ):
         # print(cn_str)
         processed = False
@@ -416,6 +417,12 @@ class JsonGenerator(Runnable):
             )
             return cn_str, False
 
+        # When an exact parent already contains an authored tag value, keep the
+        # complete value (including source/display metadata) intact.  English
+        # placeholders still flow through the normal tag translation path.
+        if prefer_manual_values and "{@" not in cn_str and cn_str != en_str:
+            return cn_str, True
+
         ok, matched_pairs = self.__match_tag_values_by_priority(
             cn_match_k, cn_match_v, en_match_k, en_match_v)
         if not ok:
@@ -437,6 +444,7 @@ class JsonGenerator(Runnable):
                 tag=ek,
                 allow_plain_reprocess=True,
                 base_uid=child_base_uid,
+                prefer_manual_values=prefer_manual_values,
             )
             if not ok:
                 return cn_str, False
@@ -536,7 +544,13 @@ class JsonGenerator(Runnable):
                 if base_uid:
                     child_job = self._job_by_uid.get(f"{base_uid}.{i}")
                     if child_job is not None and child_job.cn_str is not None:
-                        ccv = child_job.cn_str
+                        if (
+                            not prefer_manual_values
+                            or getattr(child_job, "exact_translation", False)
+                            or ccv is None
+                            or ccv == eev
+                        ):
+                            ccv = child_job.cn_str
                 if tag == "variantrule" and i == 1:
                     res_split.append(eev)
                     continue
@@ -601,7 +615,14 @@ class JsonGenerator(Runnable):
             if base_uid:
                 child_job = self._job_by_uid.get(f"{base_uid}.0")
                 if child_job is not None and child_job.cn_str is not None:
-                    return child_job.cn_str, True
+                    if (
+                        not prefer_manual_values
+                        or getattr(child_job, "exact_translation", False)
+                        or cn_str == en_str
+                    ):
+                        return child_job.cn_str, True
+            if prefer_manual_values and cn_str != en_str:
+                return cn_str, True
             p_v, ok = self.__process_value(en_str, tag = tag)
             if ok:
                 cn_str = p_v
@@ -628,6 +649,7 @@ class JsonGenerator(Runnable):
             tag=tag,
             base_uid=base_uid,
             process_full_value=False,
+            prefer_manual_values=True,
         )
         if ok:
             return replaced, True
@@ -1051,14 +1073,18 @@ class JsonGenerator(Runnable):
                 # obj, ok = self.__replace_sub_jobs(obj)
                 return obj, False
         elif isinstance(obj, dict):
+            replaced_obj = {}
             for k, v in obj.items():
                 if k == 'ENG_name':
+                    replaced_obj[k] = v
                     continue
+                new_k, key_ok = self.__replace_jobs(k)
+                if not key_ok:
+                    new_k = k
                 # try:
                 if (k != "uuid"):
                     new_v, ok = self.__replace_jobs(v)
-                    if ok:
-                        obj[k] = new_v
+                    replaced_obj[new_k] = new_v if ok else v
                 else:
                     # 临时在这里特殊处理foundry-items.json和foundry-optinalfeatures.json中的uuid特殊格式
                     # ev = ''
@@ -1077,11 +1103,11 @@ class JsonGenerator(Runnable):
                                 logger.error(f'{new_v} generated an exception: {mv}')
                                 continue
                             new_v = new_v.replace(mv, cn_v)
-                    obj[k] = new_v
+                    replaced_obj[new_k] = new_v
                     
                 # except Exception as exc:
                     # logger.error(f'{k} generated an exception: {exc}')
-            return obj, True
+            return replaced_obj, True
         elif isinstance(obj, list):
             for i, o in enumerate(obj):
                 new_o, ok = self.__replace_jobs(o)

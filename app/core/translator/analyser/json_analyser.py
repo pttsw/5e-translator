@@ -219,31 +219,35 @@ class JsonAnalyser(Runnable):
         self.en_obj = en_json_obj
 
         obj = {}  # 替换了Job uuid 标识符的json对象
+        def configured(analyser):
+            analyser.preserve_job_markers = self.preserve_job_markers
+            return analyser
+
         if self.rel_path in ["spells/sources.json", "icon-class.json", "icon-spell.json", "icon-feat.json", "icon-subclass.json", "bestiary/foundry-integration-token-subjects.json"]:
             # 针对法术source文件进行特殊处理
-            obj, self.job_list = SpellSourceAnalyser(
-                self.dictionary, self.rel_path).process(en_json_obj)
+            obj, self.job_list = configured(SpellSourceAnalyser(
+                self.dictionary, self.rel_path)).process(en_json_obj)
         elif self.rel_path == "foundry-items.json" \
             or self.rel_path == "foundry-optionalfeatures.json" \
             or self.rel_path == "class/foundry.json"\
             or self.rel_path == "spells/foundry.json":
-            obj, self.job_list = FoundryItemsAnalyser(
-                self.dictionary, self.rel_path).process(en_json_obj)
+            obj, self.job_list = configured(FoundryItemsAnalyser(
+                self.dictionary, self.rel_path)).process(en_json_obj)
         elif self.rel_path == "books.json" and self.mode == '5et':
-            obj, self.job_list = BooksAnalyser(
-                self.dictionary, self.rel_path).process(en_json_obj)
+            obj, self.job_list = configured(BooksAnalyser(
+                self.dictionary, self.rel_path)).process(en_json_obj)
         elif self.rel_path == "adventures.json" and self.mode == '5et':
-            obj, self.job_list = AdventuresAnalyser(
-                self.dictionary, self.rel_path).process(en_json_obj)
+            obj, self.job_list = configured(AdventuresAnalyser(
+                self.dictionary, self.rel_path)).process(en_json_obj)
         elif self.rel_path == "backgrounds.json":
-            obj, self.job_list = BackgroundsAnalyser(
-                self.dictionary, self.rel_path).process(en_json_obj)
+            obj, self.job_list = configured(BackgroundsAnalyser(
+                self.dictionary, self.rel_path)).process(en_json_obj)
         elif self.rel_path == "items.json":
-            obj, self.job_list = ItemsAnalyser(
-                self.dictionary, self.rel_path).process(en_json_obj)
+            obj, self.job_list = configured(ItemsAnalyser(
+                self.dictionary, self.rel_path)).process(en_json_obj)
         elif self.rel_path == "decks.json":
-            obj, self.job_list = DecksAnalyser(
-                self.dictionary, self.rel_path).process(en_json_obj)
+            obj, self.job_list = configured(DecksAnalyser(
+                self.dictionary, self.rel_path)).process(en_json_obj)
         else:  # 正常处理文本逻辑
             if self.mode == 'plu':
                 self.rel_path = os.path.join('plu/', self.rel_path)

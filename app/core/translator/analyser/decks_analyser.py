@@ -1,6 +1,7 @@
 from config import logger
 from .base_analyser import BaseAnalyser
 from app.core.database import DBDictionary
+from app.core.utils import Job
 
 
 class DecksAnalyser(BaseAnalyser):
@@ -26,7 +27,9 @@ class DecksAnalyser(BaseAnalyser):
         has_nested_dict = any(isinstance(v, dict) for v in value.values())
         translated_keys = {}
         if not has_nested_dict:
-            translated_keys = self._translate_card_uid_keys(value.keys(), source_hint)
+            translated_keys = self._translate_card_uid_keys(
+                value.keys(), source_hint, key_path,
+            )
         for k, v in value.items():
             next_source_hint = k if has_nested_dict and self._looks_like_source_bucket(v) else source_hint
             if isinstance(v, dict):
@@ -52,11 +55,12 @@ class DecksAnalyser(BaseAnalyser):
             return False
         return all(not isinstance(v, dict) for v in value.values())
 
-    def _translate_card_uid_keys(self, keys, source_hint: str = "") -> dict:
-        names_to_translate = []
-        seen_names = set()
+    def _translate_card_uid_keys(
+        self, keys, source_hint: str = "", key_path: str = "",
+    ) -> dict:
+        requests = []
         split_key_map = {}
-        for key in keys:
+        for key_index, key in enumerate(keys):
             split_key = key.split("|")
             split_key_map[key] = split_key
             if len(split_key) < 2:
@@ -64,24 +68,39 @@ class DecksAnalyser(BaseAnalyser):
             for index, name in enumerate(split_key):
                 if index == 2:
                     continue
-                if name in seen_names:
-                    continue
-                seen_names.add(name)
-                names_to_translate.append(name)
+                part_path = f"{key_path}/@key[{key_index}]/part[{index}]"
+                uid = self._job_uid_from_key_path(part_path, name)
+                requests.append((key, index, Job(
+                    uid, name, None, rel_path=self.rel_path, tag="card",
+                    key_path=part_path, entry_path=key_path,
+                )))
 
         translations = {}
-        if names_to_translate:
+        if requests:
             batch_res = self.dictionary.get_bunch(
-                names_to_translate,
-                ["card"] * len(names_to_translate),
+                [job.en_str for _, _, job in requests],
+                ["card"] * len(requests),
                 self.usage_rel_path,
                 ignore_case=True,
                 correct_tag_from_db=self.correct_tag_from_db,
+                job_contexts=[job for _, _, job in requests],
             )
-            for name in names_to_translate:
-                db_bean = batch_res.get((name, "card"))
+            for original_key, index, job in requests:
+                db_bean = batch_res.get((job.en_str, "card", job.uid))
+                if db_bean is None:
+                    db_bean = batch_res.get((job.en_str, "card"))
                 if db_bean is not None:
-                    translations[name] = db_bean["cn"]
+                    job.cn_str = db_bean["cn"]
+                    job.sql_id = db_bean["sql_id"]
+                    job.is_proofread = db_bean["proofread"]
+                    job.is_key = db_bean["is_key"]
+                    job.modified_at = db_bean["modified_at"]
+                    job.exact_translation = db_bean.get("exact_translation", False)
+                self._add_job(job)
+                translations[(original_key, index)] = (
+                    f"{{!@ {job.uid}}}" if self.preserve_job_markers
+                    else (job.cn_str or job.en_str)
+                )
 
         translated_key_map = {}
         for key, split_key in split_key_map.items():
@@ -98,7 +117,7 @@ class DecksAnalyser(BaseAnalyser):
                 translated_parts.append(part)
                 continue
 
-            cn_part = translations.get(part)
+            cn_part = translations.get((key, index))
             if cn_part is None:
                 cn_part = part
                 logger.error(f"无法找到卡牌名：{part}的翻译")

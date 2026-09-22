@@ -111,6 +111,21 @@ def align_manual_translations(template_obj, manual_obj, jobs: Sequence[Job]) -> 
     for job in jobs:
         jobs_by_key_path.setdefault(job.key_path, []).append(job)
 
+    def record_pairs(pairs, path: str) -> List[str]:
+        uids = []
+        for uid, value in pairs:
+            if uid not in jobs_by_uid:
+                result.errors.append(f"{path or '/'}: 找不到翻译任务 {uid}")
+                continue
+            previous = result.translations.get(uid)
+            if previous is not None and previous != value:
+                result.errors.append(f"{path or '/'}: 同一翻译任务对应了不同中文")
+                continue
+            result.translations[uid] = value
+            uids.append(uid)
+            align_tag_children(jobs_by_uid[uid], value, path)
+        return uids
+
     def align_tag_children(parent_job: Job, manual_value: str, path: str) -> None:
         """Align analyser jobs created for the values inside 5etools tags."""
         en_tags, en_values, en_valid = parse_custom_format(parent_job.en_str, False)
@@ -164,12 +179,25 @@ def align_manual_translations(template_obj, manual_obj, jobs: Sequence[Job]) -> 
             if not isinstance(manual, dict):
                 result.errors.append(f"{path or '/'}: 英文为对象，但中文不是对象")
                 return
+            used_manual_keys = set()
             for key, value in template.items():
-                if key not in manual:
+                manual_key = key if key in manual else None
+                if manual_key is None and isinstance(key, str) and _JOB_MARKER_RE.search(key):
+                    for candidate in manual:
+                        if candidate in used_manual_keys or not isinstance(candidate, str):
+                            continue
+                        pairs = _extract_marker_values(key, candidate)
+                        if pairs is None:
+                            continue
+                        record_pairs(pairs, _json_path(path, candidate))
+                        manual_key = candidate
+                        break
+                if manual_key is None:
                     if _contains_marker(value):
                         result.errors.append(f"{_json_path(path, key)}: 中文文件缺少字段")
                     continue
-                walk(value, manual[key], _json_path(path, key))
+                used_manual_keys.add(manual_key)
+                walk(value, manual[manual_key], _json_path(path, manual_key))
             return
         if isinstance(template, list):
             if not isinstance(manual, list):
@@ -191,18 +219,7 @@ def align_manual_translations(template_obj, manual_obj, jobs: Sequence[Job]) -> 
         if pairs is None:
             result.errors.append(f"{path or '/'}: 无法按固定文本边界对齐多个翻译片段")
             return
-        uids = []
-        for uid, value in pairs:
-            if uid not in jobs_by_uid:
-                result.errors.append(f"{path or '/'}: 找不到翻译任务 {uid}")
-                continue
-            previous = result.translations.get(uid)
-            if previous is not None and previous != value:
-                result.errors.append(f"{path or '/'}: 同一翻译任务对应了不同中文")
-                continue
-            result.translations[uid] = value
-            uids.append(uid)
-            align_tag_children(jobs_by_uid[uid], value, path)
+        uids = record_pairs(pairs, path)
         if uids:
             result.leaves.append(AlignedLeaf(path, manual, uids))
 
