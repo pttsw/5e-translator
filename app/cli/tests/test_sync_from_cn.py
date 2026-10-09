@@ -110,6 +110,31 @@ def test_align_manual_translations_handles_reordered_tags():
     assert result.translations[area.uid] == "第七章"
 
 
+def test_align_manual_translations_matches_reordered_repeated_tags_by_known_cn():
+    parent = Job(
+        "$.entry", "Use {@skill Acrobatics} or {@skill Athletics}.", None,
+        key_path="/entry",
+    )
+    acrobatics = Job(
+        "$.entry.skill[0].0", "Acrobatics", "特技",
+        tag="skill", key_path="/entry/skill[0]",
+    )
+    athletics = Job(
+        "$.entry.skill[1].0", "Athletics", "运动",
+        tag="skill", key_path="/entry/skill[1]",
+    )
+
+    result = align_manual_translations(
+        {"entry": "{!@ $.entry}"},
+        {"entry": "使用{@skill 运动}或{@skill 特技}。"},
+        [parent, acrobatics, athletics],
+    )
+
+    assert result.errors == []
+    assert result.translations[acrobatics.uid] == "特技"
+    assert result.translations[athletics.uid] == "运动"
+
+
 def test_align_manual_translations_keeps_first_ambiguous_repeated_tag_child():
     parent = Job(
         "$.entry",

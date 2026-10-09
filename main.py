@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 
 
 def _ensure_project_python():
@@ -211,12 +212,27 @@ def main():
         help='从手工中文 JSON 同步译文到数据库，并验证 translate 可复现结果',
     )
     sync_cn_parser.add_argument('--en', required=True, type=str,
-                                help='英文 JSON 文件路径')
-    sync_cn_parser.add_argument('--cn', required=True, type=str,
-                                help='手工中文 JSON 文件路径')
+                                help='英文 JSON 文件或目录路径')
+    sync_cn_parser.add_argument(
+        '--cn', default='', type=str,
+        help='手工中文 JSON 文件或目录路径；未指定时将 --en 中的 data-bak 替换为 data',
+    )
     sync_cn_parser.add_argument('--mode', default='5et', type=str,
                                 choices=('5et', 'splited', 'homebrew', 'plu', 'ua'),
                                 help='与 translate 相同的文件模式，默认 5et')
+    sync_cn_parser.add_argument('--preview', action='store_true',
+                                help='只读分析、分类并输出 JSON 报告，不写数据库')
+    sync_cn_parser.add_argument('--report', default='', type=str,
+                                help='预演 JSON 报告路径；未指定时输出到 stdout')
+    sync_cn_parser.add_argument('--include-matching', action='store_true',
+                                help='在预演报告中展开一致项（默认只统计数量）')
+    sync_cn_parser.add_argument('--decisions', default='', type=str,
+                                help='非交互冲突决策规则 JSON 文件')
+    sync_cn_parser.add_argument('--decision-log', default='', type=str,
+                                help='决策审计日志 JSON 路径')
+    sync_cn_parser.epilog = (
+        '目录模式逐文件提交；单文件失败不会回滚此前已成功提交的文件。'
+    )
     
     agent_parser = subparsers.add_parser('agent')
 
@@ -239,6 +255,7 @@ def main():
             JobProcessor,
             JsonAnalyser,
             JsonGenerator,
+            FoundryIdentifierStabilizer,
             KnowledgeSetter,
             NonAiFallbackSetter,
             TermSetter,
@@ -308,15 +325,14 @@ def main():
             pipeline = find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|KnowledgeSetter()|ByHandHandler()|TermSetter()
             if args.intermediate_cache:
                 pipeline = pipeline|write_translate_cache
-            pipeline = pipeline|processor|JsonGenerator(args.thread_num)|write_translate_cache
+            pipeline = pipeline|processor|JsonGenerator(args.thread_num)|FoundryIdentifierStabilizer()|write_translate_cache
         elif args.simple_mode:
             pipeline = find_json_files|JsonAnalyser()|NonAiFallbackSetter()
         else:
-            
-            pipeline = find_json_files|JsonAnalyser()|NonAiFallbackSetter()|JsonGenerator(args.thread_num)
+            pipeline = find_json_files|JsonAnalyser()|NonAiFallbackSetter()
             if args.intermediate_cache:
                 pipeline = pipeline|write_translate_cache
-            pipeline = pipeline|JsonGenerator(args.thread_num)|write_translate_cache
+            pipeline = pipeline|JsonGenerator(args.thread_num)|FoundryIdentifierStabilizer()|write_translate_cache
         res = pipeline.invoke((args.en, args.skip_file_name), config=config)
         # res = (find_json_files|JsonAnalyser()|JobNeedTranslateSetter()|write_translate_cache).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
         # res = (find_json_files|JsonAnalyser()).invoke(args.en, config={'byhand': args.byhand, 'force': args.force, 'force_title': args.force_title, 'mode': args.mode, 'cache': args.cache})
@@ -444,7 +460,6 @@ def main():
         print(result)
     elif args.function == 'retry-failed':
         # 从失败文件中读取 jobs 并重试
-        import json
         from app.core.translator import JobProcessor
         from app.core.utils import FileWorkInfo, Job
 
@@ -489,10 +504,73 @@ def main():
             res = sync_source_path(args.source_file, rebuild_jobs=not args.skip_jobs)
         print(res)
     elif args.function in ('sync-cn', 'sync-from-cn'):
-        from app.cli.sync_from_cn import print_sync_summary, sync_from_cn
+        from app.cli.sync_from_cn import (
+            build_decision_provider_from_rules, preview_sync_from_cn_path,
+            print_sync_summary, sync_from_cn_path, validate_preview_decisions,
+        )
 
-        summary = sync_from_cn(args.en, args.cn, mode=args.mode)
-        print_sync_summary(summary)
+        provider = None
+        if args.decisions:
+            with open(args.decisions, 'r', encoding='utf-8') as file:
+                provider = build_decision_provider_from_rules(json.load(file))
+        if args.preview:
+            report = preview_sync_from_cn_path(
+                args.en, args.cn, mode=args.mode,
+                include_matching=args.include_matching,
+            )
+            if provider is not None:
+                try:
+                    report['decision_log'] = validate_preview_decisions(report, provider)
+                except Exception as exc:
+                    if args.decision_log:
+                        with open(args.decision_log, 'w', encoding='utf-8') as file:
+                            json.dump({'summary': report['summary'],
+                                       'decisions': provider.log, 'error': str(exc)},
+                                      file, ensure_ascii=False, indent=2, sort_keys=True)
+                            file.write('\n')
+                    raise
+            payload = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
+            print(
+                '预演完成：'
+                f"共 {report['summary']['translated']} 个已对齐任务，"
+                f"冲突 {report['summary']['conflict']}，"
+                f"碰撞 {len(report['collisions'])}。",
+                file=sys.stderr,
+            )
+            if args.report:
+                with open(args.report, 'w', encoding='utf-8') as file:
+                    file.write(payload + '\n')
+            else:
+                print(payload)
+            if args.decision_log:
+                with open(args.decision_log, 'w', encoding='utf-8') as file:
+                    json.dump({'summary': report['summary'],
+                               'decisions': provider.log if provider else []},
+                              file, ensure_ascii=False, indent=2, sort_keys=True)
+                    file.write('\n')
+        else:
+            decisions = []
+            try:
+                summary = sync_from_cn_path(
+                    args.en, args.cn, mode=args.mode,
+                    decision_provider=provider, decision_log=decisions,
+                )
+            except Exception as exc:
+                if args.decision_log:
+                    with open(args.decision_log, 'w', encoding='utf-8') as file:
+                        json.dump({'summary': None, 'decisions': decisions,
+                                   'error': str(exc)}, file,
+                                  ensure_ascii=False, indent=2, sort_keys=True)
+                        file.write('\n')
+                raise
+            print_sync_summary(summary)
+            if args.decision_log:
+                with open(args.decision_log, 'w', encoding='utf-8') as file:
+                    json.dump({'summary': summary.__dict__, 'decisions': decisions},
+                              file, ensure_ascii=False, indent=2, sort_keys=True)
+                    file.write('\n')
+            if not summary.verified:
+                raise SystemExit(1)
     elif args.function == 'agent':
         from app.core.agent import DNDTranslatorAgent
         agent = DNDTranslatorAgent()

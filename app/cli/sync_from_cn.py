@@ -135,20 +135,55 @@ def align_manual_translations(template_obj, manual_obj, jobs: Sequence[Job]) -> 
         if not en_valid or not cn_valid or len(en_values) != len(cn_values):
             return
 
-        cn_values_by_tag: Dict[str, List[str]] = {}
-        for tag, value in zip(cn_tags, cn_values):
-            cn_values_by_tag.setdefault(tag, []).append(value)
-        tag_offsets: Dict[str, int] = {}
+        cn_values_by_tag: Dict[str, List[Tuple[int, str]]] = {}
+        for index, (tag, value) in enumerate(zip(cn_tags, cn_values)):
+            cn_values_by_tag.setdefault(tag, []).append((index, value))
+        used_cn_indexes = set()
+
+        def pure_parts(value: str) -> List[str]:
+            parts = []
+            for part in split_string(value):
+                without_prefix, _ = check_prefix(part)
+                pure, _ = check_suffix(without_prefix)
+                parts.append(pure)
+            return parts
+
+        def match_score(en_value: str, cn_value: str, candidates: Sequence[Job]) -> int:
+            """Use stable metadata and known translations to identify reordered tags."""
+            en_parts = pure_parts(en_value)
+            cn_parts = pure_parts(cn_value)
+            if len(en_parts) != len(cn_parts):
+                return -1
+            score = 0
+            for en_part, cn_part in zip(en_parts, cn_parts):
+                child = next((job for job in candidates if job.en_str == en_part), None)
+                if cn_part == en_part:
+                    score += 1
+                elif child is not None and child.cn_str == cn_part:
+                    score += 2
+            return score
 
         for index, (tag, en_value) in enumerate(zip(en_tags, en_values)):
-            tag_offset = tag_offsets.get(tag, 0)
-            matching_cn_values = cn_values_by_tag.get(tag, [])
-            if tag_offset >= len(matching_cn_values):
-                return
-            cn_value = matching_cn_values[tag_offset]
-            tag_offsets[tag] = tag_offset + 1
             child_path = f"{parent_job.key_path}/{tag}[{index}]"
             candidates = jobs_by_key_path.get(child_path, [])
+            available = [
+                item for item in cn_values_by_tag.get(tag, [])
+                if item[0] not in used_cn_indexes
+            ]
+            if not available:
+                return
+            scored = [
+                (match_score(en_value, cn_value, candidates), cn_index, cn_value)
+                for cn_index, cn_value in available
+            ]
+            best_score = max(score for score, _, _ in scored)
+            best = [item for item in scored if item[0] == best_score]
+            # Only reorder on positive, unambiguous evidence. Otherwise retain
+            # the old occurrence-order behavior as the conservative fallback.
+            _, cn_index, cn_value = (
+                best[0] if best_score > 0 and len(best) == 1 else scored[0]
+            )
+            used_cn_indexes.add(cn_index)
             en_parts = split_string(en_value)
             cn_parts = split_string(cn_value)
             if len(en_parts) != len(cn_parts):

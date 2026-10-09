@@ -7,3 +7,4 @@ from .job_need_translate_setter import JobNeedTranslateSetter
 from .byhand_handler import ByHandHandler
 from .batch_job_processor import BatchJobProcessor
 from .non_ai_fallback_setter import NonAiFallbackSetter
+from .foundry_identifier_stabilizer import FoundryIdentifierStabilizer
